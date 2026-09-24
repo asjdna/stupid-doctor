@@ -1,0 +1,11 @@
+{
+  "anchored_docs": 1200,
+  "pairs": 190,
+  "candidates": 190,
+  "screened": 55,
+  "stats": {
+    "要点检索不到": 135,
+    "通过": 55
+  },
+  "screen_top_k": 5
+}
