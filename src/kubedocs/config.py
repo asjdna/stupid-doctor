@@ -77,6 +77,9 @@ class Settings(BaseSettings):
     rerank_model: str = "BAAI/bge-reranker-base"
     rerank_top_k: int = 5
     max_context_chars: int = 8000
+    # 组装上下文时同一文档最多收录几段：同篇相邻小节的向量高度相似，
+    # 不限流会让一段答案被近重复片段挤满，上下文既冗余又少了别的来源。
+    max_chunks_per_doc: int = Field(default=2, ge=1, le=10)
 
     # ---------- 切块 ----------
     chunk_max_chars: int = Field(default=1200, ge=200)

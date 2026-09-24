@@ -48,9 +48,11 @@ class StubLLM:
                          cost_usd=self.cost)
 
 
-def _hit(i: int, title: str = "Doc", body: str = "Body text", crumb: str = "Sec") -> ChunkHit:
-    return ChunkHit(chunk_id=f"d{i}::0000", doc_id=f"d{i}", ordinal=0, title=title,
-                    breadcrumb=crumb, source_url=f"https://kubernetes.io/docs/d{i}/",
+def _hit(i: int, title: str = "Doc", body: str = "Body text", crumb: str = "Sec",
+         doc: str | None = None) -> ChunkHit:
+    d = doc if doc is not None else f"d{i}"
+    return ChunkHit(chunk_id=f"{d}::{i:04d}", doc_id=d, ordinal=i, title=title,
+                    breadcrumb=crumb, source_url=f"https://kubernetes.io/docs/{d}/",
                     body=body)
 
 
@@ -103,6 +105,45 @@ class TestBuildContext:
 
     def test_empty_input(self):
         assert build_context([]) == ("", [])
+
+
+class TestContextDiversity:
+    """同篇相邻小节的向量高度相似，会一起涌进前几名。
+
+    实测一次真实查询的前 4 段里有 3 段来自同一篇文档：既挤掉别的来源，
+    也让上下文冗余。限流是上下文组装的标准做法。
+    """
+
+    def _hits(self) -> list[ChunkHit]:
+        return [_hit(0, "A", doc="a"), _hit(1, "A", doc="a"), _hit(2, "A", doc="a"),
+                _hit(0, "B", body="other", doc="b")]
+
+    def test_default_caps_two_per_doc(self):
+        ctx, cites = build_context(self._hits())
+        assert [c.chunk_id for c in cites] == ["a::0000", "a::0001", "b::0000"]
+        assert "[3] B" in ctx
+
+    def test_cap_one_keeps_one_per_doc(self):
+        _ctx, cites = build_context(self._hits(), max_per_doc=1)
+        assert [c.chunk_id for c in cites] == ["a::0000", "b::0000"]
+
+    def test_numbering_stays_contiguous_after_skipping(self):
+        _ctx, cites = build_context(self._hits(), max_per_doc=1)
+        assert [c.index for c in cites] == [1, 2]
+
+    def test_never_returns_empty_when_there_are_hits(self):
+        """限流再狠也必须留下至少一段：宁可冗余，不可空手。"""
+        _ctx, cites = build_context([_hit(0, doc="a"), _hit(1, doc="a")], max_per_doc=1)
+        assert len(cites) == 1
+        ctx, cites2 = build_context([_hit(0, doc="a"), _hit(1, doc="a")],
+                                    max_per_doc=1, max_chars=1)
+        assert ctx and len(cites2) == 1
+
+    def test_single_doc_still_gets_capped_in_context(self):
+        ctx, cites = build_context(
+            [_hit(i, "A", doc="a") for i in range(5)], max_per_doc=2)
+        assert len(cites) == 2
+        assert "[3]" not in ctx
 
 
 # --------------------------------------------------------------------- 引用核对

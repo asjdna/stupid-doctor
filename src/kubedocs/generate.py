@@ -129,27 +129,40 @@ def context_text(body: str) -> str:
 
 
 def build_context(hits: Sequence[ChunkHit], *, max_chars: int = 8000,
-                  per_chunk_chars: int = 1200) -> tuple[str, list[Citation]]:
+                  per_chunk_chars: int = 1200, max_per_doc: int = 2,
+                  ) -> tuple[str, list[Citation]]:
     """把检索结果编号成上下文，返回 (上下文文本, 实际收录的引用)。
 
-    超出 `max_chars` 的片段会被**丢弃**，并且不会出现在引用列表里——
-    只给模型看了一部分片段，却允许它引用全部编号，是引用错位的常见来源。
+    两个刻意的约束：
+
+    - **超出 `max_chars` 的片段会被丢弃**，并且不会出现在引用列表里——
+      只给模型看了一部分片段，却允许它引用全部编号，是引用错位的常见来源。
+    - **同一文档最多收录 `max_per_doc` 段**。检索是按"块"打的，同一篇文档里
+      相邻小节的向量往往高度相似，会一起涌进前几名（实测一次查询的前 4 段里
+      有 3 段来自同一篇）。这些近重复片段既挤掉别的文档，也让上下文冗余。
+      限流后引用编号仍然连续（按收录顺序重编）。
     """
     blocks: list[str] = []
     citations: list[Citation] = []
+    per_doc: dict[str, int] = {}
     used = 0
-    for i, hit in enumerate(hits, start=1):
+    for hit in hits:
+        if per_doc.get(hit.doc_id, 0) >= max_per_doc and citations:
+            # citations 非空才允许跳过：第一段必须保留，
+            # 否则"有结果"会退化成"没结果"（宁可上下文冗余，不可空手）
+            continue
         label = f"{hit.title} › {hit.breadcrumb}" if hit.breadcrumb else hit.title
         body = context_text(hit.body)
         if len(body) > per_chunk_chars:
             body = body[:per_chunk_chars].rstrip() + " …"
-        block = f"[{i}] {label}\n{body}"
+        idx = len(citations) + 1
+        block = f"[{idx}] {label}\n{body}"
         if used + len(block) > max_chars and citations:
-            # 至少保留一段，否则会把"有结果"退化成"没结果"
             break
         blocks.append(block)
-        citations.append(Citation(index=i, chunk_id=hit.chunk_id, title=hit.title,
+        citations.append(Citation(index=idx, chunk_id=hit.chunk_id, title=hit.title,
                                   breadcrumb=hit.breadcrumb, source_url=hit.source_url))
+        per_doc[hit.doc_id] = per_doc.get(hit.doc_id, 0) + 1
         used += len(block)
     return "\n\n".join(blocks), citations
 
@@ -343,6 +356,7 @@ class Answerer:
                       breadcrumb=h.breadcrumb, source_url=h.source_url, body=h.body)
              for h in hits],
             max_chars=self.settings.max_context_chars,
+            max_per_doc=self.settings.max_chunks_per_doc,
         )
         ans.citations = citations
 
