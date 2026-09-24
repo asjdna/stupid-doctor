@@ -1,0 +1,13 @@
+# 归一化换行符：CI 跑 ubuntu、开发机是 Windows，不约定的话每次提交都是整文件 diff
+* text=auto eol=lf
+*.cmd text eol=crlf
+*.bat text eol=crlf
+
+# 二进制/数据：禁止换行与编码转换
+*.npy  binary
+*.npz  binary
+*.parquet binary
+*.gz   binary
+*.png  binary
+*.jpg  binary
+*.ico  binary

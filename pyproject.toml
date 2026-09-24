@@ -1,0 +1,106 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "kubedocs"
+version = "0.1.0"
+description = "面向 Kubernetes 官方文档的工业级 RAG 服务：混合检索 + 重排 + 带引用回答 + 评测闸门 + 可观测"
+requires-python = ">=3.10"
+dependencies = [
+    # Web / API
+    "fastapi>=0.115",
+    "uvicorn[standard]>=0.30",
+    "sse-starlette>=2.1",
+    # 配置与校验
+    "pydantic>=2.7",
+    "pydantic-settings>=2.3",
+    # 存储
+    "psycopg[binary,pool]>=3.2",   # Postgres（pgvector + 全文检索都走它）
+    "pgvector>=0.3",               # vector 类型适配
+    "redis>=5.0",
+    # 模型
+    "litellm>=1.50",               # 多供应商路由/重试/回退/成本统计
+    "sentence-transformers>=3.0",  # 本地嵌入（可换成 API，见 embedder 抽象）
+    "langgraph>=0.2",              # Agent 编排（耐久状态 + 中断）
+    # 可观测
+    "prometheus-client>=0.20",
+    "opentelemetry-sdk>=1.25",
+    "opentelemetry-exporter-otlp-proto-http>=1.25",
+    # 杂项
+    "httpx>=0.27",
+    "orjson>=3.10",
+    "tenacity>=8.5",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.2",
+    "pytest-asyncio>=0.23",
+    "pytest-cov>=5.0",
+    "respx>=0.21",        # httpx 打桩
+    "ruff>=0.6",
+    "mypy>=1.11",
+    "types-redis",
+]
+eval = [
+    "ragas>=0.2",          # 行业口径的 RAG 指标（与自建闸门并存）
+    "deepeval>=1.0",
+]
+
+[project.scripts]
+kubedocs = "kubedocs.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+# ---------------------------------------------------------------------------
+# 工具链：全部**阻塞**，与 CI 一致。风格类规则（导入排序、% 格式化）不在闸门内——
+# 闸门只抓能造成真问题的规则。
+# ---------------------------------------------------------------------------
+[tool.ruff]
+line-length = 110
+target-version = "py310"
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "B", "I", "UP", "S", "C4", "RET", "SIM"]
+ignore = [
+    "E501",   # 行长由 formatter 决定
+    "S101",   # 测试里用 assert 是正常的
+    "B008",   # FastAPI 的 Depends() 默认参数是框架约定
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["S105", "S106"]   # 测试里的假口令/假 key
+
+[tool.ruff.lint.isort]
+known-first-party = ["kubedocs"]
+
+[tool.mypy]
+python_version = "3.10"
+warn_unused_ignores = true
+no_implicit_optional = true
+warn_redundant_casts = true
+warn_return_any = true
+disallow_untyped_defs = true
+check_untyped_defs = true
+ignore_missing_imports = true
+files = ["src", "scripts"]
+
+[[tool.mypy.overrides]]
+module = ["tests.*"]
+disallow_untyped_defs = false
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q --strict-markers"
+markers = [
+    "integration: 需要真实 Postgres/Redis（无 Docker 时自动跳过）",
+    "slow: 需要加载嵌入模型或调用真实 LLM",
+]
+asyncio_mode = "auto"
+
+[tool.coverage.run]
+source = ["src/kubedocs"]
+omit = ["*/tests/*"]
