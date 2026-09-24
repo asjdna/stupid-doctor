@@ -239,6 +239,29 @@ class TestAnswerer:
         assert ans.citations, "降级时仍应给出检索来源"
         assert any("仅返回检索结果" in d for d in ans.degraded)
 
+    def test_provider_error_degrades_instead_of_crashing(self, settings):
+        """供应商侧失败（401/429/超时/宕机）不该让整个请求崩掉。
+
+        检索结果本身有价值：用户应当拿到它 + 一句明确的失败原因，
+        而且异常类型必须记进诊断——否则就成了静默吞异常。
+        """
+
+        class AuthenticationError(Exception):
+            pass
+
+        llm = StubLLM(raises=AuthenticationError("invalid api key"))
+        ans = _answerer(settings, [_hit(1)], llm).answer("q")
+        assert ans.refused is True
+        assert "AuthenticationError" in ans.refusal_reason
+        assert "invalid api key" in ans.refusal_reason
+        assert ans.citations, "生成失败时仍应返回检索来源"
+        assert any("仅返回检索结果" in d for d in ans.degraded)
+
+    def test_unexpected_error_is_recorded_not_swallowed(self, settings):
+        ans = _answerer(settings, [_hit(1)], StubLLM(raises=RuntimeError("boom"))).answer("q")
+        assert ans.refused is True
+        assert "RuntimeError" in ans.refusal_reason
+
     def test_budget_exceeded_refuses_before_calling(self, settings):
         settings.llm_daily_budget_usd = 0.1
         a = _answerer(settings, [_hit(1)], StubLLM())

@@ -258,7 +258,8 @@ def build_parser() -> argparse.ArgumentParser:
                         parents=[common])
     pi.add_argument("--rebuild", action="store_true", help="先清空索引再全量重建")
     pi.add_argument("--limit-files", type=int, default=None, help="只处理前 N 个文件（冒烟用）")
-    pi.add_argument("--batch-files", type=int, default=200, help="每批提交的文件数")
+    pi.add_argument("--batch-files", type=int, default=60,
+                    help="每批提交的文件数（越小越不容易因中断丢工作，默认 60）")
     pi.set_defaults(func=cmd_ingest)
 
     ps = sub.add_parser("search", help="混合检索", parents=[common])

@@ -138,10 +138,15 @@ def ingest(
     *,
     rebuild: bool = False,
     limit_files: int | None = None,
-    batch_files: int = 200,
+    batch_files: int = 60,
     progress: Callable[[str], None] | None = None,
 ) -> IngestReport:
-    """跑一次摄取。`progress` 收到的是人类可读的进度行。"""
+    """跑一次摄取。`progress` 收到的是人类可读的进度行。
+
+    `batch_files` 默认取小值（60）而不是"一批干完"：批大小决定了**中断时最多丢多少工作**。
+    实测全量语料下每 250 个文件的编码要 8 分钟以上，其间一次崩溃就会丢掉全部
+    （本项目在真实运行中就丢过一次）。分批提交的额外代价只是多几次矩阵重写，可忽略。
+    """
     log = progress or (lambda _msg: None)
     report = IngestReport()
     t0 = time.perf_counter()

@@ -363,6 +363,14 @@ class Answerer:
             ans.refusal_reason = str(e)
             ans.degraded.append("仅返回检索结果（生成回答不可用）")
             return ans
+        except Exception as e:  # noqa: BLE001
+            # 供应商侧的失败（密钥无效 401、限流 429、超时、服务不可用）不该让整个请求崩掉：
+            # 检索结果本身是有价值的，用户应当拿到它 + 一句明确的失败原因。
+            # 但**必须把异常类型记进诊断**，否则就成了静默吞异常。
+            ans.refused = True
+            ans.refusal_reason = f"调用大模型失败：{type(e).__name__}: {e}"
+            ans.degraded.append("仅返回检索结果（生成回答失败）")
+            return ans
 
         ans.text, problems = validate_citations(result.text, len(citations))
         ans.prompt_tokens = result.prompt_tokens
