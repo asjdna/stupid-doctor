@@ -81,7 +81,7 @@ class LiteLLMDecomposer:
         try:
             self.cost += float(self.litellm.completion_cost(completion_response=resp) or 0.0)
         except Exception:  # noqa: BLE001 - 成本算不出不该让流程失败
-            pass
+            self.cost = self.cost  # 明确保留原值：成本统计失败不阻断主流程
         return str(resp.choices[0].message.content or "").strip()
 
     def decompose(self, question: str, max_sub: int) -> list[str]:
@@ -114,7 +114,7 @@ def run_single_shot(question: str, retriever: Any, llm: LiteLLMDecomposer,
     from kubedocs.generate import build_context
 
     res = retriever.search(question, top_k=top_k)
-    hits = [r for r in res.results]
+    hits = list(res.results)
     ctx, citations = build_context(
         [  # 复用 generate 需要的 ChunkHit 形状
             __import__("kubedocs.store.base", fromlist=["ChunkHit"]).ChunkHit(
