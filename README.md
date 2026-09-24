@@ -18,10 +18,9 @@
 | 本地索引：SQLite + FTS5 + numpy 向量 | ✅ 已验证（21 单测，含 FTS 一致性自检） |
 | 增量/幂等摄取（文档级 + 块级跳过） | ✅ 已验证（14 单测，含 rowid 回收回归） |
 | 混合检索 + RRF 融合 + 单路消融 | ✅ 已验证（12 单测） |
+| 带引用回答 + 拒答 + 预算上限 | ✅ 已验证（23 单测，全部用打桩 LLM，不花钱） |
 | 金标集（50 条）+ 指标 + 闸门 | ✅ 已验证（指标手算对照 + 闸门能红） |
 | 全量语料端到端索引与评测 | 🔄 进行中（见下） |
-| 带引用回答生成（LiteLLM） | 🚧 未开始 |
-| LangGraph Agent / `/ask` SSE / OTel / Prometheus | 🚧 未开始 |
 | `docker compose up` 全栈 | ⚠️ **文件已写，本机 Docker Hub 不可达，未实测** |
 
 > 本项目坚持一件事：**没跑过的就不写"已完成"**。
@@ -78,6 +77,21 @@
 **检索链路**：`query → 两路并行召回(FTS5 + 向量) → RRF 融合 → 重排(可选) → 结果带引用`
 每一段都有耗时与降级诊断（`search --explain` / `--json` 可见）。
 
+**回答链路**：`检索 → 编号组装上下文 → LLM → 引用核对 → 带引用回答 或 拒答`
+
+回答层的三条硬规则（都有单测）：
+
+1. **只依据检索到的片段回答**，每个论断带 `[n]` 引用，与来源编号一一对应；
+2. **检索为空就不调用 LLM**，直接拒答——既省成本，也不给模型"凭空作答"的机会。
+   这条是可断言的（单测直接断言打桩 LLM **一次都没被调用**）；
+3. **引用标记必须可核对**：`[n]` 只能指向真实提供的那 n 段片段；模型编出 `[99]`
+   会被剥掉并记入诊断。**指向不存在来源的引用，比没有引用更有误导性。**
+   回答里一个引用都没有，同样会被标记出来。
+
+另外两条工程约束：系统提示明确要求**标识符逐字保留**（参数名/字段名/命令/错误码
+不得翻译或缩写——对技术文档问答来说改写标识符等于答错）；LLM 花费按日累计落盘，
+**到达上限即拒绝新调用**，而不是悄悄烧钱。
+
 ---
 
 ## 快速开始（本机，无需 Docker）
@@ -96,10 +110,13 @@ python -m kubedocs.cli --hf-endpoint https://hf-mirror.com ingest
 # 3) 检索
 python -m kubedocs.cli search "how do I stop a container using too much memory" --explain
 
-# 4) 索引体检（含 FTS 一致性自检）
+# 4) 带引用回答（需要 LLM 密钥；没有密钥时只返回检索结果 + 明确原因，不会崩）
+python -m kubedocs.cli ask "怎么限制一个 Pod 的 CPU？" --show-context
+
+# 5) 索引体检（含 FTS 一致性自检）
 python -m kubedocs.cli stats --verify
 
-# 5) 评测：先预检标注集，再评测并卡闸门
+# 6) 评测：先预检标注集，再评测并卡闸门
 python scripts/check_gold.py
 python -m kubedocs.cli eval --write-baseline      # 首次冻结基线
 python -m kubedocs.cli eval --gate                # 之后每次回归检查
@@ -215,10 +232,11 @@ python -m kubedocs.cli --provider hashing ingest --limit-files 100
 - [x] 骨架 + 语料 + 切块器 + RRF（里程碑 1）
 - [x] 本地索引（SQLite+FTS5+numpy）+ 幂等/增量摄取（里程碑 2）
 - [x] 混合检索 + RRF + 单路消融（里程碑 3）
-- [x] 金标集 + 指标 + 自检 + 基线闸门（里程碑 4）
-- [ ] 带引用回答生成（LiteLLM）+ 拒答策略（里程碑 5）
+- [x] 带引用回答 + 拒答 + 预算上限（里程碑 4）
+- [x] 金标集 + 指标 + 自检 + 基线闸门（里程碑 5）
 - [ ] LangGraph Agent（检索不足时重试/改查）+ OTel/Prometheus（里程碑 6）
 - [ ] FastAPI `/healthz` `/search` `/ask`(SSE) `/metrics`（里程碑 7）
 - [ ] pgvector 生产实现（同一 `Store` 协议）+ 对照评测（里程碑 8）
-- [ ] 嵌入量化/ONNX 提速 + k6 压测 + P95/成本 SLO（里程碑 9）
+- [ ] 精排（cross-encoder）用真实模型实测收益（里程碑 9）
+- [ ] 嵌入量化/ONNX 提速 + k6 压测 + P95/成本 SLO（里程碑 10）
 - [ ] Docker 全栈实测（受限于本机 Docker Hub 不可达）

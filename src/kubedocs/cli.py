@@ -128,6 +128,36 @@ def cmd_search(args: argparse.Namespace) -> int:
         store.close()
 
 
+# --------------------------------------------------------------------------- ask
+def cmd_ask(args: argparse.Namespace) -> int:
+    from kubedocs.embed import build_embedder
+    from kubedocs.generate import build_answerer
+    from kubedocs.retrieve.hybrid import HybridRetriever
+
+    settings = make_settings(args)
+    store = open_store(settings)
+    try:
+        retriever = HybridRetriever(store, build_embedder(settings), settings)
+        ans = build_answerer(retriever, settings).answer(args.question, top_k=args.top_k)
+        if args.json:
+            print(json.dumps(ans.to_json(), ensure_ascii=False, indent=2))
+            return EXIT_OK
+        print(ans.render())
+        if args.show_context and ans.retrieval is not None:
+            print("\n--- 提供给模型的上下文 ---")
+            from kubedocs.generate import build_context
+            from kubedocs.store.base import ChunkHit
+            ctx, _ = build_context(
+                [ChunkHit(chunk_id=r.chunk_id, doc_id=r.doc_id, ordinal=r.ordinal,
+                          title=r.title, breadcrumb=r.breadcrumb, source_url=r.source_url,
+                          body=r.body) for r in ans.retrieval.results],
+                max_chars=settings.max_context_chars)
+            print(ctx)
+        return EXIT_OK
+    finally:
+        store.close()
+
+
 # --------------------------------------------------------------------------- stats
 def cmd_stats(args: argparse.Namespace) -> int:
     settings = make_settings(args)
@@ -185,6 +215,25 @@ def cmd_eval(args: argparse.Namespace) -> int:
 
 
 # --------------------------------------------------------------------------- 解析
+def _add_globals(p: argparse.ArgumentParser, default: object) -> None:
+    """全局参数（放在主解析器与每个子解析器上，两处都能写）。
+
+    为什么两边都要加：只挂在主解析器上时，`kubedocs ingest --index-dir X`
+    会被判为"无法识别的参数"——用户几乎必然这么写一次。
+    子解析器上的副本用 `default=SUPPRESS`：不写就**不设属性**，
+    从而不会用 None 覆盖掉主解析器已经解析到的值（这是 argparse 的经典坑）。
+    """
+    p.add_argument("--index-dir", default=default, help="索引目录（默认 data/index）")
+    p.add_argument("--corpus-dir", default=default, help="语料目录（默认 data/raw/k8s-docs）")
+    p.add_argument("--provider", choices=["bge", "hashing"], default=default,
+                   help="嵌入器（bge=真实向量，hashing=离线降级）")
+    p.add_argument("--hf-endpoint", default=default,
+                   help="模型下载源（受限网络下指向镜像）")
+    p.add_argument("--hf-offline", action="store_true", default=default,
+                   help="模型已缓存时跳过联网校验（受限网络下必需，否则载入会挂死）")
+    p.add_argument("--log-level", default=default, help="日志级别")
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         prog="kubedocs",
@@ -195,38 +244,44 @@ def build_parser() -> argparse.ArgumentParser:
             "  1) python scripts/fetch_corpus.py          # 拉语料（一次就够）\n"
             "  2) python -m kubedocs.cli ingest           # 建索引\n"
             "  3) python -m kubedocs.cli search \"...\"     # 检索\n"
-            "  4) python -m kubedocs.cli eval --gate      # 评测并卡闸门\n"
+            "  4) python -m kubedocs.cli ask \"...\"        # 带引用回答（需 LLM 密钥）\n"
+            "  5) python -m kubedocs.cli eval --gate      # 评测并卡闸门\n\n"
+            "全局参数（--index-dir/--provider 等）放在子命令前后都可以。\n"
         ),
     )
-    p.add_argument("--index-dir", help="索引目录（默认 data/index）")
-    p.add_argument("--corpus-dir", help="语料目录（默认 data/raw/k8s-docs）")
-    p.add_argument("--provider", choices=["bge", "hashing"],
-                   help="嵌入器（bge=真实向量，hashing=离线降级）")
-    p.add_argument("--hf-endpoint", help="模型下载源（受限网络下指向镜像）")
-    p.add_argument("--hf-offline", action="store_true",
-                   help="模型已缓存时跳过联网校验（受限网络下必需，否则载入会挂死）")
-    p.add_argument("--log-level", help="日志级别")
+    _add_globals(p, None)
+    common = argparse.ArgumentParser(add_help=False)
+    _add_globals(common, argparse.SUPPRESS)
     sub = p.add_subparsers(dest="cmd", required=True)
 
-    pi = sub.add_parser("ingest", help="把语料切块、编码并写入索引（增量）")
+    pi = sub.add_parser("ingest", help="把语料切块、编码并写入索引（增量）",
+                        parents=[common])
     pi.add_argument("--rebuild", action="store_true", help="先清空索引再全量重建")
     pi.add_argument("--limit-files", type=int, default=None, help="只处理前 N 个文件（冒烟用）")
     pi.add_argument("--batch-files", type=int, default=200, help="每批提交的文件数")
     pi.set_defaults(func=cmd_ingest)
 
-    ps = sub.add_parser("search", help="混合检索")
+    ps = sub.add_parser("search", help="混合检索", parents=[common])
     ps.add_argument("query")
     ps.add_argument("--top-k", type=int, default=None)
     ps.add_argument("--explain", action="store_true", help="打印每条的排序依据")
     ps.add_argument("--json", action="store_true")
     ps.set_defaults(func=cmd_search)
 
-    pt = sub.add_parser("stats", help="索引体检")
+    pt = sub.add_parser("stats", help="索引体检", parents=[common])
     pt.add_argument("--verify", action="store_true", help="顺便做 FTS 一致性自检")
     pt.add_argument("--json", action="store_true")
     pt.set_defaults(func=cmd_stats)
 
-    pe = sub.add_parser("eval", help="在标注集上评测检索质量")
+    pa = sub.add_parser("ask", help="带引用回答（需要 LLM 密钥；无密钥时只返回检索结果）",
+                        parents=[common])
+    pa.add_argument("question")
+    pa.add_argument("--top-k", type=int, default=None)
+    pa.add_argument("--show-context", action="store_true", help="打印实际送给模型的上下文")
+    pa.add_argument("--json", action="store_true")
+    pa.set_defaults(func=cmd_ask)
+
+    pe = sub.add_parser("eval", help="在标注集上评测检索质量", parents=[common])
     pe.add_argument("--gold", default="data/eval/retrieval_gold.jsonl")
     pe.add_argument("--baseline", default="data/eval/retrieval_baseline.json")
     pe.add_argument("--top-k", type=int, default=10)
