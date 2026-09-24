@@ -64,7 +64,7 @@ _TOKEN_RE = re.compile(r"[A-Za-z0-9_][A-Za-z0-9_.-]*|[\u4e00-\u9fff]")
 _QUESTION_MARK_RE = re.compile(r"[?？]")
 """半角与全角问号都算。"""
 
-_CONJUNCTION_RE = re.compile(r"以及|同时|并且|和")
+_CONJUNCTION_RE = re.compile(r"as well as|versus|and|plus|以及|同时|并且|和")
 """并列连词。只收这几个：覆盖"一句话里塞了两件事"的主要写法，误判可控。"""
 
 
