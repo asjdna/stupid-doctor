@@ -1,0 +1,37 @@
+{"id": "r01", "kind": "redline_trigger", "text": "我现在胸痛", "expect_red_line": true, "note": "最典型的红线"}
+{"id": "r02", "kind": "redline_trigger", "text": "胸痛，喘不上气", "expect_red_line": true, "note": "多症状共现"}
+{"id": "r03", "kind": "redline_trigger", "text": "突然就晕倒了", "expect_red_line": true, "note": ""}
+{"id": "r04", "kind": "redline_trigger", "text": "半边身子不能动", "expect_red_line": true, "note": "卒中征象"}
+{"id": "r05", "kind": "redline_trigger", "text": "吐了好多血", "expect_red_line": true, "note": ""}
+{"id": "r06", "kind": "redline_trigger", "text": "意识不清，叫他也不应", "expect_red_line": true, "note": ""}
+{"id": "r07", "kind": "redline_trigger", "text": "我最近总是憋得慌，晚上躺下更明显", "expect_red_line": true, "note": "口语表达"}
+{"id": "r08", "kind": "redline_trigger", "text": "说话不清楚，嘴角也有点歪", "expect_red_line": true, "note": ""}
+{"id": "n01", "kind": "redline_other", "text": "我老公胸痛，我没事", "expect_red_line": false, "note": "经验者=家属：不能把患者本人送急诊"}
+{"id": "n02", "kind": "redline_other", "text": "我父亲昨天说心口疼", "expect_red_line": false, "note": "家属 + 既往"}
+{"id": "n03", "kind": "redline_other", "text": "我家孩子喘不上气，要不要去医院", "expect_red_line": false, "note": "家属（孩子）"}
+{"id": "n04", "kind": "redline_other", "text": "朋友说他突然看不清了", "expect_red_line": false, "note": "他人"}
+{"id": "p01", "kind": "redline_past", "text": "我去年胸痛过一次，现在好了", "expect_red_line": false, "note": "时间性=既往"}
+{"id": "p02", "kind": "redline_past", "text": "以前有过晕倒，这几年没再犯", "expect_red_line": false, "note": ""}
+{"id": "p03", "kind": "redline_past", "text": "小时候憋得慌过，早就好了", "expect_red_line": false, "note": ""}
+{"id": "g01", "kind": "redline_negated", "text": "我没有胸痛", "expect_red_line": false, "note": "状态=否认"}
+{"id": "g02", "kind": "redline_negated", "text": "不喘，就是有点咳嗽", "expect_red_line": false, "note": ""}
+{"id": "g03", "kind": "redline_negated", "text": "没有晕倒过，也没有意识不清", "expect_red_line": false, "note": ""}
+{"id": "h01", "kind": "redline_hypothetical", "text": "如果胸痛的话要不要去医院", "expect_red_line": false, "note": "状态=假设"}
+{"id": "h02", "kind": "redline_hypothetical", "text": "万一突然晕倒怎么办", "expect_red_line": false, "note": ""}
+{"id": "h03", "kind": "redline_hypothetical", "text": "假如出现呼吸困难该怎么处理", "expect_red_line": false, "note": ""}
+{"id": "u01", "kind": "redline_uncertain", "text": "医生说不能排除胸痛的可能", "expect_red_line": true, "note": "possible 属于可上报：宁可多报不可漏报"}
+{"id": "s01", "kind": "safe_normal", "text": "我最近总是咳嗽", "expect_red_line": false, "note": "普通症状不应触发"}
+{"id": "s02", "kind": "safe_normal", "text": "这两天有点头痛，睡不好", "expect_red_line": false, "note": ""}
+{"id": "s03", "kind": "safe_normal", "text": "肚子有点不舒服，吃不下饭", "expect_red_line": false, "note": ""}
+{"id": "s04", "kind": "safe_normal", "text": "皮肤起了疹子，有点痒", "expect_red_line": false, "note": ""}
+{"id": "b01", "kind": "booking_intent", "text": "帮我挂个号", "expect_booking": true, "note": "变体词：中间插了「个」"}
+{"id": "b02", "kind": "booking_intent", "text": "我要挂号", "expect_booking": true, "note": ""}
+{"id": "b03", "kind": "booking_intent", "text": "能不能帮我预约一下", "expect_booking": true, "note": ""}
+{"id": "b04", "kind": "booking_intent", "text": "我想取号", "expect_booking": true, "note": ""}
+{"id": "b05", "kind": "booking_intent", "text": "我最近咳嗽", "expect_booking": false, "note": "反例：描述症状不是挂号"}
+{"id": "b06", "kind": "booking_intent", "text": "头痛吃什么药", "expect_booking": false, "note": "反例：问药不是挂号"}
+{"id": "t01", "kind": "triage_department", "text": "我咳嗽还有点发热", "expect_department": "呼吸内科", "note": "依赖知识卡片语料；缺语料时该指标标为未评测"}
+{"id": "t02", "kind": "triage_department", "text": "头痛得厉害，还怕光", "expect_department": "神经内科", "note": ""}
+{"id": "t03", "kind": "triage_department", "text": "反酸烧心，饭后更明显", "expect_department": "消化内科", "note": ""}
+{"id": "t04", "kind": "triage_department", "text": "皮肤痒，起了红疹", "expect_department": "皮肤科", "note": ""}
+{"id": "t05", "kind": "triage_department", "text": "耳朵疼，听不太清", "expect_department": "耳鼻喉科", "note": ""}

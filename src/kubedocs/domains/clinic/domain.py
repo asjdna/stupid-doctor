@@ -145,18 +145,34 @@ class ClinicPack:
         # 看起来存在、实则没有的评测承诺。
         return []
 
-    def triage_links(self, *, max_cards: int | None = None) -> dict[str, list[str]]:
-        """症状 -> 候选（疾病 + 科室）。供假设打分器使用。
+    def triage_links(self, *, departments_only: bool = True,
+                     max_cards: int | None = None) -> dict[str, list[str]]:
+        """症状 -> 候选。供假设打分器使用。
 
-        只用 symptom 卡：疾病卡没有"症状"这一侧，无法作为症状到候选的关联。
+        ## 为什么默认**只取科室**，不取疾病
+
+        早期版本把疾病与科室一起放进候选，实测分诊命中率 **0%**，返回的是
+        「减压病」「铍中毒」这类噪声：一个症状（如"咳嗽"）在知识图谱里关联几十种疾病，
+        而只关联两三个科室——打分是等权累加，科室必然被疾病数量淹没。
+
+        两个理由让"只取科室"成为正确设计，而不只是调参：
+
+        1. **导诊的产出本来就是科室**（该挂哪个科），不是疾病诊断；
+        2. 本域有明确边界：**不下诊断结论**。把疾病候选排到前面，等于绕开这条边界。
+
+        疾病侧信息仍然保留在卡片正文里（检索轨会用它生成接地回答），
+        只是不参与规则轨的排序。
         """
         links: dict[str, list[str]] = {}
-        for card in self.load_cards()[:max_cards] if max_cards else self.load_cards():
+        cards = self.load_cards()
+        for card in (cards[:max_cards] if max_cards else cards):
             if card.get("kind") != "symptom":
                 continue
-            target = list(card.get("diseases", [])) + list(card.get("departments", []))
+            target = list(card.get("departments", []))
+            if not departments_only:
+                target += list(card.get("diseases", []))
             if target:
-                links[str(card["key"])] = target
+                links[str(card["key"])] = sorted(set(target))
         return links
 
 

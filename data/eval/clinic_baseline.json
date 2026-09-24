@@ -1,0 +1,35 @@
+{
+  "schema": 1,
+  "metrics": {
+    "n_cases": 26,
+    "redline": {
+      "recall": 1.0,
+      "false_positive_rate": 0.0,
+      "tp": 9,
+      "fn": 0,
+      "fp": 0,
+      "tn": 17,
+      "missed": [],
+      "false_alarms": []
+    },
+    "booking": {
+      "accuracy": 1.0,
+      "correct": 6,
+      "total": 6,
+      "wrong": []
+    },
+    "triage": {
+      "evaluated": true,
+      "accuracy": 0.0,
+      "hit": 0,
+      "total": 5,
+      "missed": [
+        "t01 期望 呼吸内科，实际 []",
+        "t02 期望 神经内科，实际 []",
+        "t03 期望 消化内科，实际 []",
+        "t04 期望 皮肤科，实际 ['急诊科', '感染科', '肛肠科']",
+        "t05 期望 耳鼻喉科，实际 []"
+      ]
+    }
+  }
+}
