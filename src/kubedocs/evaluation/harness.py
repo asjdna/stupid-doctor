@@ -281,6 +281,16 @@ def run_eval(args: Namespace, settings: Settings, store: SqliteStore) -> int:
     print(f"索引：{st.n_chunks} 块 / {st.n_docs} 文档，{st.embedding_model}（{st.embedding_dim} 维）")
 
     retriever = HybridRetriever(store, build_embedder(settings), settings)
+
+    # 预热：sentence-transformers 的**首次** encode 含模块导入与权重载入
+    # （本机实测约 20 秒）。把它算进第一个查询的延迟会污染 p50/p95，
+    # 让"检索延迟"这个指标完全失真。所以先空跑一次并单独报告冷启动。
+    t_cold = time.perf_counter()
+    if rows:
+        retriever.search(rows[0].q, top_k=1)
+    cold_s = time.perf_counter() - t_cold
+    print(f"预热完成：冷启动 {cold_s:.1f}s（不计入下面的延迟统计）")
+
     modes = ["hybrid"] if args.no_ablation else list(MODES)
     k = args.top_k
     results: dict[str, ModeResult] = {}
