@@ -22,6 +22,8 @@ htmlcov/
 # 数据（原始语料与派生语料都不入库：由 scripts/fetch_corpus.py 与摄取管线重建）
 data/raw/
 data/derived/
+# 本地索引可完整重建，且体积大（向量矩阵 ~30MB + SQLite）；注意 data/eval/ 必须入库
+data/index/
 .cache/
 
 # 运行产物

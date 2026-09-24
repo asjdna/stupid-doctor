@@ -1,0 +1,83 @@
+"""配置测试：路径锚定、有效嵌入模型标识、校验器。"""
+from __future__ import annotations
+
+from pathlib import Path
+
+import pytest
+
+from kubedocs.config import Settings, repo_root
+
+
+class TestPathAnchoring:
+    """相对路径必须锚定仓库根，绝不锚定进程 cwd。
+
+    这是上一代项目踩过的坑：包被移动一层后，`__file__` 相对路径静默指向空目录，
+    表现为"库里明明有数据却搜不到"，排查成本极高。
+    """
+
+    def test_relative_paths_resolve_under_repo_root(self):
+        s = Settings(index_dir="data/index", corpus_dir="data/raw/k8s-docs")
+        assert s.index_path.is_absolute()
+        assert s.index_path == repo_root() / "data" / "index"
+        assert s.corpus_path == repo_root() / "data" / "raw" / "k8s-docs"
+        assert s.sqlite_path.parent == s.index_path
+        assert s.vector_path.parent == s.index_path
+
+    def test_absolute_paths_are_respected(self, tmp_path: Path):
+        s = Settings(index_dir=str(tmp_path / "x"), corpus_dir=str(tmp_path / "y"))
+        assert s.index_path == tmp_path / "x"
+        assert s.corpus_path == tmp_path / "y"
+
+    def test_index_files_live_inside_index_dir(self, tmp_path: Path):
+        s = Settings(index_dir=str(tmp_path))
+        assert s.sqlite_path.name == "kubedocs.db"
+        assert s.vector_path.name == "chunk_vectors.npy"
+
+
+class TestEffectiveEmbeddingModel:
+    """索引里记的必须是**真正决定向量空间**的标识。
+
+    否则一次 hashing 运行与一次真实模型运行会记成同一个模型名，
+    闸门就会拿两种完全不同质量的运行互相比——静默的错误结论。
+    """
+
+    def test_hashing_reports_its_own_identity(self):
+        s = Settings(embedding_provider="hashing", embedding_dim=384,
+                     embedding_model="BAAI/bge-small-en-v1.5")
+        assert s.effective_embedding_model == "hashing-384"
+        assert s.effective_embedding_model != s.embedding_model
+
+    def test_bge_reports_the_model_name(self):
+        s = Settings(embedding_provider="bge", embedding_model="BAAI/bge-small-en-v1.5")
+        assert s.effective_embedding_model == "BAAI/bge-small-en-v1.5"
+
+    def test_hashing_dim_changes_identity(self):
+        a = Settings(embedding_provider="hashing", embedding_dim=64)
+        b = Settings(embedding_provider="hashing", embedding_dim=128)
+        assert a.effective_embedding_model != b.effective_embedding_model
+
+
+class TestValidators:
+    def test_overlap_must_be_less_than_max(self):
+        with pytest.raises(ValueError, match="必须小于"):
+            Settings(chunk_max_chars=500, chunk_overlap_chars=500)
+
+    def test_overlap_equal_to_max_is_rejected(self):
+        with pytest.raises(ValueError):
+            Settings(chunk_max_chars=200, chunk_overlap_chars=200)
+
+    def test_top_k_bounds(self):
+        with pytest.raises(ValueError):
+            Settings(top_k=0)
+        with pytest.raises(ValueError):
+            Settings(top_k=101)
+
+
+def test_llm_fallback_list_parsing():
+    assert Settings(llm_fallbacks="a/b, c/d ,").llm_fallback_list == ["a/b", "c/d"]
+    assert Settings(llm_fallbacks="").llm_fallback_list == []
+
+
+def test_is_prod_flag():
+    assert Settings(env="prod").is_prod is True
+    assert Settings(env="local").is_prod is False

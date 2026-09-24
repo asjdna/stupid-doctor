@@ -1,7 +1,8 @@
 # kubedocs
 
 > 面向 **Kubernetes 官方文档**的检索问答服务：混合检索（BM25 + 向量）+ RRF 融合 + 可选重排，
-> 回答**必须带可点击引用**，查不到就明说。**一条 `docker compose up` 起全栈**。
+> 回答**必须带可点击引用**，查不到就明说。
+> **本机零容器即可跑通全链路**（切片 → 嵌入 → 混合检索 → 引用 → 评测闸门）。
 
 这是一个**工业级工程作品**（非研究原型）：重点不在"我实现了一个算法"，而在
 **选型判断、可观测、评测驱动、成本与延迟约束、失败模式设计**。
@@ -13,12 +14,17 @@
 | 部分 | 状态 |
 |---|---|
 | 语料获取（1720 篇官方 markdown / 16.2 MB） | ✅ 已验证 |
-| 切块器 + 真实语料体检 | ✅ 已验证（35 单测 + 语料体检数字见下） |
-| RRF 多路融合 | ✅ 已验证（单测） |
-| Postgres/pgvector 灌库、混合检索、API、Agent、评测闸门 | 🚧 进行中 |
-| `docker compose up` 全栈 | ⚠️ **文件已写，但本机尚未安装 Docker，未实测** |
+| 切块器 + 真实语料体检 | ✅ 已验证（见「实测数字」） |
+| 本地索引：SQLite + FTS5 + numpy 向量 | ✅ 已验证（21 单测，含 FTS 一致性自检） |
+| 增量/幂等摄取（文档级 + 块级跳过） | ✅ 已验证（14 单测，含 rowid 回收回归） |
+| 混合检索 + RRF 融合 + 单路消融 | ✅ 已验证（12 单测） |
+| 金标集（50 条）+ 指标 + 闸门 | ✅ 已验证（指标手算对照 + 闸门能红） |
+| 全量语料端到端索引与评测 | 🔄 进行中（见下） |
+| 带引用回答生成（LiteLLM） | 🚧 未开始 |
+| LangGraph Agent / `/ask` SSE / OTel / Prometheus | 🚧 未开始 |
+| `docker compose up` 全栈 | ⚠️ **文件已写，本机 Docker Hub 不可达，未实测** |
 
-> 本项目坚持一件事：**没跑过的就不写"已完成"**。上面标 🚧/⚠️ 的部分在验证后会更新。
+> 本项目坚持一件事：**没跑过的就不写"已完成"**。
 
 ---
 
@@ -30,61 +36,85 @@
 
 | 部件 | 本项目选择 | 理由 |
 |---|---|---|
-| 检索存储 | **Postgres + pgvector** | 一库同时承担向量、全文检索、业务数据；省一套运维 |
-| 多路融合 | **RRF**（自实现，20 行） | 免标定、跨语料稳定，与 OpenSearch 内置策略同源 |
-| LLM 网关 | **LiteLLM** | 多供应商路由/重试/回退/成本统计，自研是重复劳动 |
-| Agent 编排 | **LangGraph** | 耐久状态 + 中断恢复，不必自己写状态机与持久化 |
-| 嵌入 | 本地 BGE（可切 API） | 医疗/企业语料常不允许出境；本地也可离线复现 |
-| 可观测 | **OpenTelemetry + Prometheus**（+ Langfuse 可选） | 标准协议，不锁供应商 |
-| 评测 | **自建金标闸门 + Ragas 行业口径** | 闸门纪律（可失败、拒绝跨集比较）是框架给不了的 |
+| 全文检索 | **SQLite FTS5**（带 `bm25()` 排序 + 列权重） | 标准库自带、零运维；能力与"用 Postgres 全文检索"等价 |
+| 向量检索 | **numpy 暴力内积**（可换 pgvector） | 2 万块量级毫秒级返回；同一 `Store` 协议下 pgvector 可直接替换 |
+| 多路融合 | **RRF**（自实现，约 20 行） | 免标定、跨语料稳定，与 OpenSearch 内置策略同源 |
+| 嵌入 | 本地 BGE-small-en（可切 API） | 医疗/企业语料常不允许出境；本地可离线复现，CI 不吃密钥 |
+| 评测 | **自建金标闸门 + 标注集自检** | 闸门纪律（能失败、拒绝跨集比较、基线溯源）是框架给不了的 |
+| LLM 网关 | **LiteLLM**（计划） | 多供应商路由/重试/回退/成本统计，自研是重复劳动 |
+| Agent 编排 | **LangGraph**（计划） | 耐久状态 + 中断恢复，不必自己写状态机与持久化 |
 
-设计决策的完整记录见 [`docs/adr/`](docs/adr/)。
+**存储为什么先是 SQLite 而不是 pgvector**：把"业务逻辑跑通"与"一键可复现部署"
+拆成两个目标后，先做前者。判断依据、代价与边界写在
+[`docs/adr/0002-先跑通业务逻辑.md`](docs/adr/0002-先跑通业务逻辑.md)；
+完整选型记录见 [`docs/adr/`](docs/adr/)。
 
 ---
 
 ## 架构
 
 ```
-                     ┌──────────────────────── 一条命令起全栈 ────────────────────────┐
-   客户端 ──HTTP/SSE──▶  api (FastAPI)  ──▶  agent (LangGraph)  ──▶  LiteLLM ──▶ LLM 供应商
-                          │                      │
-                          │                      ├─▶ retrieve:  BM25(Postgres FTS) ┐
-                          │                      │              向量(pgvector)     ├─ RRF 融合 ─ 重排
-                          │                      │                                 ┘
-                          ▼                      ▼
-                     Redis (缓存/限流)      Postgres 16 + pgvector (chunks / 向量 / 业务)
-                          │
-                          └─▶ OpenTelemetry ─▶ Prometheus /(可选)Langfuse
+   本机（当前，零外部依赖）                             生产形态（同一套业务代码）
+   ─────────────────────────────                        ─────────────────────────
+    CLI / 未来的 FastAPI                                 api (FastAPI) ─▶ agent (LangGraph)
+        │                                                     │
+        ▼                                                     ▼
+   ingest: 语料 ─▶ 切块 ─▶ BGE 嵌入 ─▶ 索引            LiteLLM ─▶ LLM 供应商
+        │                                                     │
+        ▼                                                     ▼
+   ┌──────────────────────────────┐                  ┌───────────────────────┐
+   │ Store 协议（唯一耦合点）     │  ← 换实现只需改配置 →  │ Postgres + pgvector │
+   │ · SQLite FTS5（bm25 排序）   │                  │ · 同一 Store 协议     │
+   │ · numpy 向量矩阵（余弦）     │                  └───────────────────────┘
+   └──────────────────────────────┘
+        │
+        ▼
+   retrieve: 两路并行召回 ─▶ RRF 融合 ─▶（可选）cross-encoder 精排 ─▶ 引用组装
+        │
+        ▼
+   eval: 标注集自检 ─▶ 指标(hit/recall/MRR/nDCG) ─▶ 单路消融 ─▶ 基线闸门
 ```
 
-**检索链路**：`query → 查询改写(可选) → 两路并行召回 → RRF 融合 → 重排(可选) → 组装上下文 → 带引用回答`
-每一段都带 span，可在 trace 里看到"这句话是从哪个文档哪一节来的"。
+**检索链路**：`query → 两路并行召回(FTS5 + 向量) → RRF 融合 → 重排(可选) → 结果带引用`
+每一段都有耗时与降级诊断（`search --explain` / `--json` 可见）。
 
 ---
 
-## 快速开始
+## 快速开始（本机，无需 Docker）
 
 ```bash
-git clone <repo> && cd kubedocs
-cp .env.example .env          # 只需填 LLM 供应商的 key；不填也能跑检索与评测
-
-docker compose up -d --build  # db(pgvector) + redis + api
-docker compose exec api python scripts/fetch_corpus.py   # 拉官方文档（1720 篇）
-docker compose exec api kubedocs ingest                  # 切块 + 嵌入 + 入库
-curl -s localhost:8080/healthz
-curl -s -X POST localhost:8080/ask -H 'content-type: application/json' \
-     -d '{"q":"How do I set a Pod CPU limit?"}' | jq
-```
-
-本地开发（不用容器）：
-
-```bash
-python -m venv --system-site-packages .venv && . .venv/bin/activate  # Windows: .venv\Scripts\activate
+python -m venv --system-site-packages .venv
+. .venv/bin/activate                  # Windows: .venv\Scripts\activate
 pip install -e ".[dev]"
-pytest -q                    # 单元测试（不需要 DB）
-pytest -m integration        # 需要 Postgres/Redis（无 Docker 时自动跳过）
-ruff check . && mypy src scripts
+
+# 1) 拉语料（一次就够，1720 篇 / 16.2 MB）
+python scripts/fetch_corpus.py
+
+# 2) 建索引（增量；首次全量约 35 分钟，其中嵌入占绝大部分）
+python -m kubedocs.cli --hf-endpoint https://hf-mirror.com ingest
+
+# 3) 检索
+python -m kubedocs.cli search "how do I stop a container using too much memory" --explain
+
+# 4) 索引体检（含 FTS 一致性自检）
+python -m kubedocs.cli stats --verify
+
+# 5) 评测：先预检标注集，再评测并卡闸门
+python scripts/check_gold.py
+python -m kubedocs.cli eval --write-baseline      # 首次冻结基线
+python -m kubedocs.cli eval --gate                # 之后每次回归检查
 ```
+
+不想下载模型（离线/受限网络）时，用确定性哈希向量跑通管道：
+
+```bash
+python -m kubedocs.cli --provider hashing ingest --limit-files 100
+```
+
+> `hashing` 只擅长字面重合，**不能用于任何质量结论**；它存在的意义是让管道可离线自测。
+
+退出码约定（供脚本与 CI 判断，不必解析 stdout）：
+`0` 成功 ／ `1` 参数错误 ／ `2` 闸门不通过 ／ `3` 索引为空、标注集不合法等前置条件不满足。
 
 ---
 
@@ -110,6 +140,20 @@ ruff check . && mypy src scripts
 | 重叠按字符硬切，产生 `...rip between` 这类半截块 | 重叠对齐到词/行边界，对不齐就放弃重叠 | 消除词中断块 |
 | 模板化小节跨文档同形 → **30.7% 逐字重复块** | 块首加「文档标题 › 面包屑」上下文头 | 重复 **30.7% → 1.12%** |
 
+### 嵌入吞吐（决定全量摄取时长，i7-13700H / 14 核 / 纯 CPU torch 2.11）
+
+| 项 | 值 |
+|---|---|
+| 模型 | BAAI/bge-small-en-v1.5（384 维，max_seq 512） |
+| 吞吐（真实块，中位 195 token） | **约 9.4 块/s ≈ 1900 token/s** |
+| 长度分桶（按长度排序后编码） | **无收益**（59.5s → 58.9s）——瓶颈不是 padding |
+| 线程数 4 / 8 / 14 | 5.3 / 9.2 / 9.1 块/s（≥8 线程即饱和） |
+| batch 32 / 64 / 128 / 256 | 9.3 / 9.4 / 8.1 / 6.9 块/s（**批越大越慢**） |
+
+⇒ 一次全量摄取≈35 分钟，**嵌入是整条链路的成本瓶颈**。这些负面结论同样有价值：
+它们排除了"调 batch/分桶就能加速"的假设，说明下一步该做的是量化/ONNX，
+而不是继续调参。超长块（>512 token）会被静默截断，摄取时会明确计数并打印。
+
 ### 环境约束（实测，决定了取数方式）
 
 | 通道 | 结果 |
@@ -119,27 +163,62 @@ ruff check . && mypy src scripts
 | GitHub API | ✅ 可用但 **限流 60/h**（取 1720 个文件必然撞墙） |
 | codeload tarball | ✅ 335 MB / 2.1 分钟 |
 | huggingface.co | ❌ 超时 → 走 **hf-mirror.com** ✅ |
+| Docker Hub（`registry-1.docker.io`） | ❌ 连接被拒；镜像站 `docker.m.daocloud.io` ✅ 2.9s |
+| 已缓存模型的联网校验 | ❌ **挂死 >10 分钟** → 必须 `--hf-offline`（载入 0.8s） |
 
-⇒ 唯一可行路径是 tarball 流式解包，见 [`scripts/fetch_corpus.py`](scripts/fetch_corpus.py)。
+⇒ 取语料唯一可行路径是 tarball 流式解包，见 [`scripts/fetch_corpus.py`](scripts/fetch_corpus.py)。
+
+---
+
+## 评测：怎么保证分数不是自欺
+
+评测器刻意具备"**能失败**"的性质，四道拒绝/失败条件：
+
+1. **标注集自检**：每条标注必须写明"答案在哪篇文档的哪个关键词附近"（`must_contain`）。
+   若该文档不在索引里、或关键词在该文档中找不到，评测**直接退出、不产出任何分数**。
+   （写这套标注时它当场抓出 3 条写错的标注：目标文档里根本没有我记的那个字段名。）
+2. **引用完整性**：每条结果必须有可点击的官方 URL，且该 URL 必须能由 `doc_id`
+   **重新算出来**（防止 URL 映射与存储内容漂移）；违规数不为 0 即失败。
+3. **基线与标注集哈希绑定**：改了问题却没重建基线 → 拒绝比较（跨标注集分数不可比）。
+4. **基线漂移容忍**：`hit@k` / `mrr@k` 相对冻结基线下降超过 2 个百分点即失败（退出码 2）。
+   索引规模变化超过 2% 视为换了语料，默认拒绝比较。
+
+指标同时给 **hit / recall / MRR / nDCG**（单看一个会被误导：把正确答案从第 1 位挪到
+第 2 位，hit 不变而 MRR 掉一半），并按 **identifier / paraphrase / concept** 三类分别统计，
+外加 **单路消融**（hybrid / bm25-only / dense-only）——没有消融，"混合检索更好"就只是主张。
 
 ---
 
 ## 工程质量
 
 - **闸门全部阻塞**：`ruff`（含 S/B/SIM 规则）、`mypy`（`disallow_untyped_defs`）、`pytest`
-- **分层的测试**：`tests/unit`（零依赖、秒级）／`pytest -m integration`（需 DB，无 Docker 自动跳过）
-- **确定性**：融合结果同分按 key 排序——否则评测与闸门会随进程抖动
-- **可观测**：每个阶段一个 span；`/metrics` 暴露 Prometheus 指标
-- **失败模式**：查不到就拒答并说明；供应商不可用走 fallback；预算超限**拒绝**而不是悄悄烧钱
+- **测试分层**：`tests/unit`（零依赖、秒级、用哈希向量，不加载模型）
+- **确定性**：融合同分按 key 定序、向量条带按 chunk_id 定序——否则评测会随进程抖动
+- **失败模式**：向量路不可用 → 降级为纯全文检索并**记录原因**（不静默降级）；
+  精排不可用 → 保持 RRF 顺序并记录；零向量 → 直接拒绝写入而不是让它永远排最后
+- **可解释**：`search --explain` 打印每条结果在各路的名次；`--json` 输出完整诊断
+
+### 已被测试锁死的历史缺陷（回归）
+
+| 缺陷 | 后果 | 现在的守卫 |
+|---|---|---|
+| FTS5 外内容表用普通 `DELETE` | 索引永久不一致，后续查询报 malformed | 按 FTS5 规定顺序删除 + `verify_fts()` 自检进测试 |
+| SQLite 回收最大 rowid | 新块拿到更小 rowid → 向量与块错位、静默返回错内容 | `finalize()` 每次按当前 rowid 顺序重建矩阵并回写 |
+| 批内去重时用未压缩列表的下标索引矩阵 | 重复块不在批尾即 `IndexError`（全量摄取真踩到） | 用去重后列表做下标基准 + 专门的中段重复回归测试 |
+| `--limit-files` 把子集外的文件当"已删除" | 一次冒烟跑删光整个索引 | 限定文件时关闭删除同步 + 回归测试 |
+| 拼接 SQL 的 FTS5 MATCH 表达式 | 用户输入 `pod -limit` 被解释成 NOT、`"` 直接 500 | 只抽取词元并短语化，注入面关闭（含单测） |
 
 ---
 
 ## Roadmap
 
 - [x] 骨架 + 语料 + 切块器 + RRF（里程碑 1）
-- [ ] Postgres/pgvector schema + 幂等/增量摄取（里程碑 2）
-- [ ] 混合检索 + 重排 + 带引用回答 + `/ask` SSE（里程碑 3）
-- [ ] 金标集 + 检索/引用指标闸门 + Ragas 对照（里程碑 4）
-- [ ] LangGraph Agent（检索不足时重试/改查）+ OTel/Langfuse 全链路（里程碑 5）
-- [ ] k6/Locust 压测 + P95/成本 SLO 写入 CI（里程碑 6）
-- [ ] Docker 全栈实测 + 截图/演示（待本机装 Docker）
+- [x] 本地索引（SQLite+FTS5+numpy）+ 幂等/增量摄取（里程碑 2）
+- [x] 混合检索 + RRF + 单路消融（里程碑 3）
+- [x] 金标集 + 指标 + 自检 + 基线闸门（里程碑 4）
+- [ ] 带引用回答生成（LiteLLM）+ 拒答策略（里程碑 5）
+- [ ] LangGraph Agent（检索不足时重试/改查）+ OTel/Prometheus（里程碑 6）
+- [ ] FastAPI `/healthz` `/search` `/ask`(SSE) `/metrics`（里程碑 7）
+- [ ] pgvector 生产实现（同一 `Store` 协议）+ 对照评测（里程碑 8）
+- [ ] 嵌入量化/ONNX 提速 + k6 压测 + P95/成本 SLO（里程碑 9）
+- [ ] Docker 全栈实测（受限于本机 Docker Hub 不可达）

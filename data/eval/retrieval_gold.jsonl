@@ -1,0 +1,50 @@
+{"id": "g001", "kind": "identifier", "q": "topologySpreadConstraints maxSkew", "must_contain": {"concepts/scheduling-eviction/topology-spread-constraints": "maxSkew"}, "note": "精确字段名，全文路应稳赢"}
+{"id": "g002", "kind": "identifier", "q": "kubelet --eviction-hard flag", "must_contain": {"concepts/scheduling-eviction/node-pressure-eviction": "eviction-hard"}, "note": ""}
+{"id": "g003", "kind": "identifier", "q": "readinessProbe initialDelaySeconds periodSeconds", "must_contain": {"tasks/configure-pod-container/configure-liveness-readiness-startup-probes": "initialDelaySeconds"}, "note": ""}
+{"id": "g004", "kind": "identifier", "q": "PodDisruptionBudget minAvailable maxUnavailable", "must_contain": {"tasks/run-application/configure-pdb": "minAvailable"}, "note": "概念页 concepts/workloads/pods/disruptions 也讲同一主题，但操作页更对题"}
+{"id": "g005", "kind": "identifier", "q": "HorizontalPodAutoscaler averageUtilization target type Utilization", "must_contain": {"concepts/workloads/autoscaling/horizontal-pod-autoscale": "averageUtilization"}, "note": "原查询用的 targetCPUUtilizationPercentage 是 autoscaling/v1 旧字段，现文档已不含该串——自检抓出来后改为 v2 字段"}
+{"id": "g006", "kind": "identifier", "q": "kubectl drain --ignore-daemonsets --delete-emptydir-data", "must_contain": {"tasks/administer-cluster/safely-drain-node": "ignore-daemonsets"}, "note": ""}
+{"id": "g007", "kind": "identifier", "q": "ClusterRoleBinding RoleRef kind", "must_contain": {"reference/access-authn-authz/rbac": "ClusterRoleBinding"}, "note": ""}
+{"id": "g008", "kind": "identifier", "q": "seccompProfile type RuntimeDefault", "must_contain": {"tutorials/security/seccomp": "RuntimeDefault", "reference/node/seccomp": "seccomp"}, "note": "两个文档都合法：教程页讲用法，参考页讲机制"}
+{"id": "g009", "kind": "identifier", "q": "volumeBindingMode WaitForFirstConsumer", "must_contain": {"concepts/storage/storage-classes": "WaitForFirstConsumer"}, "note": ""}
+{"id": "g010", "kind": "identifier", "q": "terminationGracePeriodSeconds", "must_contain": {"concepts/workloads/pods/pod-lifecycle": "terminationGracePeriodSeconds"}, "note": ""}
+{"id": "g011", "kind": "identifier", "q": "cgroup v2 unified hierarchy", "must_contain": {"concepts/architecture/cgroups": "cgroup v2"}, "note": ""}
+{"id": "g012", "kind": "identifier", "q": "kubectl --field-selector status.phase=Running", "must_contain": {"concepts/overview/working-with-objects/field-selectors": "field-selector"}, "note": "文档里带连字符，写成 fieldSelector 会被自检拒掉"}
+{"id": "g013", "kind": "identifier", "q": "startupProbe failureThreshold", "must_contain": {"tasks/configure-pod-container/configure-liveness-readiness-startup-probes": "startupProbe"}, "note": ""}
+{"id": "g014", "kind": "identifier", "q": "kubelet --kube-reserved --system-reserved", "must_contain": {"reference/command-line-tools-reference/kubelet": "kube-reserved"}, "note": ""}
+{"id": "g015", "kind": "identifier", "q": "kube-proxy ipvs proxy mode", "must_contain": {"reference/command-line-tools-reference/kube-proxy": "ipvs"}, "note": ""}
+{"id": "g016", "kind": "paraphrase", "q": "how do I stop a container from using more memory than it should", "must_contain": {"concepts/configuration/manage-resources-containers": "memory"}, "note": "与文档标题无字面重合，考语义召回"}
+{"id": "g017", "kind": "paraphrase", "q": "my pod keeps restarting over and over again", "must_contain": {"tasks/debug/debug-application/debug-running-pod": "CrashLoopBackOff"}, "note": "文档里写的是 CrashLoopBackOff"}
+{"id": "g018", "kind": "paraphrase", "q": "how can two containers in one pod share files with each other", "must_contain": {"tasks/access-application-cluster/communicate-containers-same-pod-shared-volume": "share a volume"}, "note": "该文档没有出现 emptyDir 字样，改用其正文原话"}
+{"id": "g019", "kind": "paraphrase", "q": "run a job automatically at a fixed time every night", "must_contain": {"concepts/workloads/controllers/cron-jobs": "CronJob"}, "note": ""}
+{"id": "g020", "kind": "paraphrase", "q": "release a new version of my app without dropping any requests", "must_contain": {"tasks/run-application/update-deployment-rolling": "rolling"}, "note": ""}
+{"id": "g021", "kind": "paraphrase", "q": "give every replica its own stable name and its own disk", "must_contain": {"concepts/workloads/controllers/statefulset": "volumeClaimTemplates"}, "note": ""}
+{"id": "g022", "kind": "paraphrase", "q": "let people on the internet reach my app using a hostname", "must_contain": {"concepts/services-networking/ingress": "Ingress"}, "note": ""}
+{"id": "g023", "kind": "paraphrase", "q": "block traffic between pods running in two different namespaces", "must_contain": {"concepts/services-networking/network-policies": "NetworkPolicy"}, "note": ""}
+{"id": "g024", "kind": "paraphrase", "q": "how do services find each other by name", "must_contain": {"concepts/services-networking/dns-pod-service": "DNS"}, "note": ""}
+{"id": "g025", "kind": "paraphrase", "q": "what is the difference between guaranteed and burstable pods", "must_contain": {"concepts/workloads/pods/pod-qos": "Burstable"}, "note": ""}
+{"id": "g026", "kind": "paraphrase", "q": "run a setup step before the main container starts", "must_contain": {"concepts/workloads/pods/init-containers": "init"}, "note": ""}
+{"id": "g027", "kind": "paraphrase", "q": "keep a helper container running alongside mine for the whole pod lifetime", "must_contain": {"concepts/workloads/pods/sidecar-containers": "sidecar"}, "note": ""}
+{"id": "g028", "kind": "paraphrase", "q": "make sure one copy of my agent runs on every node", "must_contain": {"concepts/workloads/controllers/daemonset": "DaemonSet"}, "note": ""}
+{"id": "g029", "kind": "paraphrase", "q": "protect my app while I take nodes down for maintenance", "must_contain": {"tasks/run-application/configure-pdb": "PodDisruptionBudget"}, "note": ""}
+{"id": "g030", "kind": "paraphrase", "q": "add or remove pods automatically as traffic changes", "must_contain": {"concepts/workloads/autoscaling/horizontal-pod-autoscale": "autoscal"}, "note": ""}
+{"id": "g031", "kind": "concept", "q": "what phases does a pod go through from creation to termination", "must_contain": {"concepts/workloads/pods/pod-lifecycle": "Pending"}, "note": ""}
+{"id": "g032", "kind": "concept", "q": "how do I keep passwords and tokens that my pods need", "must_contain": {"concepts/configuration/secret": "Secret"}, "note": ""}
+{"id": "g033", "kind": "concept", "q": "inject configuration into a container without rebuilding the image", "must_contain": {"concepts/configuration/configmap": "ConfigMap"}, "note": ""}
+{"id": "g034", "kind": "concept", "q": "how do I make a pod land on one particular node", "must_contain": {"concepts/scheduling-eviction/assign-pod-node": "nodeSelector"}, "note": ""}
+{"id": "g035", "kind": "concept", "q": "keep pods away from a node that is being repaired", "must_contain": {"concepts/scheduling-eviction/taint-and-toleration": "toleration"}, "note": ""}
+{"id": "g036", "kind": "concept", "q": "which pod gets killed first when a node runs out of memory", "must_contain": {"concepts/scheduling-eviction/node-pressure-eviction": "evict"}, "note": ""}
+{"id": "g037", "kind": "concept", "q": "limit the total amount of cpu a whole namespace can consume", "must_contain": {"concepts/policy/resource-quotas": "ResourceQuota"}, "note": ""}
+{"id": "g038", "kind": "concept", "q": "how do I give one pod higher priority than the others", "must_contain": {"concepts/scheduling-eviction/pod-priority-preemption": "PriorityClass"}, "note": ""}
+{"id": "g039", "kind": "concept", "q": "how do I debug a service that is not routing traffic", "must_contain": {"tasks/debug/debug-application/debug-service": "Endpoints"}, "note": ""}
+{"id": "g040", "kind": "concept", "q": "run a batch task that has to finish successfully", "must_contain": {"concepts/workloads/controllers/job": "Job"}, "note": ""}
+{"id": "g041", "kind": "concept", "q": "how do I attach my own key value metadata to objects", "must_contain": {"concepts/overview/working-with-objects/labels": "label"}, "note": ""}
+{"id": "g042", "kind": "concept", "q": "take a node out of service before rebooting it", "must_contain": {"tasks/administer-cluster/safely-drain-node": "drain"}, "note": ""}
+{"id": "g043", "kind": "concept", "q": "clean up objects after the thing that owned them is gone", "must_contain": {"concepts/architecture/garbage-collection": "owner"}, "note": ""}
+{"id": "g044", "kind": "concept", "q": "collect logs from all nodes and containers in one place", "must_contain": {"concepts/cluster-administration/logging": "log"}, "note": ""}
+{"id": "g045", "kind": "concept", "q": "back up and restore the cluster key value store", "must_contain": {"tasks/administer-cluster/configure-upgrade-etcd": "etcd"}, "note": ""}
+{"id": "g046", "kind": "concept", "q": "renew cluster certificates before they expire", "must_contain": {"tasks/administer-cluster/kubeadm/kubeadm-certs": "certificate"}, "note": ""}
+{"id": "g047", "kind": "concept", "q": "stop a pod from doing dangerous things to the host kernel", "must_contain": {"concepts/security/pod-security-standards": "Privileged"}, "note": ""}
+{"id": "g048", "kind": "concept", "q": "how do I restrict which system calls a container may make", "must_contain": {"tutorials/security/seccomp": "syscall"}, "note": ""}
+{"id": "g049", "kind": "concept", "q": "share a single persistent disk between several pods", "must_contain": {"concepts/storage/persistent-volumes": "PersistentVolume"}, "note": ""}
+{"id": "g050", "kind": "concept", "q": "how does the cluster decide where to put a newly created pod", "must_contain": {"concepts/scheduling-eviction/kube-scheduler": "scheduler"}, "note": "考点：调度器概念页"}

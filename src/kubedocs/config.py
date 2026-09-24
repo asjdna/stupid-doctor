@@ -8,10 +8,21 @@
 from __future__ import annotations
 
 from functools import lru_cache
+from pathlib import Path
 from typing import Literal
 
 from pydantic import Field, ValidationInfo, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+
+def repo_root() -> Path:
+    """仓库根目录（`src/kubedocs/config.py` -> 上溯 3 层）。
+
+    存在的意义：默认数据路径必须**锚定在代码位置上**，不能依赖进程 cwd。
+    否则从别处调 CLI（或 pytest 换了 rootdir）时，`data/...` 会解析到一个
+    空目录，"索引里明明有数据却搜不到"这种事故排查起来极贵。
+    """
+    return Path(__file__).resolve().parents[2]
 
 
 class Settings(BaseSettings):
@@ -30,20 +41,38 @@ class Settings(BaseSettings):
     api_port: int = 8080
 
     # ---------- 存储 ----------
+    # 本地/CI 默认用嵌入式 SQLite（零外部依赖）；生产可换成 Postgres+pgvector。
+    # 两者实现同一个 Store 协议，切换只影响配置，不影响检索与生成代码。
     database_url: str = "postgresql://kubedocs:kubedocs@127.0.0.1:5432/kubedocs"
     redis_url: str = "redis://127.0.0.1:6379/0"
     db_pool_min: int = 1
     db_pool_max: int = 10
+    index_dir: str = "data/index"
 
     # ---------- 嵌入 ----------
-    embedding_provider: Literal["local", "api"] = "local"
+    # bge     : 本地 sentence-transformers（真实语义向量，首次运行需下载模型）
+    # hashing : 无依赖的确定性哈希向量，仅供离线单测/降级演示，不代表真实检索质量
+    # api     : 走远端 embedding 接口
+    embedding_provider: Literal["bge", "hashing", "api"] = "bge"
     embedding_model: str = "BAAI/bge-small-en-v1.5"
     embedding_dim: int = 384
     embedding_batch_size: int = 64
+    # bge-small-en-v1.5 官方说明 v1.5 起可省略 query 指令；保留开关以便做 A/B。
+    query_instruction: str = ""
+    # 模型下载源。留空 = 走 HuggingFace 官方；企业内网/受限网络下指向镜像站。
+    # 为什么要做成本项目配置而不是让用户自己 export：模型能否下到，决定了
+    # "第一次运行能不能起来"，属于部署配置的一部分，应当与其它配置同源可查。
+    hf_endpoint: str = ""
+    # 模型已缓存时置 True，跳过一切联网校验。
+    # 不是微调：在无法访问 huggingface.co 的网络里，联网校验不是"慢"，而是
+    # **挂死到超时**（实测载入一个已缓存模型 >10 分钟无返回）。
+    hf_offline: bool = False
 
     # ---------- 检索 ----------
     top_k: int = Field(default=8, ge=1, le=100)
     rrf_k: int = Field(default=60, ge=1)
+    fts_candidate_k: int = Field(default=50, ge=1)
+    dense_candidate_k: int = Field(default=50, ge=1)
     rerank_enable: bool = False
     rerank_model: str = "BAAI/bge-reranker-base"
     rerank_top_k: int = 5
@@ -87,6 +116,40 @@ class Settings(BaseSettings):
     def llm_fallback_list(self) -> list[str]:
         """把逗号分隔的 fallback 模型名解析成列表（LiteLLM 的 fallbacks 需要 list）。"""
         return [m.strip() for m in self.llm_fallbacks.split(",") if m.strip()]
+
+    # ---------- 路径解析（相对路径一律锚定仓库根，绝不锚定 cwd）----------
+    def _resolve(self, raw: str) -> Path:
+        p = Path(raw)
+        return p if p.is_absolute() else repo_root() / p
+
+    @property
+    def corpus_path(self) -> Path:
+        return self._resolve(self.corpus_dir)
+
+    @property
+    def index_path(self) -> Path:
+        return self._resolve(self.index_dir)
+
+    @property
+    def effective_embedding_model(self) -> str:
+        """真正决定向量空间的那个标识，写进索引元信息并参与闸门比较。
+
+        为什么不能直接用 `embedding_model`：`hashing` 提供商并不会加载
+        `BAAI/bge-small-en-v1.5`，但配置里的名字仍是它。若索引只记配置名，
+        一次 hashing 运行与一次真实模型运行会**记成同一个模型**，
+        闸门就会拿两种完全不同质量的运行互相比较——这是静默的错误结论来源。
+        """
+        if self.embedding_provider == "hashing":
+            return f"hashing-{self.embedding_dim}"
+        return self.embedding_model
+
+    @property
+    def sqlite_path(self) -> Path:
+        return self.index_path / "kubedocs.db"
+
+    @property
+    def vector_path(self) -> Path:
+        return self.index_path / "chunk_vectors.npy"
 
     @property
     def is_prod(self) -> bool:
