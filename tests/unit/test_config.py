@@ -19,14 +19,23 @@ class TestPathAnchoring:
     def test_relative_paths_resolve_under_repo_root(self):
         s = Settings(index_dir="data/index", corpus_dir="data/raw/k8s-docs")
         assert s.index_path.is_absolute()
-        assert s.index_path == repo_root() / "data" / "index"
+        # 实际索引在 <index_dir>/<domain>/ 下：按域分目录，两个域互不干扰
+        assert s.index_path == repo_root() / "data" / "index" / s.domain
         assert s.corpus_path == repo_root() / "data" / "raw" / "k8s-docs"
         assert s.sqlite_path.parent == s.index_path
         assert s.vector_path.parent == s.index_path
 
+    def test_index_dir_holds_one_subdir_per_domain(self, tmp_path: Path):
+        a = Settings(index_dir=str(tmp_path), domain="k8s_docs")
+        b = Settings(index_dir=str(tmp_path), domain="clinic")
+        assert a.index_path == tmp_path / "k8s_docs"
+        assert b.index_path == tmp_path / "clinic"
+        assert a.sqlite_path != b.sqlite_path      # 两个域不能共用一个库文件
+        assert a.index_path.parent == b.index_path.parent
+
     def test_absolute_paths_are_respected(self, tmp_path: Path):
         s = Settings(index_dir=str(tmp_path / "x"), corpus_dir=str(tmp_path / "y"))
-        assert s.index_path == tmp_path / "x"
+        assert s.index_path == tmp_path / "x" / s.domain
         assert s.corpus_path == tmp_path / "y"
 
     def test_index_files_live_inside_index_dir(self, tmp_path: Path):

@@ -37,6 +37,7 @@ from pathlib import Path
 import numpy as np
 
 from kubedocs.config import Settings
+from kubedocs.normalize import IdentityNormalizer, Normalizer, build_normalizer
 from kubedocs.store.base import (
     ChunkHit,
     ChunkInput,
@@ -45,9 +46,14 @@ from kubedocs.store.base import (
     Vector,
 )
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 # FTS5 外内容表：正文只存一份（在 chunks 里），FTS 只存倒排索引。
+#
+# 为什么索引列是 `body_normalized` 而不是 `body`：
+# 索引形态与展示形态必须分开。英文两者相同；中文必须先 jieba 预分词才能被 FTS5
+# 正确切词（详见 normalize.py）。`body` 保留原文用于展示与引用，
+# `body_normalized` 只服务于倒排索引。
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS meta (
     key   TEXT PRIMARY KEY,
@@ -65,33 +71,36 @@ CREATE TABLE IF NOT EXISTS documents (
 );
 
 CREATE TABLE IF NOT EXISTS chunks (
-    chunk_id     TEXT PRIMARY KEY,
-    doc_id       TEXT NOT NULL,
-    ordinal      INTEGER NOT NULL,
-    title        TEXT NOT NULL,
-    breadcrumb   TEXT NOT NULL,
-    source_url   TEXT NOT NULL,
-    body         TEXT NOT NULL,
-    content_hash TEXT NOT NULL,
-    n_chars      INTEGER NOT NULL,
-    vector_row   INTEGER NOT NULL
+    chunk_id       TEXT PRIMARY KEY,
+    doc_id         TEXT NOT NULL,
+    ordinal        INTEGER NOT NULL,
+    title          TEXT NOT NULL,
+    breadcrumb     TEXT NOT NULL,
+    source_url     TEXT NOT NULL,
+    body           TEXT NOT NULL,
+    body_normalized TEXT NOT NULL DEFAULT '',
+    content_hash   TEXT NOT NULL,
+    n_chars        INTEGER NOT NULL,
+    vector_row     INTEGER NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_chunks_doc ON chunks(doc_id);
 CREATE INDEX IF NOT EXISTS idx_chunks_hash ON chunks(content_hash);
 
 CREATE VIRTUAL TABLE IF NOT EXISTS chunks_fts USING fts5(
-    body, title, breadcrumb,
+    body_normalized, title, breadcrumb,
     content='chunks',
     content_rowid='rowid',
     tokenize='porter unicode61'
 );
 """
 
-# BM25 列权重，顺序必须与 chunks_fts 的列声明一致：(body, title, breadcrumb)。
+# BM25 列权重，顺序必须与 chunks_fts 的列声明一致：(body_normalized, title, breadcrumb)。
 # 标题命中比正文命中更能说明"这一块就是讲这件事的"，面包屑次之。
 _BM25_WEIGHTS = (1.0, 3.0, 1.5)
 
-_TOKEN_RE = re.compile(r"[A-Za-z0-9_]+")
+# 词元抽取：`\w` 在 Python 3 下含 CJK，因此中文分词后的词元同样能被抽出来。
+# 用 `[A-Za-z0-9_]+` 会让中文查询一个词元都抽不到——这是个必须避免的静默失效。
+_TOKEN_RE = re.compile(r"\w+", re.UNICODE)
 
 # 只清掉功能词。不做词形还原——那是 FTS5 的 porter 分词器负责的事。
 _STOPWORDS = frozenset({
@@ -138,11 +147,16 @@ class SqliteStore:
     """SQLite + FTS5 + numpy 的本地索引实现。"""
 
     def __init__(self, db_path: str | Path, vector_path: str | Path, *, dim: int,
-                 embedding_model: str = "") -> None:
+                 embedding_model: str = "", normalizer: Normalizer | None = None,
+                 domain: str = "") -> None:
         self.db_path = Path(db_path)
         self.vector_path = Path(vector_path)
         self.dim = dim
         self.embedding_model = embedding_model
+        self.domain = domain
+        # 归一化器必须与建索引时用的一致，否则查询与索引处在两个"词汇空间"里，
+        # 表现为"索引里明明有却搜不到"，且没有任何报错。
+        self.normalizer: Normalizer = normalizer or IdentityNormalizer()
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
 
         # check_same_thread=False + 全库访问加锁：FastAPI 的同步端点跑在线程池里，
@@ -194,6 +208,8 @@ class SqliteStore:
                         ("schema_version", str(SCHEMA_VERSION)),
                         ("embedding_model", self.embedding_model),
                         ("embedding_dim", str(self.dim)),
+                        ("normalizer", self.normalizer.name),
+                        ("domain", self.domain),
                         ("indexed_at", ""),
                     ],
                 )
@@ -202,7 +218,8 @@ class SqliteStore:
             if got != SCHEMA_VERSION:
                 raise StoreError(
                     f"索引 schema 版本不符：库里是 {got}，代码要求 {SCHEMA_VERSION}；"
-                    "请删除索引目录后重新 ingest"
+                    f"请跑 `python scripts/migrate_index_layout.py` 迁移，"
+                    f"或用 `ingest --rebuild` 重建"
                 )
             old_dim = int(rows.get("embedding_dim", "0"))
             if old_dim != self.dim:
@@ -216,6 +233,14 @@ class SqliteStore:
                 raise StoreError(
                     f"索引嵌入模型不符：库里是 {old_model!r}，当前配置 {self.embedding_model!r}；"
                     "不同模型的向量空间不可混用，请重建索引"
+                )
+            old_norm = rows.get("normalizer", "")
+            if old_norm and old_norm != self.normalizer.name:
+                # 归一化器变了 = 倒排索引里的词元变了 = 旧索引对新查询基本不可用。
+                # 这种不一致只会表现为"搜不到"，所以必须显式拒绝。
+                raise StoreError(
+                    f"索引归一化器不符：库里是 {old_norm!r}，当前配置 "
+                    f"{self.normalizer.name!r}；请用 `ingest --rebuild` 重建索引"
                 )
 
     def _set_meta(self, key: str, value: str) -> None:
@@ -299,6 +324,8 @@ class SqliteStore:
             embedding_model=meta.get("embedding_model", ""),
             embedding_dim=int(meta.get("embedding_dim", "0")),
             indexed_at=meta.get("indexed_at", ""),
+            domain=meta.get("domain", ""),
+            normalizer=meta.get("normalizer", ""),
         )
 
     def get_chunks(self, chunk_ids: list[str]) -> dict[str, ChunkHit]:
@@ -322,15 +349,32 @@ class SqliteStore:
 
     # ------------------------------------------------------------------ 检索
     def keyword_search(self, query: str, limit: int) -> list[tuple[str, int]]:
-        expr = build_match_expr(query)
+        # 查询必须先过**同一个**归一化器：中文查询要 jieba 分词后才可能命中
+        # 中文索引；英文 identity 时是原样透传。
+        expr = build_match_expr(self.normalizer.query_text(query))
         if not expr or limit <= 0:
             return []
         w = ", ".join(str(x) for x in _BM25_WEIGHTS)
-        # expr 已由 build_match_expr 收窄为纯词元短语，w 是代码里的常量元组
-        sql = f"SELECT c.chunk_id AS chunk_id FROM chunks_fts f JOIN chunks c ON c.rowid = f.rowid WHERE chunks_fts MATCH ? ORDER BY bm25(chunks_fts, {w}) LIMIT ?"  # noqa: S608
+
+        # 分两步取，不要在 FTS 上直接 JOIN chunks。
+        #
+        # 实测（18861 块，4 词元 OR 查询命中 9062 行）：
+        #   纯 MATCH                       0.04ms
+        #   MATCH + ORDER BY bm25          6.60ms
+        #   MATCH + bm25 + JOIN chunks    57.50ms   ← JOIN 让计划变成"先连全部命中行再排序"
+        # 两步走只需要对最终 50 行做一次 rowid 查表，省掉 9000 次随机读。
+        # 名次完全一致（仍由 FTS 的 bm25 顺序决定），只是取回方式变了。
         with self._lock:
-            rows = self._con.execute(sql, (expr, limit)).fetchall()
-        return [(r["chunk_id"], i) for i, r in enumerate(rows, start=1)]
+            fts_sql = f"SELECT rowid FROM chunks_fts WHERE chunks_fts MATCH ? ORDER BY bm25(chunks_fts, {w}) LIMIT ?"  # noqa: S608
+            ids = [r[0] for r in self._con.execute(fts_sql, (expr, limit))]
+            if not ids:
+                return []
+            marks = ",".join("?" * len(ids))
+            rows = self._con.execute(
+                f"SELECT rowid, chunk_id FROM chunks WHERE rowid IN ({marks})",  # noqa: S608 - marks 全是 ?
+                ids).fetchall()
+        by_rowid = {r[0]: r[1] for r in rows}
+        return [(by_rowid[r], i) for i, r in enumerate(ids, start=1) if r in by_rowid]
 
     def dense_search(self, query_vector: Vector, limit: int) -> list[tuple[str, int]]:
         if limit <= 0 or not self._row_index or self._matrix.shape[0] == 0:
@@ -352,8 +396,9 @@ class SqliteStore:
         """删掉一篇文档的所有块。**顺序不能反**，见模块文档第 1 条。"""
         n = con.execute("SELECT COUNT(*) FROM chunks WHERE doc_id = ?", (doc_id,)).fetchone()[0]
         con.execute(
-            "INSERT INTO chunks_fts(chunks_fts, rowid, body, title, breadcrumb) "
-            "SELECT 'delete', rowid, body, title, breadcrumb FROM chunks WHERE doc_id = ?",
+            "INSERT INTO chunks_fts(chunks_fts, rowid, body_normalized, title, breadcrumb) "
+            "SELECT 'delete', rowid, body_normalized, title, breadcrumb FROM chunks "
+            "WHERE doc_id = ?",
             (doc_id,),
         )
         con.execute("DELETE FROM chunks WHERE doc_id = ?", (doc_id,))
@@ -398,15 +443,17 @@ class SqliteStore:
             for c in chunks:
                 cur = con.execute(
                     "INSERT INTO chunks(chunk_id, doc_id, ordinal, title, breadcrumb, source_url,"
-                    " body, content_hash, n_chars, vector_row) VALUES(?,?,?,?,?,?,?,?,?,?)",
+                    " body, body_normalized, content_hash, n_chars, vector_row)"
+                    " VALUES(?,?,?,?,?,?,?,?,?,?,?)",
                     (c.chunk_id, c.doc_id, c.ordinal, c.title, c.breadcrumb, c.source_url,
-                     c.body, c.content_hash, c.n_chars, -1),
+                     c.body, self.normalizer.index_text(c.body), c.content_hash, c.n_chars, -1),
                 )
                 rowid = cur.lastrowid
                 # 外内容表要显式给 rowid，让索引项与内容行一一对应
                 con.execute(
-                    "INSERT INTO chunks_fts(rowid, body, title, breadcrumb) VALUES(?,?,?,?)",
-                    (rowid, c.body, c.title, c.breadcrumb),
+                    "INSERT INTO chunks_fts(rowid, body_normalized, title, breadcrumb) "
+                    "VALUES(?,?,?,?)",
+                    (rowid, self.normalizer.index_text(c.body), c.title, c.breadcrumb),
                 )
                 self._pending[c.chunk_id] = np.asarray(vectors[c.chunk_id], dtype=np.float32)
         self._dirty = True
@@ -489,12 +536,14 @@ class SqliteStore:
 
 
 def from_settings(settings: Settings) -> SqliteStore:
-    """按配置构造本地索引（把路径解析与"有效模型名"的细节挡在 store 之外）。"""
+    """按配置构造当前域的本地索引（路径解析、有效模型名、归一化器都在这里落地）。"""
     return SqliteStore(
         db_path=settings.sqlite_path,
         vector_path=settings.vector_path,
         dim=settings.embedding_dim,
         embedding_model=settings.effective_embedding_model,
+        normalizer=build_normalizer(settings.normalizer),
+        domain=settings.domain,
     )
 
 

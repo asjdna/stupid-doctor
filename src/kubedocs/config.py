@@ -86,7 +86,15 @@ class Settings(BaseSettings):
     redis_url: str = "redis://127.0.0.1:6379/0"
     db_pool_min: int = 1
     db_pool_max: int = 10
+    # 索引与语料的根目录；实际索引在 <index_dir>/<domain>/ 下，每个域一份、互不干扰。
     index_dir: str = "data/index"
+    # 当前域。域包（domains/）自带语料、归一化器与评测集，内核只认这个名字。
+    domain: str = "k8s_docs"
+
+    # ---------- 文本归一化 ----------
+    # identity=原样（英文，FTS5 的 porter+unicode61 够用）
+    # chinese =jieba 预分词（中文没有空格，不分词 FTS5 会把整句当成一个词元）
+    normalizer: Literal["identity", "chinese"] = "identity"
 
     # ---------- 嵌入 ----------
     # bge     : 本地 sentence-transformers（真实语义向量，首次运行需下载模型）
@@ -169,8 +177,18 @@ class Settings(BaseSettings):
         return self._resolve(self.corpus_dir)
 
     @property
-    def index_path(self) -> Path:
+    def index_root(self) -> Path:
+        """索引**根**目录（不含域子目录）。迁移/体检脚本要的是它。"""
         return self._resolve(self.index_dir)
+
+    @property
+    def index_path(self) -> Path:
+        """当前域的索引目录：`<index_dir>/<domain>/`。
+
+        按域分目录而不是分表：两个域的语料、嵌入模型、维度、归一化方式都可能不同，
+        共用一个库文件只会让"换域时忘了换表"这类错误无从发现。
+        """
+        return self.index_root / self.domain
 
     @property
     def effective_embedding_model(self) -> str:

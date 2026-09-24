@@ -54,7 +54,8 @@ class TestGlobalArgs:
         rc = main(["ingest", "--batch-files", "10", "--provider", "hashing",
                    "--index-dir", str(tmp_path / "index"), "--corpus-dir", str(corpus)])
         assert rc == EXIT_OK
-        assert (tmp_path / "index" / "kubedocs.db").exists()
+        # 索引落在 <index_dir>/<domain>/ 下（按域分目录）
+        assert (tmp_path / "index" / "k8s_docs" / "kubedocs.db").exists()
 
     def test_subcommand_after_flag_does_not_clobber_global(self, tmp_path):
         """子解析器上的同名参数若用普通 default，会把这个值覆盖成 None。"""
@@ -62,7 +63,7 @@ class TestGlobalArgs:
         index = tmp_path / "index"
         assert main(["ingest", "--index-dir", str(index), "--provider", "hashing",
                      "--corpus-dir", str(corpus)]) == EXIT_OK
-        assert (index / "kubedocs.db").exists()
+        assert (index / "k8s_docs" / "kubedocs.db").exists()
         # 索引确实建在指定目录 -> 用该目录能查到
         assert main(["--index-dir", str(index), "--provider", "hashing",
                      "stats", "--json"]) == EXIT_OK

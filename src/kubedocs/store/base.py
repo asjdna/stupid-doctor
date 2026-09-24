@@ -73,6 +73,8 @@ class StoreStats:
     embedding_model: str
     embedding_dim: int
     indexed_at: str
+    domain: str = ""
+    normalizer: str = ""
 
     @property
     def mean_chars(self) -> float:

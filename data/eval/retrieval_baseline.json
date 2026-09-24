@@ -42,8 +42,8 @@
         }
       },
       "latency_ms": {
-        "p50": 128.8,
-        "p95": 179.9
+        "p50": 61.5,
+        "p95": 76.1
       },
       "n_misses": 8,
       "n_citation_violations": 0
@@ -76,8 +76,8 @@
         }
       },
       "latency_ms": {
-        "p50": 75.8,
-        "p95": 120.8
+        "p50": 18.9,
+        "p95": 35.3
       },
       "n_misses": 15,
       "n_citation_violations": 0
@@ -110,8 +110,8 @@
         }
       },
       "latency_ms": {
-        "p50": 45.1,
-        "p95": 46.5
+        "p50": 43.1,
+        "p95": 45.5
       },
       "n_misses": 11,
       "n_citation_violations": 0

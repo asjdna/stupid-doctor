@@ -27,6 +27,8 @@ EXIT_PRECONDITION = 3
 def make_settings(args: argparse.Namespace) -> Settings:
     """CLI 参数覆盖配置。直接构造 Settings 而不是改环境变量，避免污染进程环境。"""
     overrides: dict[str, object] = {}
+    if getattr(args, "domain", None):
+        overrides["domain"] = args.domain
     if getattr(args, "provider", None):
         overrides["embedding_provider"] = args.provider
     if getattr(args, "index_dir", None):
@@ -158,6 +160,29 @@ def cmd_ask(args: argparse.Namespace) -> int:
         store.close()
 
 
+# --------------------------------------------------------------------------- domains
+def cmd_domains(args: argparse.Namespace) -> int:
+    """列出可用域。内核不认具体域，只认 DomainPack 协议——这里是唯一能看到全景的地方。"""
+    from kubedocs.domains import load_all
+    from kubedocs.domains.base import DomainRegistry
+
+    load_all()
+    items = DomainRegistry.describe()
+    if args.json:
+        print(json.dumps(items, ensure_ascii=False, indent=2))
+        return EXIT_OK
+    print(f"已注册 {len(items)} 个域：\n")
+    for item in items:
+        sets = item["eval_sets"]
+        sets_text = ", ".join(str(x) for x in sets) if isinstance(sets, list) else "（无）"
+        print(f"  {item['name']}")
+        print(f"    说明      : {item['description']}")
+        print(f"    归一化器  : {item['normalizer']}")
+        print(f"    金标集    : {sets_text or '（无）'}")
+    print("\n用 --domain <名字> 选择域；每个域的索引彼此独立（<index_dir>/<domain>/）。")
+    return EXIT_OK
+
+
 # --------------------------------------------------------------------------- stats
 def cmd_stats(args: argparse.Namespace) -> int:
     settings = make_settings(args)
@@ -166,6 +191,8 @@ def cmd_stats(args: argparse.Namespace) -> int:
         st = store.stats()
         meta = store.meta_dump()
         payload = {
+            "domain": settings.domain,
+            "normalizer": st.normalizer,
             "corpus_dir": str(settings.corpus_path),
             "db": str(settings.sqlite_path),
             "vectors": str(settings.vector_path),
@@ -182,6 +209,7 @@ def cmd_stats(args: argparse.Namespace) -> int:
         if args.json:
             print(json.dumps(payload, ensure_ascii=False, indent=2))
         else:
+            print(f"域         : {settings.domain}（归一化器 {st.normalizer}）")
             print(f"语料目录   : {payload['corpus_dir']}")
             print(f"索引库     : {payload['db']}")
             print(f"向量矩阵   : {payload['vectors']}")
@@ -223,8 +251,10 @@ def _add_globals(p: argparse.ArgumentParser, default: object) -> None:
     子解析器上的副本用 `default=SUPPRESS`：不写就**不设属性**，
     从而不会用 None 覆盖掉主解析器已经解析到的值（这是 argparse 的经典坑）。
     """
-    p.add_argument("--index-dir", default=default, help="索引目录（默认 data/index）")
+    p.add_argument("--index-dir", default=default, help="索引根目录（默认 data/index）")
     p.add_argument("--corpus-dir", default=default, help="语料目录（默认 data/raw/k8s-docs）")
+    p.add_argument("--domain", default=default,
+                   help="域（默认 k8s_docs；可用 `domains` 子命令列出）")
     p.add_argument("--provider", choices=["bge", "hashing"], default=default,
                    help="嵌入器（bge=真实向量，hashing=离线降级）")
     p.add_argument("--hf-endpoint", default=default,
@@ -268,6 +298,11 @@ def build_parser() -> argparse.ArgumentParser:
     ps.add_argument("--explain", action="store_true", help="打印每条的排序依据")
     ps.add_argument("--json", action="store_true")
     ps.set_defaults(func=cmd_search)
+
+    pd = sub.add_parser("domains", help="列出可用域（双域平台：内核只认 DomainPack 协议）",
+                        parents=[common])
+    pd.add_argument("--json", action="store_true")
+    pd.set_defaults(func=cmd_domains)
 
     pt = sub.add_parser("stats", help="索引体检", parents=[common])
     pt.add_argument("--verify", action="store_true", help="顺便做 FTS 一致性自检")

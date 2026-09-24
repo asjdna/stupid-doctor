@@ -1,0 +1,111 @@
+"""域包协议：agent 内核与"具体知识/业务"之间**唯一**的耦合点。
+
+## 为什么要有这一层
+
+kubedocs 现在有两个完全不同的域：
+
+| | `k8s_docs` | `clinic` |
+|---|---|---|
+| 语料 | Kubernetes 官方文档 1720 篇 | 中文医疗知识卡片 |
+| 语言 | 英文 | 中文 |
+| 归一化 | 原样（FTS5 的 porter 够用） | jieba 预分词 |
+| 嵌入 | bge-small-en（384 维） | bge-small-zh-v1.5 |
+| 能力 | 检索 / 问答 | 问诊 / 挂号 / 紧急 |
+
+如果内核里出现任何一处 `if domain == "clinic"`，这套东西就退化成"两个项目塞进一个仓库"。
+所以内核只认 `DomainPack` 这张协议，域特有的东西（语料、归一化、嵌入、工具、评测集）
+一律由域包提供。
+
+## 为什么协议只有 6 个方法
+
+协议每多一个方法，将来加第三个域就多一处要实现、多一处会写错。
+这里只保留内核**真正需要**的：建索引、拿检索器、给工具、给路由提示、给评测集、报域信息。
+"""
+
+from __future__ import annotations
+
+from pathlib import Path
+from typing import TYPE_CHECKING, Protocol, runtime_checkable
+
+if TYPE_CHECKING:  # 只用于类型标注，避免 domains → store/retrieval 的循环导入
+    from kubedocs.config import Settings
+    from kubedocs.embed import Embedder
+    from kubedocs.ingest import IngestReport
+    from kubedocs.retrieve.hybrid import HybridRetriever
+    from kubedocs.store.sqlite_store import SqliteStore
+
+
+@runtime_checkable
+class DomainPack(Protocol):
+    """一个域需要向内核提供的一切。"""
+
+    name: str
+    """域标识；同时作为索引目录名（`<index_dir>/<name>/`）。"""
+
+    description: str
+    """一句话说明这个域能回答什么。会被注入路由提示，也会在 `/domains` 端点暴露。"""
+
+    normalizer_name: str
+    """该域使用的归一化器名（`identity` / `chinese`）。必须与域内语言一致。"""
+
+    def corpus_root(self, settings: Settings) -> Path:
+        """该域的语料根目录。"""
+
+    def build_index(self, store: SqliteStore, embedder: Embedder,
+                    settings: Settings, *, rebuild: bool = False,
+                    limit_files: int | None = None,
+                    progress: object = None) -> IngestReport:
+        """把该域语料灌入索引。返回摄取报告（内核据此打印统计）。"""
+
+    def retriever(self, store: SqliteStore, embedder: Embedder,
+                  settings: Settings) -> HybridRetriever:
+        """构造该域的检索器。域不同，检索器内部配置可以不同。"""
+
+    def tools(self) -> list[object]:
+        """该域暴露给 agent 的工具列表（P2 起使用；P0/P1 允许返回空列表）。
+
+        返回 `ToolSpec`（见 agent/tools.py）。**必须是纯数据描述**，
+        不在这里执行任何 IO——工具的执行由内核统一编排与计时。
+        """
+
+    def eval_sets(self) -> list[Path]:
+        """该域的金标集路径（相对仓库根）。内核据此跑评测与闸门。"""
+
+
+class DomainRegistry:
+    """按名字找域包。与 `SkillRegistry` 同一套路数：注册 + 按名解析 + 可列举。"""
+
+    _packs: dict[str, DomainPack] = {}
+
+    @classmethod
+    def register(cls, pack: DomainPack) -> None:
+        if pack.name in cls._packs:
+            raise ValueError(f"域 {pack.name!r} 已注册，不能重复注册")
+        cls._packs[pack.name] = pack
+
+    @classmethod
+    def get(cls, name: str) -> DomainPack:
+        if name not in cls._packs:
+            raise KeyError(
+                f"未知的域 {name!r}；已注册：{sorted(cls._packs)}。"
+                "（域包通过 `kubedocs.domains.load_all()` 注册）"
+            )
+        return cls._packs[name]
+
+    @classmethod
+    def names(cls) -> list[str]:
+        return sorted(cls._packs)
+
+    @classmethod
+    def describe(cls) -> list[dict[str, object]]:
+        return [
+            {"name": p.name, "description": p.description,
+             "normalizer": p.normalizer_name,
+             "eval_sets": [str(x) for x in p.eval_sets()]}
+            for p in (cls._packs[n] for n in cls.names())
+        ]
+
+    @classmethod
+    def clear(cls) -> None:
+        """仅供测试重置注册表。"""
+        cls._packs.clear()
