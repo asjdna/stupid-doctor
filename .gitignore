@@ -37,3 +37,6 @@ logs/
 .vscode/
 .DS_Store
 Thumbs.db
+
+# clinic 域的知识卡片（上游派生语料，标注「仅用于学术研究」）
+data/clinic/
