@@ -1,0 +1,93 @@
+# 一条命令起全栈：db(pgvector) + cache(redis) + api
+#
+# ⚠️ 本文件尚未在本机实测（写它时本机还没装 Docker）。标记为「未验证」，不假装它能跑。
+#    装上 Docker 后第一件事就是 `docker compose up -d --build` 并跑 `pytest -m integration`。
+#
+# 版本都**钉死**：工业项目里 "latest" 会让半年后的自己无法复现。
+
+name: kubedocs
+
+services:
+  db:
+    # pgvector 官方镜像，Postgres 16
+    image: pgvector/pgvector:pg16
+    environment:
+      POSTGRES_USER: kubedocs
+      POSTGRES_PASSWORD: kubedocs
+      POSTGRES_DB: kubedocs
+      # 中文/英文混排的全文检索：这里语料是英文，用 english 配置；
+      # 换中文语料时要装 zhparser/pg_jieba 或改用应用侧分词（见 docs/adr）
+      POSTGRES_INITDB_ARGS: "--encoding=UTF8 --locale=C"
+    ports:
+      - "5432:5432"
+    volumes:
+      - dbdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U kubedocs -d kubedocs"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    restart: unless-stopped
+
+  cache:
+    image: redis:7.4-alpine
+    command: ["redis-server", "--save", "", "--appendonly", "no", "--maxmemory", "256mb", "--maxmemory-policy", "allkeys-lru"]
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    restart: unless-stopped
+
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    env_file:
+      - .env
+    environment:
+      # 容器内互访用服务名（.env 里的示例值就是按 compose 写的）
+      KUBEDOCS_DATABASE_URL: postgresql://kubedocs:kubedocs@db:5432/kubedocs
+      KUBEDOCS_REDIS_URL: redis://cache:6379/0
+    ports:
+      - "8080:8080"
+    depends_on:
+      db:
+        condition: service_healthy
+      cache:
+        condition: service_healthy
+    volumes:
+      # 语料与模型缓存持久化：否则每次重建容器都要重下 16MB 语料 + 模型
+      - ./data:/app/data
+      - hfcache:/root/.cache/huggingface
+    healthcheck:
+      test: ["CMD", "python", "-c", "import httpx;httpx.get('http://127.0.0.1:8080/healthz',timeout=3)"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 40s
+    restart: unless-stopped
+
+  # 可选：自托管 Langfuse（LLM trace/评测看板）。
+  # 默认注释掉——它自己要一套 Postgres + ClickHouse，资源占用不小；
+  # 需要时 `docker compose --profile obs up -d`。不启也不影响功能（本地 span + Prometheus 仍在）。
+  langfuse:
+    image: langfuse/langfuse:2
+    profiles: ["obs"]
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgresql://kubedocs:kubedocs@db:5432/kubedocs
+      NEXTAUTH_SECRET: change-me-in-prod
+      SALT: change-me-in-prod
+      NEXTAUTH_URL: http://localhost:3000
+    ports:
+      - "3000:3000"
+    restart: unless-stopped
+
+volumes:
+  dbdata:
+  hfcache:

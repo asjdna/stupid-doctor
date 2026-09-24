@@ -1,0 +1,115 @@
+name: CI
+
+# 工业项目的 CI 应当回答两个问题：
+# 1) "换个干净环境还能装起来并跑通吗" —— 所以装依赖走 pyproject，且在 ubuntu 上跑
+# 2) "改动有没有让质量下降" —— 所以 lint/type/test/评测闸门全部**阻塞**（非零码即失败）
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  quality:
+    name: 静态检查 + 单元测试
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+          cache: pip
+      - name: 安装依赖
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev]"
+      # 单元测试**不需要**数据库与模型：这是刻意的设计（纯函数 + 依赖注入），
+      # 让反馈回路保持在秒级；需要 DB 的用例由下面的 integration job 覆盖。
+      - name: 单元测试（零依赖、秒级）
+        run: pytest tests/unit -q
+      - name: ruff（阻塞）
+        run: ruff check .
+      - name: mypy（阻塞）
+        run: mypy src scripts
+
+  integration:
+    name: 集成测试（真实 Postgres + Redis）
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    services:
+      db:
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_USER: kubedocs
+          POSTGRES_PASSWORD: kubedocs
+          POSTGRES_DB: kubedocs
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U kubedocs" --health-interval 5s
+          --health-timeout 3s --health-retries 20
+      cache:
+        image: redis:7.4-alpine
+        ports: ["6379:6379"]
+        options: >-
+          --health-cmd "redis-cli ping" --health-interval 5s
+          --health-timeout 3s --health-retries 20
+    env:
+      KUBEDOCS_ENV: ci
+      KUBEDOCS_DATABASE_URL: postgresql://kubedocs:kubedocs@127.0.0.1:5432/kubedocs
+      KUBEDOCS_REDIS_URL: redis://127.0.0.1:6379/0
+      # CI 不调真实 LLM：回答链路的测试用打桩（respx / 依赖注入），
+      # 这样 CI 不依赖密钥、不花钱、不受供应商抖动影响。
+      KUBEDOCS_LLM_MODEL: stub/stub
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+          cache: pip
+      - name: 安装依赖
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev]"
+      - name: 集成测试（含迁移与幂等摄取）
+        run: pytest -m integration -q
+
+  eval-gate:
+    name: 评测闸门（检索质量不得回退）
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    needs: [quality]
+    services:
+      db:
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_USER: kubedocs
+          POSTGRES_PASSWORD: kubedocs
+          POSTGRES_DB: kubedocs
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U kubedocs" --health-interval 5s
+          --health-timeout 3s --health-retries 20
+    env:
+      KUBEDOCS_ENV: ci
+      KUBEDOCS_DATABASE_URL: postgresql://kubedocs:kubedocs@127.0.0.1:5432/kubedocs
+      KUBEDOCS_REDIS_URL: redis://127.0.0.1:6379/0
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+          cache: pip
+      - run: pip install -e ".[dev]"
+      - name: 拉官方语料
+        run: python scripts/fetch_corpus.py
+      - name: 灌库
+        run: python -m kubedocs.cli ingest
+      - name: 金标闸门（掉分即失败）
+        # 与记录基线时**同一套金标与同一模式**；跨集/跨模式会比较会被拒绝
+        run: python -m kubedocs.cli eval --gate
