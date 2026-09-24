@@ -13,9 +13,11 @@ __all__ = ["DomainPack", "DomainRegistry", "load_all"]
 
 def load_all() -> list[str]:
     """注册所有内置域包，返回已注册的域名。**幂等**（重复调用不会报错）。"""
+    from kubedocs.domains.clinic.domain import pack as clinic_pack
     from kubedocs.domains.k8s_docs import pack as k8s_pack
 
     known = DomainRegistry.names()
-    if k8s_pack.name not in known:
-        DomainRegistry.register(k8s_pack)
+    for p in (k8s_pack, clinic_pack):
+        if p.name not in known:
+            DomainRegistry.register(p)
     return DomainRegistry.names()
