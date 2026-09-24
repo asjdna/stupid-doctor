@@ -1,0 +1,156 @@
+{
+  "n": 6,
+  "modes": {
+    "single_shot": {
+      "full_coverage": 0.6667,
+      "hop_coverage": 0.8333,
+      "llm_calls_total": 6,
+      "latency_p50_ms": 1929.3,
+      "dependency_rate": 0.0,
+      "rows": [
+        {
+          "id": "m01",
+          "full": false,
+          "per_hop": [
+            false,
+            true
+          ],
+          "llm_calls": 1,
+          "latency_ms": 2069.1,
+          "has_dependency": false
+        },
+        {
+          "id": "m02",
+          "full": false,
+          "per_hop": [
+            true,
+            false
+          ],
+          "llm_calls": 1,
+          "latency_ms": 2164.9,
+          "has_dependency": false
+        },
+        {
+          "id": "m03",
+          "full": true,
+          "per_hop": [
+            true,
+            true
+          ],
+          "llm_calls": 1,
+          "latency_ms": 1711.3,
+          "has_dependency": false
+        },
+        {
+          "id": "m04",
+          "full": true,
+          "per_hop": [
+            true,
+            true
+          ],
+          "llm_calls": 1,
+          "latency_ms": 1344.0,
+          "has_dependency": false
+        },
+        {
+          "id": "m05",
+          "full": true,
+          "per_hop": [
+            true,
+            true
+          ],
+          "llm_calls": 1,
+          "latency_ms": 1908.3,
+          "has_dependency": false
+        },
+        {
+          "id": "m06",
+          "full": true,
+          "per_hop": [
+            true,
+            true
+          ],
+          "llm_calls": 1,
+          "latency_ms": 1950.3,
+          "has_dependency": false
+        }
+      ]
+    },
+    "multi_hop": {
+      "full_coverage": 0.5,
+      "hop_coverage": 0.5833,
+      "llm_calls_total": 25,
+      "latency_p50_ms": 3494.5,
+      "dependency_rate": 0.3333,
+      "rows": [
+        {
+          "id": "m01",
+          "full": false,
+          "per_hop": [
+            false,
+            false
+          ],
+          "llm_calls": 4,
+          "latency_ms": 3406.6,
+          "has_dependency": false
+        },
+        {
+          "id": "m02",
+          "full": false,
+          "per_hop": [
+            false,
+            false
+          ],
+          "llm_calls": 4,
+          "latency_ms": 4123.2,
+          "has_dependency": false
+        },
+        {
+          "id": "m03",
+          "full": false,
+          "per_hop": [
+            true,
+            false
+          ],
+          "llm_calls": 4,
+          "latency_ms": 2802.3,
+          "has_dependency": false
+        },
+        {
+          "id": "m04",
+          "full": true,
+          "per_hop": [
+            true,
+            true
+          ],
+          "llm_calls": 4,
+          "latency_ms": 3582.4,
+          "has_dependency": false
+        },
+        {
+          "id": "m05",
+          "full": true,
+          "per_hop": [
+            true,
+            true
+          ],
+          "llm_calls": 4,
+          "latency_ms": 2803.8,
+          "has_dependency": true
+        },
+        {
+          "id": "m06",
+          "full": true,
+          "per_hop": [
+            true,
+            true
+          ],
+          "llm_calls": 5,
+          "latency_ms": 6119.1,
+          "has_dependency": true
+        }
+      ]
+    }
+  },
+  "cost_usd": 0.010295
+}
