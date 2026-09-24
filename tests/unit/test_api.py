@@ -314,6 +314,29 @@ class TestChat:
         """message 超过 2000 字符 → 422（单轮对话文本的上限在 schema 里）。"""
         assert client.post("/chat", json={"message": "咳" * 2001}).status_code == 422
 
+    def test_interrupted_question_is_streamed_and_resumed(self, api_settings: Settings,
+                                                         monkeypatch: pytest.MonkeyPatch) -> None:
+        """被 `interrupt` 挂起的追问以 message 事件送出（`awaiting_user=true`），
+        同一个 `thread_id` 再来一次即 `resumed=true`——这是"真挂起"而不是"内存里记个标志位"。
+
+        症状关联表用打桩：真实卡片语料不入库（`data/clinic/cards.json` 是派生文件），
+        靠它会让这条用例在干净克隆里变成"永远只走兜底回答"，失去验证价值。
+        """
+        monkeypatch.setattr("kubedocs.api.app._clinic_links",
+                            lambda: {"咳嗽": ("支气管炎", "呼吸内科"),
+                                     "发热": ("支气管炎", "感染科")})
+        with TestClient(create_app(api_settings)) as client:
+            first = client.post("/chat", json={"message": "我咳嗽", "thread_id": "t-resume"})
+            asking = _event(_sse_events(first.text), "message")
+            assert asking["awaiting_user"] is True, asking
+            assert asking["status"] == "asking"
+            assert asking["text"], "追问的问题不能是空串"
+
+            second = client.post("/chat", json={"message": "没有别的了", "thread_id": "t-resume"})
+            resumed = _event(_sse_events(second.text), "message")
+            assert resumed["resumed"] is True, "第二轮必须是从挂起点续跑，而不是开新会话"
+            assert resumed["thread_id"] == "t-resume"
+
 
 # ===========================================================================
 # 首页

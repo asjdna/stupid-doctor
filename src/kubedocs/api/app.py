@@ -110,8 +110,8 @@ class _DomainRuntime:
         self.index_error = ""
         self._retriever: HybridRetriever | None = None
         self._answerer: Answerer | None = None
-        # store 与 retriever 都持锁：同步端点跑在线程池里，两个并发请求
-        # 不该各自构造一遍嵌入器（bge 那一次就够贵了）
+        # 惰性构造持锁：同步端点跑在线程池里，两个并发请求不该各自构造一遍
+        # 嵌入器（bge 那一次就够贵了），也不该各自开一个回答器（会重复读预算文件）
         self._lock = threading.Lock()
         try:
             self.store: SqliteStore | None = from_settings(settings)
@@ -286,17 +286,23 @@ def _get_clinic_agent(app: FastAPI) -> ClinicAgent:
     为什么必须缓存：agent 持有 `MockAppointmentProvider` 与图的 checkpointer，
     每次请求新建会把上一轮的追问状态丢掉——`thread_id` 续跑会静默失效。
     为什么惰性：构造 agent 要编译 LangGraph 图（秒级），不碰 `/chat` 的请求不该付这个代价。
+    为什么持锁：`/chat` 跑在线程池里，两个并发的首次请求各自建一个 agent 的话，
+    只有一个能留下——另一个用过的会话状态会跟着那个被丢弃的 agent 一起消失。
     """
     agent: ClinicAgent | None = getattr(app.state, "clinic_agent", None)
-    if agent is None:
-        from kubedocs.agent.kernel import ClinicAgent as _ClinicAgent
-        from kubedocs.domains.clinic.mock import MockAppointmentProvider
-        from kubedocs.domains.clinic.pack import build_clinic_deps
+    if agent is not None:
+        return agent
+    with app.state.agent_lock:
+        agent = getattr(app.state, "clinic_agent", None)  # 双检：等锁期间可能有人建好了
+        if agent is None:
+            from kubedocs.agent.kernel import ClinicAgent as _ClinicAgent
+            from kubedocs.domains.clinic.mock import MockAppointmentProvider
+            from kubedocs.domains.clinic.pack import build_clinic_deps
 
-        wiring = build_clinic_deps(MockAppointmentProvider(), links=_clinic_links())
-        agent = _ClinicAgent(wiring.deps)
-        app.state.clinic_agent = agent
-    return agent
+            wiring = build_clinic_deps(MockAppointmentProvider(), links=_clinic_links())
+            agent = _ClinicAgent(wiring.deps)
+            app.state.clinic_agent = agent
+        return agent
 
 
 def _sse(event: str, payload: Mapping[str, Any]) -> ServerSentEvent:
@@ -323,41 +329,114 @@ def _tool_events(state: ClinicState) -> list[tuple[str, dict[str, Any]]]:
 
 
 class _ChatOutcome:
-    """一轮 `/chat` 的结果：先要发的 tool 事件 + 最终要发的文本。"""
+    """一轮 `/chat` 的结果：要发的 tool 事件 + 最终文本 + 是否又停在追问上。"""
 
-    def __init__(self, state: ClinicState, *, resuming: bool) -> None:
+    def __init__(self, state: ClinicState, *, resuming: bool,
+                 pending: str | None = None) -> None:
         self.state = state
         self.resuming = resuming
+        # 这一轮结束后**仍然挂着**的追问问题（内核在等用户回答）；None 表示流程已结束
+        self.pending = pending
         self.tools = _tool_events(state)
         answer = state.get("answer") or {}
         self.text = str(answer.get("text", "")) if isinstance(answer, dict) else ""
         self.citations = list(answer.get("citations", [])) if isinstance(answer, dict) else []
         self.status = str(state.get("status", ""))
 
+    @classmethod
+    def from_clinic_turn(cls, turn: Any) -> _ChatOutcome:
+        """从**工具循环**的一轮结果构造。
 
-def _run_turn(agent: ClinicAgent, request: ChatRequest, thread_id: str) -> _ChatOutcome:
+        工具循环是无状态的（不像图有 checkpointer），所以多轮上下文由本文件
+        用 `app.state.clinic_history` 按 thread_id 维护——这是与图路径的**真实差异**，
+        不是实现细节：图路径重启进程后能续聊，工具循环路径不能。
+        """
+        self = cls.__new__(cls)
+        self.state = {}                       # 工具循环无图状态，留空字典占位
+        self.resuming = False
+        self.pending = None
+        # 事件形状与 SSE 的 `{"tool": name, **payload}` 对齐
+        self.tools = [(str(tc.get("tool", "")), {
+            k: v for k, v in tc.items() if k != "tool"}) for tc in turn.tool_calls]
+        self.text = turn.text
+        self.citations = list(getattr(turn, "citations", []) or [])
+        self.status = "emergency" if turn.emergency else "done"
+        return self
+
+
+def _get_clinic_react(app: FastAPI) -> Any:
+    """装配 LLM 驱动的 clinic 运行期（幂等缓存）。
+
+    与 `_get_clinic_agent` 并存：**有 LLM 密钥时优先走这条**（控制流由模型决定），
+    没有密钥时回退到确定性图（红线与挂号仍可用，只是不会主动追问）。
+    """
+    rt = getattr(app.state, "clinic_react", None)
+    if rt is not None:
+        return rt
+    from kubedocs.agent.clinic_react import ClinicReactRuntime
+    from kubedocs.domains.clinic.booking import BookingService
+    from kubedocs.domains.clinic.mock import MockAppointmentProvider
+
+    settings = app.state.settings
+    rt = ClinicReactRuntime(settings, BookingService(MockAppointmentProvider()))
+    app.state.clinic_react = rt
+    app.state.clinic_history = {}
+    return rt
+
+
+def _converse_with_tools(app: FastAPI, request: ChatRequest, thread_id: str) -> _ChatOutcome:
+    """走工具循环：**LLM 通过 function calling 自己决定调哪个工具、调几次**。"""
+    rt = _get_clinic_react(app)
+    history: dict[str, list[dict[str, Any]]] = app.state.clinic_history
+    past = list(history.get(thread_id, []))
+    turn = rt.turn(request.message, history=past)
+    # 保留最近 8 条（4 轮）：无上限会让上下文无限增长、成本线性上升
+    history[thread_id] = (past + [{"role": "user", "content": request.message},
+                                 {"role": "assistant", "content": turn.text}])[-8:]
+    return _ChatOutcome.from_clinic_turn(turn)
+
+
+def _run_turn(app: FastAPI, request: ChatRequest, thread_id: str) -> _ChatOutcome:
     """同步跑一轮问诊（在线程池里调用，别挡住事件循环）。
 
-    `thread_id` 上还挂着一个追问 -> `resume()` 把用户这句话送回挂起点；
-    否则 -> `start()` 开一轮新会话。这正是内核"追问用 interrupt 真挂起"的用法：
-    状态由 checkpointer 保存，HTTP 层不需要自己记任何会话上下文。
+    **两条路径的取舍**：
+
+    - 有 LLM 密钥 → 走 `run_tool_loop`：控制流交给模型，它会自己决定
+      "先查号源再回答"还是"先追问"，工具调用是模型选的而不是代码排的。
+      这是"是不是 agent"的分界线。
+    - 无密钥 → 回退到确定性图（`ClinicAgent`）：红线与挂号照常可用，
+      只是不会主动追问。**宁可降级也不报错**。
+
+    红线在两条路径里都在**进循环之前**用确定性规则判定（见 clinic_react），
+    所以这条安全不变量不因走哪条路径而改变。
     """
+    react = None
+    try:
+        react = _get_clinic_react(app)
+    except Exception:  # noqa: BLE001 - 装配失败就退图，不能因此让 /chat 挂掉
+        logger.exception("装配工具循环失败，回退到确定性图")
+    if react is not None and react.has_llm():
+        return _converse_with_tools(app, request, thread_id)
+
+    agent = _get_clinic_agent(app)
     resuming = agent.pending_question(thread_id=thread_id) is not None
     if resuming:
         state = agent.resume(request.message, thread_id=thread_id)
     else:
         state = agent.start(request.message, thread_id=thread_id, patient_id=request.patient_id)
-    return _ChatOutcome(state, resuming=resuming)
+    # 跑完再看一次：这一轮可能又停在一个新追问上（这才是"追问有界"的真实体现）
+    return _ChatOutcome(state, resuming=resuming,
+                        pending=agent.pending_question(thread_id=thread_id))
 
 
-async def _chat_events(agent: ClinicAgent, request: ChatRequest,
+async def _chat_events(app: FastAPI, request: ChatRequest,
                        thread_id: str) -> AsyncIterator[ServerSentEvent]:
     """`/chat` 的事件序列（见模块文档里的格式说明）。"""
     # 首个事件就把会话 id 交出去：调用方不必先知道 id 才能续聊
     yield _sse("thread", {"thread_id": thread_id, "domain": "clinic"})
     try:
         # 同步 agent 挪到线程池：thread 事件已经在网络上了，事件循环也不会被阻塞
-        outcome = await asyncio.to_thread(_run_turn, agent, request, thread_id)
+        outcome = await asyncio.to_thread(_run_turn, app, request, thread_id)
     except Exception as e:  # noqa: BLE001 - 响应头已发出，改不了状态码，只能把失败当事件发
         logger.exception("chat 轮次失败：thread_id=%s", thread_id)
         yield _sse("error", {"thread_id": thread_id, "error": f"{type(e).__name__}: {e}"})
@@ -367,7 +446,7 @@ async def _chat_events(agent: ClinicAgent, request: ChatRequest,
     for name, payload in outcome.tools:
         yield _sse("tool", {"thread_id": thread_id, "tool": name, **payload})
 
-    pending = agent.pending_question(thread_id=thread_id)
+    pending = outcome.pending
     text = pending or outcome.text
     if not text:
         # 兜底的兜底：图里既没有答案也没有追问时，宁可给一句人话，也不要让前端拿到空串
@@ -444,6 +523,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     `settings` 传空时用 `get_settings()`（进程内单例，读 `.env` 与环境变量）。
     资源在这里建好并挂到 `app.state`：**同一个 Settings 只打开一次 store**。
     """
+    # 把 .env 导出到 os.environ：LiteLLM 与 has_api_key() 读的都是 os.environ，
+    # 而 pydantic-settings 只把 .env 填进 Settings 对象（这个坑项目里踩过一次）。
+    # 不导出的话，即使 .env 里有密钥，/chat 也会永远走"无 LLM"的降级分支。
+    from kubedocs.config import load_env_file
+
+    load_env_file()
     cfg = settings or get_settings()
     load_all()  # 域包注册：/domains 与 domain 校验都依赖它
 
@@ -466,6 +551,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.state.settings = cfg
     app.state.index_html = repo_root().joinpath(*INDEX_HTML)
     app.state.runtimes_lock = threading.Lock()
+    app.state.agent_lock = threading.Lock()
     app.state.clinic_agent = None
     current = _DomainRuntime(cfg)
     app.state.runtimes = {cfg.domain: current}
@@ -536,8 +622,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         带同一个 `thread_id` 再来一次即续聊（内核用 `interrupt` 挂起的追问会被 `resume`）。
         """
         thread_id = body.thread_id or uuid.uuid4().hex
-        agent = _get_clinic_agent(request.app)
-        return EventSourceResponse(_chat_events(agent, body, thread_id))
+        return EventSourceResponse(_chat_events(request.app, body, thread_id))
 
     # ---------------------------------------------------------------- 首页
     @app.get("/", response_class=HTMLResponse)
