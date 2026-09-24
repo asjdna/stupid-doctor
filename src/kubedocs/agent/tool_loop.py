@@ -397,8 +397,13 @@ def _as_text(value: object) -> str:
 def _as_float(value: object) -> float:
     """把可选的 `cost_usd` 安全地转成 float。
 
-    供应商适配器不一定上报成本，上报了也不一定给对；成本统计不该因为一个字符串把整轮问答搞崩。
+    供应商适配器不一定上报成本，上报了也不一定给对，还可能给成 JSON 字符串（`"0.0012"`）。
+    能转就转、转不动按 0 处理：成本统计不该因为一个脏字段把整轮问答搞崩，也不该悄悄丢掉
+    一个本来能用的数字。
     """
-    if isinstance(value, bool) or not isinstance(value, (int, float)):
+    if isinstance(value, bool) or not isinstance(value, (int, float, str)):
         return 0.0
-    return float(value)
+    try:
+        return float(value)
+    except ValueError:
+        return 0.0

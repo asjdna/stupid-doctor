@@ -1,0 +1,89 @@
+"""`ToolCaller` 的真实实现：把 LiteLLM 的 function calling 接到工具循环上。
+
+## 为什么必须有这个文件
+
+`tool_loop.py` 只定义了 `ToolCaller` **协议**，没有任何实现——
+也就是说工具循环写好了、工具也注册好了，但**没有东西把 `tools=` 交给真实模型**。
+整条链路仍然差最后一段。这个文件就是那一段。
+
+## 三个容易出错的地方
+
+1. **`arguments` 是 JSON 字符串**，不是 dict。模型返回的是字符串，
+   必须 `json.loads`；解析失败不能让循环崩，要把它当成"参数非法"交给循环处理
+   （`arguments` 留空 dict，错误写进内容里由循环回灌）。
+2. **`tool_calls` 可能是 `None`**（只是普通回答）。必须区分"要调工具"与"直接作答"。
+3. **成本拿不到不该阻断**：未知模型算不出价，静默记 0 而不是抛异常。
+"""
+from __future__ import annotations
+
+import json
+from typing import Any
+
+from kubedocs.config import Settings
+
+
+class LiteLLMToolCaller:
+    """用 LiteLLM 调模型，返回 `{"content", "tool_calls"}`。
+
+    `tools` 为空时**不带 tools 参数**：有些供应商在 `tools=[]` 时会报错，
+    而这个实现同时要服务"纯对话"（无工具）场景。
+    """
+
+    def __init__(self, settings: Settings) -> None:
+        self.settings = settings
+        self.model = settings.llm_model
+        self.calls = 0
+        self.cost = 0.0
+        self._litellm: Any = None
+
+    @property
+    def litellm(self) -> Any:
+        if self._litellm is None:
+            import litellm
+
+            litellm.drop_params = True
+            self._litellm = litellm
+        return self._litellm
+
+    def choose(self, messages: list[dict[str, Any]],
+               tools: list[dict[str, Any]]) -> dict[str, Any]:
+        kwargs: dict[str, Any] = {
+            "model": self.model,
+            "messages": messages,
+            "temperature": self.settings.llm_temperature,
+            "max_tokens": self.settings.llm_max_tokens,
+            "timeout": self.settings.llm_timeout,
+            "num_retries": self.settings.llm_max_retries,
+        }
+        if tools:
+            kwargs["tools"] = tools
+            kwargs["tool_choice"] = "auto"
+        resp = self.litellm.completion(**kwargs)
+        self.calls += 1
+        try:
+            self.cost += float(self.litellm.completion_cost(
+                completion_response=resp) or 0.0)
+        except Exception:  # noqa: BLE001 - 未知模型算不出价，不阻断主流程
+            self.cost = self.cost
+
+        msg = resp.choices[0].message
+        out: dict[str, Any] = {"content": str(getattr(msg, "content", "") or ""),
+                               "tool_calls": []}
+        for tc in (getattr(msg, "tool_calls", None) or []):
+            fn = getattr(tc, "function", None)
+            raw = getattr(fn, "arguments", "") or ""
+            args: dict[str, Any] = {}
+            parse_error = ""
+            try:
+                parsed = json.loads(raw) if raw else {}
+                args = parsed if isinstance(parsed, dict) else {}
+                if not isinstance(parsed, dict):
+                    parse_error = f"参数不是 JSON 对象：{type(parsed).__name__}"
+            except json.JSONDecodeError as e:
+                parse_error = f"参数不是合法 JSON：{e}"
+            if parse_error:
+                # 不抛异常：让工具循环把它当"这一步失败"回灌给模型，模型能自己改
+                args = {"__parse_error__": parse_error}
+            out["tool_calls"].append({"name": str(getattr(fn, "name", "")),
+                                      "arguments": args})
+        return out

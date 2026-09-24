@@ -307,7 +307,8 @@
       var detail = text ? text.slice(0, 400) : '(空响应体)';
       try {
         var j = JSON.parse(text);
-        if (j && (j.detail || j.message || j.error)) detail = j.detail || j.message || j.error;
+        var d = j && (j.detail || j.message || j.error);
+        if (d != null) detail = (typeof d === 'string') ? d : JSON.stringify(d);
       } catch (_) { /* 非 JSON，保留原文 */ }
       throw new Error('HTTP ' + res.status + ' ' + (res.statusText || '') + '（' + path + '）：' + detail);
     }
@@ -420,6 +421,12 @@
   }
 
   // ---------------- 检索 / 问答 ----------------
+  function renderNote(note) {
+    if (!note) return '';
+    return '<div class="banner info" style="margin-bottom:10px"><span class="tag">后端说明</span>' +
+           '<span class="msg">' + esc(note) + '</span></div>';
+  }
+
   function renderDiagnostics(diag) {
     if (diag == null) return '';
     var text;
@@ -447,6 +454,20 @@
       '</div>';
     });
     return html;
+  }
+
+  // 后端可能不返回 index：按顺序补 1..n，保证 [1] 能对上
+  function normalizeCitations(list) {
+    if (!Array.isArray(list)) return [];
+    return list.map(function (c, i) {
+      if (c && typeof c === 'object' && (c.index == null || c.index === '')) {
+        var copy = {};
+        for (var k in c) { if (Object.prototype.hasOwnProperty.call(c, k)) copy[k] = c[k]; }
+        copy.index = i + 1;
+        return copy;
+      }
+      return c;
+    });
   }
 
   // 把 answer 里的 [1] [2] 变成能跳到来源列表的链接
@@ -481,6 +502,8 @@
     var mode = document.querySelector('input[name=mode]:checked').value;
     var topK = parseInt($('topK').value, 10);
     if (!isFinite(topK) || topK <= 0) topK = 8;
+    if (topK > 20) { topK = 20; $('topK').value = '20'; }   // 后端契约：top_k ∈ [1, 20]
+    if (topK < 1) { topK = 1; $('topK').value = '1'; }
 
     var btn = $('btnGo');
     btn.disabled = true;
@@ -492,22 +515,24 @@
       if (mode === 'search') {
         var r = await postJSON('/search', body);
         var hits = (r && Array.isArray(r.hits)) ? r.hits : [];
-        out.innerHTML = renderHits(hits) + renderDiagnostics(r ? r.diagnostics : null);
+        out.innerHTML = renderNote(r && r.note) + renderHits(hits) + renderDiagnostics(r ? r.diagnostics : null);
       } else {
         var a = await postJSON('/ask', body);
         var html = '';
         if (a && a.degraded) {
-          warn('未配置 LLM 密钥，仅检索结果：后端返回 degraded=' + JSON.stringify(a.degraded) + '，下面展示的是检索答案而非模型生成内容。');
+          var why = (typeof a.degraded === 'string') ? a.degraded : JSON.stringify(a.degraded);
+          warn('未配置 LLM 密钥或索引不可用，仅检索结果：' + why + '（后端 degraded 字段，属正常降级而非报错。）');
         }
+        html += renderNote(a && a.note);
         html += '<div class="hit"><div class="title">回答' +
                 (a && a.degraded ? ' <span class="pill yes">degraded 降级</span>' : '') + '</div>' +
                 '<div class="answer" style="margin-top:6px">' +
-                renderAnswerWithCitations((a && a.answer) || '(后端未返回 answer)', (a && a.citations) || []) +
+                renderAnswerWithCitations((a && a.answer) || '(后端未返回 answer)', normalizeCitations(a && a.citations)) +
                 '</div>' +
                 '<div class="kv" style="margin-top:8px">命中片段数：<b>' + esc(a && a.n_hits != null ? a.n_hits : '-') + '</b></div>' +
                 renderDiagnostics(a ? a.diagnostics : null) +
                 '</div>';
-        html += renderCitationList(a ? a.citations : null);
+        html += renderCitationList(a ? normalizeCitations(a.citations) : null);
         out.innerHTML = html;
       }
     } catch (e) {
@@ -530,6 +555,7 @@
       el.appendChild(who);
     }
     var span = document.createElement('span');
+    span.className = 'txt';
     span.textContent = text || '';
     el.appendChild(span);
     $('messages').appendChild(el);
@@ -549,6 +575,17 @@
     var args = (ev.args != null ? ev.args
               : (ev.arguments != null ? ev.arguments
               : (ev.function && ev.function.arguments != null ? ev.function.arguments : null)));
+    var res = (ev.result != null ? ev.result : (ev.output != null ? ev.output : ev.response));
+    if (args == null && res == null) {
+      // 后端把工具入参直接平铺在事件里（如 {"tool":"check_red_line","word":..,"status":..}）
+      var flat = {};
+      for (var k in ev) {
+        if (!Object.prototype.hasOwnProperty.call(ev, k)) continue;
+        if (k === 'thread_id' || k === 'tool' || k === 'name' || k === 'event') continue;
+        flat[k] = ev[k];
+      }
+      if (Object.keys(flat).length) args = flat;
+    }
     var argsText;
     if (args == null) argsText = '';
     else if (typeof args === 'string') argsText = args;
@@ -559,7 +596,6 @@
                      '(' + esc(argsText) + ')';
     div.appendChild(line);
 
-    var res = (ev.result != null ? ev.result : (ev.output != null ? ev.output : ev.response));
     if (res != null) {
       var txt;
       if (typeof res === 'string') txt = res;
@@ -583,6 +619,18 @@
   function renderChatCitations() {
     if (!chatCitations.length) { $('citations').innerHTML = ''; return; }
     $('citations').innerHTML = renderCitationList(chatCitations);
+  }
+
+  // citations 常在事件流末尾才到：到达后把已渲染的助手气泡重渲染一遍，让 [n] 变成可点链接
+  function refreshCiteLinks() {
+    var nodes = document.querySelectorAll('#messages .msg.assistant');
+    Array.prototype.forEach.call(nodes, function (b) {
+      var raw = b.dataset ? b.dataset.raw : '';
+      if (!raw) return;
+      var span = b.querySelector('span.txt');
+      if (!span) return;
+      span.innerHTML = renderAnswerWithCitations(raw, chatCitations);
+    });
   }
 
   function setStreaming(on) {
@@ -615,8 +663,9 @@
     if (payload && typeof payload === 'object') {
       if (payload.thread_id) threadId = payload.thread_id;
       if (Array.isArray(payload.citations) && payload.citations.length) {
-        chatCitations = payload.citations;
+        chatCitations = normalizeCitations(payload.citations);
         renderChatCitations();
+        refreshCiteLinks();
       }
     }
 
@@ -627,8 +676,8 @@
     }
 
     if (evName === 'done' || evName === 'end') {
-      var cur = $('messages').lastElementChild;
-      if (cur) { var c = cur.querySelector('.caret'); if (c) c.remove(); }
+      Array.prototype.forEach.call(document.querySelectorAll('#messages .msg.assistant .caret'), function (c) { c.remove(); });
+      refreshCiteLinks();
       setStreaming(false);
       if (payload && typeof payload === 'object' && payload.error) {
         addMsg('err', '服务端在收尾时报错：' + (typeof payload.error === 'string' ? payload.error : JSON.stringify(payload.error)));
@@ -638,7 +687,9 @@
 
     if (evName === 'error') {
       var m = payload == null ? '未知错误'
-        : (typeof payload === 'string' ? payload : (payload.message || payload.detail || JSON.stringify(payload)));
+        : (typeof payload === 'string' ? payload
+          : (payload.error || payload.message || payload.detail || JSON.stringify(payload)));
+      if (payload && typeof payload === 'object' && typeof m !== 'string') m = JSON.stringify(m);
       addMsg('err', '流内错误事件：' + m);
       return;
     }
@@ -666,16 +717,15 @@
       bubble = addMsg('assistant', '');
       bubble.dataset.role = 'assistant';
     }
-    var span = bubble.lastElementChild;
-    if (isDelta) {
-      span.textContent += text;
-    } else if (span.textContent === '') {
-      span.textContent = text;               // 整段消息
-    } else if (span.textContent !== text) {
-      // 既非 delta 又和已有内容不同：避免把最终整段重复追加
-      if (text.indexOf(span.textContent) === 0) span.textContent = text;
-      else span.textContent += text;
-    }
+    // 原文单独记在 dataset.raw 上（气泡里的 caret 只是光标装饰，不能当成文本容器）
+    var raw = bubble.dataset.raw || '';
+    if (isDelta) raw += text;
+    else if (raw === '') raw = text;                                  // 整段消息
+    else if (raw !== text) raw = (text.indexOf(raw) === 0) ? text : (raw + text);
+    bubble.dataset.raw = raw;
+
+    var span = bubble.querySelector('span.txt');
+    if (span) span.textContent = raw;
     $('messages').scrollTop = $('messages').scrollHeight;
   }
 
@@ -716,7 +766,11 @@
       var t = '';
       try { t = await res.text(); } catch (e) {}
       var detail = t ? t.slice(0, 400) : '(空响应体)';
-      try { var j = JSON.parse(t); detail = j.detail || j.message || j.error || detail; } catch (e) {}
+      try {
+        var j = JSON.parse(t);
+        var d = j && (j.detail || j.message || j.error);
+        if (d != null) detail = (typeof d === 'string') ? d : JSON.stringify(d);
+      } catch (e) {}
       caret.remove();
       bubble.className = 'msg err';
       bubble.textContent = 'HTTP ' + res.status + ' ' + (res.statusText || '') + '（/chat）：' + detail;
@@ -773,13 +827,14 @@
     } catch (e) {
       var aborted = e && (e.name === 'AbortError');
       addMsg('sys', aborted ? '已手动停止接收流。' : ('流中断：' + (e && e.message ? e.message : String(e)) + '。可以继续输入。'));
-      if (!sawAny) {
-        var sp = bubble.lastElementChild;
-        if (sp && sp.tagName === 'SPAN' && !sp.textContent) bubble.textContent = '(未收到任何事件)';
+      if (!sawAny && !bubble.dataset.raw) {
+        var sp = bubble.querySelector('span.txt');
+        if (sp) sp.textContent = '(未收到任何事件)';
       }
     } finally {
       var c = bubble.querySelector('.caret');
       if (c) c.remove();
+      refreshCiteLinks();      // 收尾时再刷一次，保证 [n] 与来源列表对齐
       abortCtl = null;
       setStreaming(false);      // 无论正常结束还是中断，都必须恢复可输入状态
       $('chatInput').focus();

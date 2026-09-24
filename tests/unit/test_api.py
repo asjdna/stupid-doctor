@@ -1,0 +1,345 @@
+"""API 层测试：路由形状、降级路径、SSE 事件格式。
+
+## 三条硬约束
+
+1. **绝不联网、绝不加载真实模型**：索引一律建在 `tmp_path`，
+   `embedding_provider="hashing"`（conftest 的 autouse 夹具还会清掉所有供应商密钥）；
+2. **不依赖磁盘语料**：需要数据时直接构造 store 灌块——这里要验证的是 HTTP 层的
+   协议转换，不是切块与摄取；
+3. **空索引是重点用例**：`/healthz` `/domains` `/tools` `/search` `/ask` `/chat`
+   在**没有任何索引**时都必须能返回，而且不能是 500。这条"部署中间态"是最容易
+   被写崩的地方（例如 `cli.open_store(require_data=True)` 那种前置检查直接抛错）。
+"""
+from __future__ import annotations
+
+import json
+from collections.abc import Iterator
+from pathlib import Path
+
+import pytest
+from fastapi.testclient import TestClient
+
+from kubedocs.api.app import create_app
+from kubedocs.config import Settings
+from kubedocs.embed import HashingEmbedder
+from kubedocs.generate import Answerer, LLMResult
+from kubedocs.store.base import ChunkInput, DocInput
+from kubedocs.store.sqlite_store import from_settings
+
+DIM = 32
+"""与 `Settings.embedding_dim` 一致；hashing 维度只影响向量空间大小，不影响管道正确性。"""
+
+LONG_BODY = "kubelet eviction 硬阈值说明，这一段刻意写得很长用来验证截断。" * 40
+"""明显超过 600 字符的正文，用于验证 `/search` 的截断行为。"""
+
+STARTUP_PAGE = "<h1>真实首页</h1>"
+
+
+class _StubLLM:
+    """打桩 LLM：返回一句带合法引用标记的答案，不碰任何网络。"""
+
+    def complete(self, system: str, user: str) -> LLMResult:
+        return LLMResult(text="打桩答案 [1]", prompt_tokens=1, completion_tokens=1)
+
+
+# --------------------------------------------------------------------------- 辅助
+def _seed_index(settings: Settings, bodies: list[str], *, title: str = "Pod 驱逐") -> None:
+    """直接构造 store 灌入 1~2 个块（等价于 ingest 的后半段）。
+
+    为什么不用 CLI 的 ingest：那需要磁盘上的 markdown 语料，而本文件要验证的是
+    HTTP 层——索引里有块就够了。写完就 `close()`，随后 `create_app` 会自己再开一次
+    （这也顺带验证了"索引文件是持久的、不靠进程内状态"）。
+    """
+    store = from_settings(settings)
+    try:
+        docs: list[DocInput] = []
+        chunks: list[ChunkInput] = []
+        for i, body in enumerate(bodies):
+            doc_id = f"doc{i}"
+            url = f"https://kubernetes.io/docs/doc{i}/"
+            digest = f"h-{i}"
+            docs.append(DocInput(doc_id=doc_id, rel_path=f"{doc_id}.md", title=title,
+                                 source_url=url, content_hash=digest))
+            chunks.append(ChunkInput(chunk_id=f"{doc_id}::0000", doc_id=doc_id, ordinal=0,
+                                     title=title, breadcrumb="配置", source_url=url,
+                                     body=body, content_hash=digest, n_chars=len(body)))
+        matrix = HashingEmbedder(dim=settings.embedding_dim).encode([c.body for c in chunks])
+        store.upsert_docs(docs, chunks, {c.chunk_id: matrix[i] for i, c in enumerate(chunks)})
+        store.finalize()
+    finally:
+        store.close()
+
+
+def _sse_events(text: str) -> list[tuple[str, dict]]:
+    """把 SSE 响应体解析成 `(event, data)` 列表（`\\r\\n` 统一成 `\\n` 再切块）。"""
+    events: list[tuple[str, dict]] = []
+    for block in text.replace("\r\n", "\n").split("\n\n"):
+        name, data = "", {}
+        for line in block.splitlines():
+            if line.startswith("event: "):
+                name = line[len("event: "):].strip()
+            elif line.startswith("data: "):
+                data = json.loads(line[len("data: "):])
+        if name:
+            events.append((name, data))
+    return events
+
+
+def _event(events: list[tuple[str, dict]], name: str) -> dict:
+    """取第一个名为 `name` 的事件数据；没有就断言失败（而不是静默返回空 dict）。"""
+    for got, data in events:
+        if got == name:
+            return data
+    raise AssertionError(f"没有 {name!r} 事件；实际收到：{[n for n, _ in events]}")
+
+
+# --------------------------------------------------------------------------- 夹具
+@pytest.fixture
+def api_settings(tmp_path: Path) -> Settings:
+    """索引指向 tmp_path、嵌入用 hashing：**绝不联网、绝不加载真实模型**。"""
+    return Settings(
+        index_dir=str(tmp_path / "index"),
+        domain="k8s_docs",
+        embedding_provider="hashing",
+        embedding_dim=DIM,
+        embedding_model="hashing-test",
+        rerank_enable=False,
+    )
+
+
+@pytest.fixture
+def client(api_settings: Settings) -> Iterator[TestClient]:
+    """空索引的客户端。
+
+    用 `with` 进入 lifespan：测试结束会关掉 SQLite 连接，
+    否则 Windows 上 tmp_path 会因为文件被占用而删不掉（表现为 teardown 报错）。
+    """
+    with TestClient(create_app(api_settings)) as c:
+        yield c
+
+
+# ===========================================================================
+# 没有索引时的探针与自省
+# ===========================================================================
+class TestWithoutIndex:
+    def test_healthz_returns_200_even_without_index(self, client: TestClient) -> None:
+        """没有索引时 /healthz 仍然 200：判活探针关心"进程活着"，不关心有没有语料。"""
+        resp = client.get("/healthz")
+        assert resp.status_code == 200
+        assert resp.json() == {"ok": True, "domain": "k8s_docs", "n_chunks": 0}
+
+    def test_domains_returns_200_even_without_index(self, client: TestClient) -> None:
+        """域包与索引是两件事：索引为空照样要能列出可用域。"""
+        resp = client.get("/domains")
+        assert resp.status_code == 200
+        names = {item["name"] for item in resp.json()}
+        assert {"k8s_docs", "clinic"} <= names
+
+    def test_tools_returns_200_even_without_index(self, client: TestClient) -> None:
+        """工具注册与索引无关：空索引下 /tools 也要能自省出工具清单。"""
+        resp = client.get("/tools")
+        assert resp.status_code == 200
+        assert "book_appointment" in {t["name"] for t in resp.json()["tools"]}
+
+    def test_tools_domain_filter_and_unknown_domain(self, client: TestClient) -> None:
+        """`?domain=` 只列该域的工具；未知域 400 且把可用域列出来。"""
+        all_tools = client.get("/tools").json()["tools"]
+        filtered = client.get("/tools", params={"domain": "clinic"}).json()["tools"]
+        assert "book_appointment" in {t["name"] for t in filtered}, filtered
+        # 按域过滤 = 只保留声明为 clinic 的工具（比对全量清单自己算出的期望值，
+        # 这样断言不依赖"哪个工具被归属到哪个域"的实现细节）
+        assert filtered == [t for t in all_tools if t["domain"] == "clinic"]
+
+        bad = client.get("/tools", params={"domain": "no_such_domain"})
+        assert bad.status_code == 400
+        detail = bad.json()["detail"]
+        assert "k8s_docs" in detail and "clinic" in detail, detail
+
+
+# ===========================================================================
+# /search
+# ===========================================================================
+class TestSearch:
+    def test_empty_index_returns_200_with_empty_hits(self, client: TestClient) -> None:
+        """空索引 → 200 + 空 hits + 一句说明（绝不是 500）。"""
+        resp = client.post("/search", json={"q": "pod"})
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["hits"] == []
+        assert body["note"], "空索引必须给出说明，别让调用方自己去猜"
+        assert "diagnostics" in body
+
+    def test_hits_carry_source_url_and_truncated_body(self, api_settings: Settings) -> None:
+        """有数据时 hits 里有 source_url，且 body 被截断（引用能追溯到原文）。"""
+        assert len(LONG_BODY) > 600, "测试数据本身要先超过截断阈值"
+        _seed_index(api_settings, [LONG_BODY])
+        with TestClient(create_app(api_settings)) as client:
+            resp = client.post("/search", json={"q": "kubelet", "top_k": 5})
+
+        assert resp.status_code == 200
+        hits = resp.json()["hits"]
+        assert hits, resp.json()
+        hit = hits[0]
+        assert hit["source_url"].startswith("https://")
+        assert len(hit["body"]) == 600, "截断后总长（含省略号）必须正好等于上限"
+        assert hit["body"].endswith("…"), "截断必须留痕迹，否则读者以为正文就这样结束了"
+        assert hit["chunk_id"] and hit["title"] and hit["breadcrumb"]
+
+    def test_unknown_domain_is_400_and_lists_available(self, client: TestClient) -> None:
+        """未知域 → 400 并列出可用域（静默回退到默认域会让人拿到错的域的结果）。"""
+        resp = client.post("/search", json={"q": "pod", "domain": "clinic_typo"})
+        assert resp.status_code == 400
+        detail = resp.json()["detail"]
+        assert "k8s_docs" in detail and "clinic" in detail, detail
+
+    @pytest.mark.parametrize("path", ["/search", "/ask"])
+    @pytest.mark.parametrize("top_k", [0, 21])
+    def test_top_k_out_of_range_is_422(self, client: TestClient, path: str,
+                                       top_k: int) -> None:
+        """top_k 越界（0 或 21）→ 422：范围由 `Field(ge=1, le=20)` 定，不靠下游兜底。"""
+        resp = client.post(path, json={"q": "pod", "top_k": top_k})
+        assert resp.status_code == 422
+
+    def test_blank_query_is_422(self, client: TestClient) -> None:
+        """只有空白的 q → 422：它注定无结果，却会白跑一次嵌入与全文检索。"""
+        assert client.post("/search", json={"q": "   "}).status_code == 422
+
+    def test_too_long_query_is_422(self, client: TestClient) -> None:
+        """q 超过 300 字符 → 422（外部输入必须有长度上限）。"""
+        assert client.post("/search", json={"q": "k" * 301}).status_code == 422
+
+
+# ===========================================================================
+# /ask
+# ===========================================================================
+class TestAsk:
+    def test_without_llm_key_degrades_instead_of_500(self, api_settings: Settings) -> None:
+        """没有 LLM 密钥 → 200 + degraded 说明 + 引用照常返回（**不是** 500）。
+
+        conftest 的 autouse 夹具清掉了所有供应商密钥，所以这条分支是确定性的。
+        """
+        _seed_index(api_settings, [LONG_BODY])
+        with TestClient(create_app(api_settings)) as client:
+            resp = client.post("/ask", json={"q": "kubelet"})
+
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["answer"] == ""
+        assert body["degraded"] == "未配置 LLM 密钥，仅返回检索结果"
+        assert body["n_hits"] >= 1
+        assert body["citations"], "回答降级不等于引用也降级：来源必须照常返回"
+        assert body["citations"][0]["source_url"].startswith("https://")
+
+    def test_empty_index_returns_200_with_explanation(self, client: TestClient) -> None:
+        """空索引下 /ask 也返回 200 + 说明：没有语料就明说没有，不许编造。"""
+        resp = client.post("/ask", json={"q": "pod"})
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["answer"] == ""
+        assert body["n_hits"] == 0
+        assert body["degraded"]
+
+    def test_answer_and_citations_are_passed_through(self, api_settings: Settings,
+                                                     monkeypatch: pytest.MonkeyPatch) -> None:
+        """"有可用 LLM"时 /ask 把生成层的答案与引用原样透出（用打桩 LLM，绝不联网）。
+
+        打桩打在**装配点** `build_answerer` 而不是 litellm 内部：只要有一处没打中，
+        真调用就会发到供应商，而测试不允许存在这种可能。这一条覆盖的是
+        "检索 -> 生成 -> 响应映射"这段胶水，生成层自身由 `test_generate.py` 覆盖。
+        """
+        _seed_index(api_settings, [LONG_BODY])
+        monkeypatch.setattr("kubedocs.api.app.has_api_key", lambda _model: True)
+        monkeypatch.setattr(
+            "kubedocs.api.app.build_answerer",
+            lambda retriever, settings: Answerer(retriever, _StubLLM(), settings),
+        )
+        with TestClient(create_app(api_settings)) as client:
+            resp = client.post("/ask", json={"q": "kubelet"})
+
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["answer"] == "打桩答案 [1]"
+        assert body["degraded"] == "", "生成成功且检索无降级时不该有降级说明"
+        assert [c["index"] for c in body["citations"]] == [1]
+        assert body["n_hits"] >= 1
+
+
+# ===========================================================================
+# /chat（SSE）
+# ===========================================================================
+class TestChat:
+    def test_returns_sse_stream_with_expected_events(self, client: TestClient) -> None:
+        """/chat 返回 SSE：content-type 是 text/event-stream，事件序列是 thread→message→done。"""
+        resp = client.post("/chat", json={"message": "我最近有点咳嗽"})
+        assert resp.status_code == 200
+        assert "text/event-stream" in resp.headers["content-type"]
+        assert "event:" in resp.text and "data:" in resp.text
+
+        events = _sse_events(resp.text)
+        names = [name for name, _ in events]
+        assert names[0] == "thread", names
+        assert names[-1] == "done", names
+        assert events[0][1]["thread_id"], "首个事件必须把 thread_id 交出去"
+        text = _event(events, "message")["text"]
+        assert text, "最终文本不能是空串"
+
+    def test_thread_id_is_respected_and_conversation_continues(self, client: TestClient) -> None:
+        """带同一个 thread_id 再来一次 = 续聊：内核的 interrupt 挂起点会被 resume。"""
+        first = client.post("/chat", json={"message": "我最近咳嗽", "thread_id": "t-api-1"})
+        assert _event(_sse_events(first.text), "thread")["thread_id"] == "t-api-1"
+
+        second = client.post("/chat", json={"message": "帮我挂号", "thread_id": "t-api-1"})
+        assert second.status_code == 200
+        message = _event(_sse_events(second.text), "message")
+        assert message["thread_id"] == "t-api-1"
+        assert message["text"]
+
+    def test_chat_works_without_index_or_corpus(self, api_settings: Settings) -> None:
+        """无索引/无语料也要能返回：clinic 的规则轨（红线）不依赖索引，这是设计目标。
+
+        「胸痛」是急诊红线词，所以这一轮必定走 emergency 分支并给出急诊建议；
+        同时它以 `tool` 事件的形式可见——即"agent 真的做了这件事"，而不是只在文本里提一句。
+        """
+        settings = api_settings.model_copy(update={"domain": "clinic"})
+        with TestClient(create_app(settings)) as client:
+            resp = client.post("/chat", json={"message": "我现在胸痛", "patient_id": "p1"})
+
+        assert resp.status_code == 200
+        events = _sse_events(resp.text)
+        tools = [data for name, data in events if name == "tool"]
+        assert any(t["tool"] == "check_red_line" for t in tools), tools
+        assert "120" in _event(events, "message")["text"]
+
+    def test_too_long_message_is_422(self, client: TestClient) -> None:
+        """message 超过 2000 字符 → 422（单轮对话文本的上限在 schema 里）。"""
+        assert client.post("/chat", json={"message": "咳" * 2001}).status_code == 422
+
+
+# ===========================================================================
+# 首页
+# ===========================================================================
+class TestIndexPage:
+    def test_missing_html_returns_200_explanation(self, api_settings: Settings,
+                                                  tmp_path: Path) -> None:
+        """`data/web/index.html` 不存在时返回 200 说明页（404 会被当成"服务没起来"）。"""
+        app = create_app(api_settings)
+        app.state.index_html = tmp_path / "no-such-index.html"
+        with TestClient(app) as client:
+            resp = client.get("/")
+
+        assert resp.status_code == 200
+        assert "text/html" in resp.headers["content-type"]
+        assert "kubedocs" in resp.text
+
+    def test_existing_html_is_served_verbatim(self, api_settings: Settings,
+                                              tmp_path: Path) -> None:
+        """有构建产物时原样返回它：说明页只在真的缺前端时出现。"""
+        page = tmp_path / "index.html"
+        page.write_text(STARTUP_PAGE, encoding="utf-8")
+        app = create_app(api_settings)
+        app.state.index_html = page
+        with TestClient(app) as client:
+            resp = client.get("/")
+
+        assert resp.status_code == 200
+        assert STARTUP_PAGE in resp.text

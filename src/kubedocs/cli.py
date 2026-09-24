@@ -242,6 +242,28 @@ def cmd_eval(args: argparse.Namespace) -> int:
         store.close()
 
 
+# --------------------------------------------------------------------------- serve
+def cmd_serve(args: argparse.Namespace) -> int:
+    """起 HTTP 服务（uvicorn）。
+
+    `kubedocs.api.app` 是**延迟导入**的：没有装 FastAPI/uvicorn 或只想用 CLI 时，
+    其它子命令不该因为一个 import 就全部不可用。
+    """
+    import uvicorn
+
+    from kubedocs.api.app import create_app
+
+    settings = make_settings(args)
+    app = create_app(settings)
+    host = args.host or "127.0.0.1"
+    port = int(args.port or settings.api_port)
+    print(f"服务地址：http://{host}:{port}")
+    print(f"域：{settings.domain}    索引：{settings.sqlite_path}")
+    print("首页（前端演示）：/    接口文档：/docs")
+    uvicorn.run(app, host=host, port=port, log_level=(args.log_level or "info").lower())
+    return EXIT_OK
+
+
 # --------------------------------------------------------------------------- 解析
 def _add_globals(p: argparse.ArgumentParser, default: object) -> None:
     """全局参数（放在主解析器与每个子解析器上，两处都能写）。
@@ -303,6 +325,11 @@ def build_parser() -> argparse.ArgumentParser:
                         parents=[common])
     pd.add_argument("--json", action="store_true")
     pd.set_defaults(func=cmd_domains)
+
+    psrv = sub.add_parser("serve", help="起 HTTP 服务 + 前端演示页", parents=[common])
+    psrv.add_argument("--host", default=None, help="监听地址（默认 127.0.0.1）")
+    psrv.add_argument("--port", type=int, default=None, help="端口（默认取配置 api_port）")
+    psrv.set_defaults(func=cmd_serve)
 
     pt = sub.add_parser("stats", help="索引体检", parents=[common])
     pt.add_argument("--verify", action="store_true", help="顺便做 FTS 一致性自检")
