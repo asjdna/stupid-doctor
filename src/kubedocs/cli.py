@@ -298,6 +298,11 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: list[str] | None = None) -> int:
+    # 必须在任何第三方库（LiteLLM / huggingface_hub）读到 os.environ **之前**导出 .env，
+    # 否则 .env 里的密钥到不了模型调用（详见 config.load_env_file 的说明）。
+    from kubedocs.config import load_env_file
+
+    load_env_file()
     parser = build_parser()
     args = parser.parse_args(argv)
     t0 = time.perf_counter()

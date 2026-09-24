@@ -7,6 +7,7 @@
 """
 from __future__ import annotations
 
+import os
 from functools import lru_cache
 from pathlib import Path
 from typing import Literal
@@ -25,12 +26,50 @@ def repo_root() -> Path:
     return Path(__file__).resolve().parents[2]
 
 
+def env_file_path() -> Path:
+    """`.env` 的位置，同样锚定仓库根而不是 cwd。"""
+    return repo_root() / ".env"
+
+
+def load_env_file(path: Path | None = None) -> list[str]:
+    """把 `.env` 里的键**导出到 `os.environ`**，返回本次新增的键名。
+
+    为什么必须显式做这一步（而不是只靠 pydantic-settings 的 `env_file`）：
+
+    pydantic-settings 只把 `.env` 的值填进 `Settings` 对象，**不会写进 `os.environ`**。
+    而第三方库（LiteLLM、huggingface_hub 等）以及本项目自己的 `has_api_key()`
+    读的都是 `os.environ`。结果就是 `cp .env.example .env` 填好密钥之后，
+    模型调用仍然报"未配置密钥"——README 描述的那套流程**静默失效**。
+
+    这个缺陷正是"回答层从未用真实 LLM 跑过"掩盖住的：所有单测都打桩，
+    打桩路径不经过密钥读取。
+
+    `override=False`：真实环境变量优先于 `.env`，容器里注入的密钥不会被文件覆盖。
+    """
+    target = path or env_file_path()
+    if not target.exists():
+        return []
+    from dotenv import dotenv_values
+
+    added: list[str] = []
+    for key, value in dotenv_values(target).items():
+        # 空值等同于未设置：`.env.example` 里成片的 `KEY=` 不该把
+        # "没有密钥"伪装成"有密钥"（否则 has_api_key 会误判为可用）
+        if value is None or not value.strip() or key in os.environ:
+            continue
+        os.environ[key] = value
+        added.append(key)
+    return added
+
+
 class Settings(BaseSettings):
     """全部运行期配置。字段名 -> 环境变量名由 env_prefix 统一成 KUBEDOCS_*。"""
 
     model_config = SettingsConfigDict(
         env_prefix="KUBEDOCS_",
-        env_file=".env",
+        # 锚定仓库根：pydantic-settings 默认按 cwd 找 .env，
+        # 从别处调用时会读不到配置（与本文件 repo_root 的理由相同）
+        env_file=str(repo_root() / ".env"),
         env_file_encoding="utf-8",
         extra="ignore",
     )
