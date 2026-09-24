@@ -1,0 +1,827 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>kubedocs 演示页 · 检索 / 问答 / 问诊 Agent</title>
+<style>
+  :root {
+    --bg: #0f1419;
+    --panel: #171d24;
+    --panel-2: #1e262f;
+    --line: #2b3542;
+    --fg: #e6edf3;
+    --fg-dim: #9aa7b4;
+    --fg-mute: #6e7b8a;
+    --accent: #4c9aff;
+    --accent-soft: #1d3a5c;
+    --ok: #3fb950;
+    --warn: #d29922;
+    --err: #f85149;
+    --mono: ui-monospace, SFMono-Regular, Consolas, "Cascadia Mono", Menlo, monospace;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; }
+  body {
+    background: var(--bg);
+    color: var(--fg);
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "Microsoft YaHei", "PingFang SC", Roboto, sans-serif;
+    font-size: 14px;
+    line-height: 1.6;
+  }
+  a { color: var(--accent); text-decoration: none; }
+  a:hover { text-decoration: underline; }
+  code, pre { font-family: var(--mono); font-size: 12px; }
+
+  /* ---------- 顶部状态栏 ---------- */
+  .topbar {
+    position: sticky; top: 0; z-index: 20;
+    display: flex; flex-wrap: wrap; align-items: center; gap: 10px 18px;
+    padding: 10px 16px;
+    background: #12181f;
+    border-bottom: 1px solid var(--line);
+  }
+  .brand { font-weight: 600; letter-spacing: .3px; }
+  .brand span { color: var(--fg-mute); font-weight: 400; margin-left: 6px; font-size: 12px; }
+  .status { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+  .dot { width: 9px; height: 9px; border-radius: 50%; background: var(--fg-mute); flex: none; }
+  .dot.ok { background: var(--ok); }
+  .dot.err { background: var(--err); }
+  .dot.warn { background: var(--warn); }
+  .kv { color: var(--fg-dim); font-size: 13px; }
+  .kv b { color: var(--fg); font-weight: 600; }
+  .spacer { flex: 1 1 auto; }
+  .field { display: flex; align-items: center; gap: 6px; font-size: 13px; color: var(--fg-dim); }
+
+  /* ---------- 通用控件 ---------- */
+  select, input[type=text], textarea {
+    background: var(--panel-2); color: var(--fg);
+    border: 1px solid var(--line); border-radius: 6px;
+    padding: 6px 8px; font-size: 13px; font-family: inherit;
+    outline: none; min-width: 0;
+  }
+  select:focus, input[type=text]:focus, textarea:focus { border-color: var(--accent); }
+  textarea { resize: vertical; line-height: 1.5; }
+  button {
+    background: var(--accent-soft); color: #cfe4ff;
+    border: 1px solid #2f5c92; border-radius: 6px;
+    padding: 6px 14px; font-size: 13px; font-family: inherit; cursor: pointer;
+  }
+  button:hover:not(:disabled) { background: #24466d; }
+  button:disabled { opacity: .45; cursor: not-allowed; }
+  button.ghost { background: transparent; color: var(--fg-dim); border-color: var(--line); }
+  button.ghost:hover:not(:disabled) { background: var(--panel-2); color: var(--fg); }
+
+  /* ---------- 布局 ---------- */
+  main {
+    display: grid; gap: 16px; padding: 16px;
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+    align-items: start;
+  }
+  @media (max-width: 1000px) { main { grid-template-columns: minmax(0, 1fr); } }
+  .col { display: flex; flex-direction: column; gap: 16px; min-width: 0; }
+  section.panel {
+    background: var(--panel); border: 1px solid var(--line);
+    border-radius: 10px; overflow: hidden; min-width: 0;
+  }
+  .panel > h2 {
+    margin: 0; padding: 10px 14px; font-size: 14px; font-weight: 600;
+    background: #1a222b; border-bottom: 1px solid var(--line);
+    display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+  }
+  .panel > h2 .hint { color: var(--fg-mute); font-weight: 400; font-size: 12px; }
+  .panel > h2 .spacer { flex: 1 1 auto; }
+  .body { padding: 14px; }
+  .row { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+  .grow { flex: 1 1 220px; }
+
+  /* ---------- 提示条 ---------- */
+  #banners { padding: 0 16px; }
+  #banners:not(:empty) { padding-top: 12px; }
+  .banner {
+    display: flex; gap: 10px; align-items: flex-start;
+    border: 1px solid var(--line); border-left-width: 3px;
+    border-radius: 8px; padding: 9px 12px; margin-bottom: 8px;
+    background: var(--panel-2); font-size: 13px;
+  }
+  .banner .tag { font-weight: 600; flex: none; }
+  .banner .msg { flex: 1 1 auto; word-break: break-word; }
+  .banner .x { background: none; border: none; color: var(--fg-mute); cursor: pointer; padding: 0 2px; font-size: 15px; line-height: 1; }
+  .banner.err { border-left-color: var(--err); }
+  .banner.err .tag { color: var(--err); }
+  .banner.warn { border-left-color: var(--warn); }
+  .banner.warn .tag { color: var(--warn); }
+  .banner.info { border-left-color: var(--accent); }
+  .banner.info .tag { color: var(--accent); }
+
+  /* ---------- 工具表 ---------- */
+  table.tools { width: 100%; border-collapse: collapse; font-size: 13px; }
+  table.tools th, table.tools td { text-align: left; padding: 7px 10px; border-bottom: 1px solid var(--line); vertical-align: top; }
+  table.tools th { color: var(--fg-dim); font-weight: 600; background: #1a222b; white-space: nowrap; }
+  table.tools td.name { font-family: var(--mono); color: #cfe4ff; white-space: nowrap; }
+  table.tools td.desc { color: var(--fg-dim); }
+  table.tools td.se { white-space: nowrap; }
+  .pill { display: inline-block; padding: 1px 7px; border-radius: 999px; font-size: 12px; border: 1px solid var(--line); }
+  .pill.yes { color: var(--warn); border-color: #5c4a1e; background: #2a2313; }
+  .pill.no { color: var(--fg-mute); }
+
+  /* ---------- 检索结果 ---------- */
+  .hit { border: 1px solid var(--line); border-radius: 8px; padding: 10px 12px; margin-bottom: 10px; background: var(--panel-2); }
+  .hit .title { font-weight: 600; margin-bottom: 3px; word-break: break-word; }
+  .hit .crumb { color: var(--fg-mute); font-size: 12px; font-family: var(--mono); word-break: break-all; margin-bottom: 5px; }
+  .hit .url { font-size: 12px; word-break: break-all; }
+  .hit .snippet {
+    color: var(--fg-dim); margin-top: 7px; white-space: pre-wrap; word-break: break-word;
+    display: -webkit-box; -webkit-line-clamp: 6; -webkit-box-orient: vertical; overflow: hidden;
+  }
+  .hit .cid { float: right; color: var(--fg-mute); font-size: 11px; font-family: var(--mono); }
+  .answer { white-space: pre-wrap; word-break: break-word; }
+  .answer .cite { font-family: var(--mono); font-size: 12px; padding: 0 2px; }
+  .empty { color: var(--fg-mute); font-size: 13px; }
+
+  details { margin-top: 10px; border-top: 1px dashed var(--line); padding-top: 8px; }
+  details > summary { cursor: pointer; color: var(--fg-dim); font-size: 12px; outline: none; }
+  details > summary:hover { color: var(--fg); }
+  details pre {
+    background: #10161c; border: 1px solid var(--line); border-radius: 6px;
+    padding: 9px 10px; margin: 8px 0 0; overflow: auto; max-height: 320px; color: #b9c7d6;
+  }
+
+  /* ---------- 对话 ---------- */
+  .chat-body { display: flex; flex-direction: column; gap: 10px; }
+  #messages { display: flex; flex-direction: column; gap: 10px; min-height: 160px; max-height: 46vh; overflow-y: auto; padding-right: 2px; }
+  .msg { border-radius: 8px; padding: 8px 11px; max-width: 92%; word-break: break-word; white-space: pre-wrap; }
+  .msg.user { align-self: flex-end; background: var(--accent-soft); border: 1px solid #2f5c92; }
+  .msg.assistant { align-self: flex-start; background: var(--panel-2); border: 1px solid var(--line); }
+  .msg.sys { align-self: center; color: var(--fg-mute); font-size: 12px; background: transparent; }
+  .msg.err { align-self: flex-start; background: #2a1618; border: 1px solid #6b2b2b; color: #ffb4ae; }
+  .msg .who { display: block; font-size: 11px; color: var(--fg-mute); margin-bottom: 2px; }
+  .caret { display: inline-block; width: 7px; color: var(--accent); }
+  .caret::after { content: "▍"; }
+  .caret.off::after { content: ""; }
+
+  #trace pre { max-height: 200px; }
+  .trace-line { font-family: var(--mono); font-size: 12px; color: #cfe4ff; padding: 3px 0; word-break: break-word; }
+  .trace-line .t-muted { color: var(--fg-mute); }
+  #citations { margin-top: 4px; }
+  #citations ol { margin: 6px 0 0; padding-left: 22px; }
+  #citations li { margin-bottom: 3px; font-size: 13px; word-break: break-word; }
+  #citations li:target { background: #2a2313; outline: 1px solid var(--warn); border-radius: 4px; }
+  .composer { display: flex; gap: 8px; align-items: flex-end; }
+  .composer textarea { flex: 1 1 auto; min-height: 44px; max-height: 140px; }
+  .streaming-note { color: var(--fg-mute); font-size: 12px; display: none; }
+  .streaming-note.on { display: inline; }
+</style>
+</head>
+<body>
+
+<header class="topbar">
+  <div class="brand">kubedocs<span>检索 / 问答 / 问诊 Agent 演示</span></div>
+  <div class="status">
+    <span class="dot" id="healthDot"></span>
+    <span class="kv" id="healthText">正在检测服务状态…</span>
+  </div>
+  <div class="spacer"></div>
+  <label class="field">域
+    <select id="domainSel" title="切换检索域">
+      <option value="">（全部域）</option>
+    </select>
+  </label>
+  <label class="field">API
+    <input type="text" id="apiBase" size="22" placeholder="留空=同源" title="留空则请求同源后端；也可填 http://127.0.0.1:8000">
+  </label>
+  <button class="ghost" id="btnRefresh">刷新状态</button>
+</header>
+
+<div id="banners"></div>
+
+<main>
+  <!-- ================= 左列：检索 + 工具 ================= -->
+  <div class="col">
+    <section class="panel">
+      <h2>检索 / 问答
+        <span class="hint">POST /search · POST /ask</span>
+      </h2>
+      <div class="body">
+        <div class="row">
+          <input type="text" id="q" class="grow" placeholder="输入问题，例如：Pod 一直 Pending 怎么排查？" autocomplete="off">
+          <label class="field"><input type="radio" name="mode" value="search" checked> 检索</label>
+          <label class="field"><input type="radio" name="mode" value="ask"> 问答</label>
+          <label class="field">top_k
+            <input type="text" id="topK" value="8" size="3">
+          </label>
+          <button id="btnGo">提交</button>
+        </div>
+        <div id="searchOut" style="margin-top:12px"></div>
+      </div>
+    </section>
+
+    <section class="panel">
+      <h2>工具清单
+        <span class="hint">GET /tools（随域过滤）</span>
+      </h2>
+      <div class="body" id="toolsOut"><span class="empty">加载中…</span></div>
+    </section>
+  </div>
+
+  <!-- ================= 右列：对话 ================= -->
+  <div class="col">
+    <section class="panel">
+      <h2>问诊对话（Agent）
+        <span class="hint">POST /chat · SSE 流</span>
+        <span class="spacer"></span>
+        <span class="streaming-note" id="streamNote">● 正在接收流…</span>
+        <label class="field">patient_id
+          <input type="text" id="patientId" value="anon" size="8">
+        </label>
+        <button class="ghost" id="btnNewChat">新会话</button>
+      </h2>
+      <div class="body chat-body">
+        <div id="messages"></div>
+
+        <details id="trace" open>
+          <summary>工具调用轨迹（agent 实际调用了哪些工具）<span id="traceCount" class="hint"></span></summary>
+          <div id="traceLines" style="margin-top:6px"></div>
+        </details>
+
+        <div id="citations"></div>
+
+        <div class="composer">
+          <textarea id="chatInput" rows="2" placeholder="描述症状，例如：我这两天咳嗽发烧，应该挂哪个科？（Enter 发送，Shift+Enter 换行）"></textarea>
+          <button id="btnSend">发送</button>
+          <button class="ghost" id="btnStop" disabled>停止</button>
+        </div>
+        <div class="empty" style="font-size:12px">多轮对话依赖 thread_id（保存在页面变量中，第二轮起自动携带）；点击「新会话」清空 thread_id 与消息。</div>
+      </div>
+    </section>
+  </div>
+</main>
+
+<script>
+(function () {
+  'use strict';
+
+  // ---------------- 基础设施 ----------------
+  var $ = function (id) { return document.getElementById(id); };
+  var API_BASE = '';           // 留空 = 同源
+  var health = null;           // /healthz 结果
+  var threadId = '';           // 多轮对话的关键：第二轮起带上
+  var streaming = false;
+  var abortCtl = null;
+
+  function api(path) { return API_BASE + path; }
+
+  function esc(s) {
+    return String(s == null ? '' : s)
+      .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+  }
+
+  function banner(kind, tag, msg) {
+    var el = document.createElement('div');
+    el.className = 'banner ' + kind;
+    el.innerHTML = '<span class="tag">' + esc(tag) + '</span><span class="msg"></span>' +
+                   '<button class="x" title="关闭">×</button>';
+    el.querySelector('.msg').textContent = msg;
+    el.querySelector('.x').onclick = function () { el.remove(); };
+    $('banners').appendChild(el);
+    return el;
+  }
+  function err(msg) { return banner('err', '错误', msg); }
+  function warn(msg) { return banner('warn', '注意', msg); }
+  function info(msg) { return banner('info', '提示', msg); }
+  function clearBanners() { $('banners').innerHTML = ''; }
+
+  // 统一请求：非 200 / 网络异常 -> 抛出可读错误
+  async function requestJSON(path, options) {
+    var res;
+    try {
+      res = await fetch(api(path), options);
+    } catch (e) {
+      throw new Error('网络请求失败（' + path + '）：无法连接后端。' +
+        (e && e.message ? ' 原因：' + e.message : '') +
+        ' 请确认服务已启动，或在上方 API 输入框填写完整地址（如 http://127.0.0.1:8000）。');
+    }
+    var text = await res.text();
+    if (!res.ok) {
+      var detail = text ? text.slice(0, 400) : '(空响应体)';
+      try {
+        var j = JSON.parse(text);
+        if (j && (j.detail || j.message || j.error)) detail = j.detail || j.message || j.error;
+      } catch (_) { /* 非 JSON，保留原文 */ }
+      throw new Error('HTTP ' + res.status + ' ' + (res.statusText || '') + '（' + path + '）：' + detail);
+    }
+    if (!text) return {};
+    try {
+      return JSON.parse(text);
+    } catch (e) {
+      throw new Error('响应不是合法 JSON（' + path + '）：' + text.slice(0, 200));
+    }
+  }
+
+  function postJSON(path, body) {
+    return requestJSON(path, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body)
+    });
+  }
+
+  function currentDomain() { return $('domainSel').value || ''; }
+
+  // ---------------- 顶部状态栏 ----------------
+  function renderHealth() {
+    var dot = $('healthDot'), txt = $('healthText');
+    if (!health) {
+      dot.className = 'dot err';
+      txt.textContent = '服务状态未知（/healthz 未成功返回）';
+      return;
+    }
+    var n = Number(health.n_chunks);
+    var hasN = isFinite(n);
+    dot.className = 'dot ' + (health.ok === false ? 'err' : (hasN && n === 0 ? 'warn' : 'ok'));
+    txt.innerHTML = '服务状态：<b>' + esc(health.ok === false ? '异常' : '正常') + '</b>' +
+      ' · 当前域：<b>' + esc(health.domain || '(未报告)') + '</b>' +
+      ' · 索引块数：<b>' + esc(hasN ? n : '(未报告)') + '</b>';
+  }
+
+  async function loadHealth() {
+    clearBanners();
+    try {
+      health = await requestJSON('/healthz');
+      renderHealth();
+      var n = Number(health.n_chunks);
+      if (isFinite(n) && n === 0) {
+        warn('索引为空（n_chunks = 0），请先 ingest 语料，否则检索与问答都会返回空结果。');
+      }
+    } catch (e) {
+      health = null;
+      renderHealth();
+      $('healthText').textContent = '服务不可用：' + e.message;
+      err('健康检查失败：' + e.message);
+    }
+  }
+
+  async function loadDomains() {
+    var sel = $('domainSel');
+    var keep = sel.value;
+    try {
+      var data = await requestJSON('/domains');
+      var list = Array.isArray(data) ? data : (data && Array.isArray(data.domains) ? data.domains : []);
+      sel.innerHTML = '<option value="">（全部域）</option>';
+      list.forEach(function (d) {
+        var name = typeof d === 'string' ? d : (d && d.name);
+        if (!name) return;
+        var opt = document.createElement('option');
+        opt.value = name;
+        var desc = (d && d.description) ? (' — ' + d.description) : '';
+        var norm = (d && d.normalizer) ? (' [normalizer: ' + d.normalizer + ']') : '';
+        opt.textContent = name + desc + norm;
+        sel.appendChild(opt);
+      });
+      sel.value = keep && sel.querySelector('option[value="' + keep + '"]') ? keep : '';
+      if (list.length === 0) info('/domains 返回空列表，域切换下拉框没有可选项。');
+    } catch (e) {
+      err('加载域列表失败：' + e.message);
+      $('toolsOut').innerHTML = '<span class="empty">域列表不可用，工具清单未加载。</span>';
+    }
+  }
+
+  async function loadTools() {
+    var out = $('toolsOut');
+    out.innerHTML = '<span class="empty">加载中…</span>';
+    try {
+      var d = currentDomain();
+      var data = await requestJSON('/tools' + (d ? ('?domain=' + encodeURIComponent(d)) : ''));
+      var tools = (data && Array.isArray(data.tools)) ? data.tools : (Array.isArray(data) ? data : []);
+      if (!tools.length) {
+        out.innerHTML = '<span class="empty">该域没有可用工具。</span>';
+        return;
+      }
+      var html = '<table class="tools"><thead><tr><th>工具名</th><th>说明</th><th>域</th><th>需二次确认</th></tr></thead><tbody>';
+      tools.forEach(function (t) {
+        var se = t.side_effect === true || t.side_effect === 'true';
+        var desc = t.description || '';
+        if (t.when_not) desc += '｜不适用：' + t.when_not;
+        html += '<tr>' +
+          '<td class="name">' + esc(t.name || '(unnamed)') + '</td>' +
+          '<td class="desc">' + esc(desc) + '</td>' +
+          '<td>' + esc(t.domain || '-') + '</td>' +
+          '<td class="se"><span class="pill ' + (se ? 'yes' : 'no') + '">' +
+            (se ? '是（写操作）' : '否') + '</span></td>' +
+        '</tr>';
+      });
+      html += '</tbody></table>';
+      out.innerHTML = html;
+    } catch (e) {
+      out.innerHTML = '';
+      err('加载工具清单失败：' + e.message);
+    }
+  }
+
+  // ---------------- 检索 / 问答 ----------------
+  function renderDiagnostics(diag) {
+    if (diag == null) return '';
+    var text;
+    try { text = JSON.stringify(diag, null, 2); } catch (e) { text = String(diag); }
+    return '<details><summary>diagnostics（检索诊断信息，点击展开）</summary><pre>' + esc(text) + '</pre></details>';
+  }
+
+  function renderHits(hits) {
+    if (!hits || !hits.length) {
+      return '<div class="empty">没有检索到任何片段。' +
+             (health && Number(health.n_chunks) === 0 ? '（索引为空，请先 ingest）' : '可尝试更换关键词或切换域。') + '</div>';
+    }
+    var html = '<div class="kv" style="margin-bottom:8px">命中 <b>' + hits.length + '</b> 条</div>';
+    hits.forEach(function (h) {
+      var body = h.body || '';
+      if (body.length > 900) body = body.slice(0, 900) + '…';
+      html += '<div class="hit">' +
+        '<span class="cid">' + esc(h.chunk_id || '') + '</span>' +
+        '<div class="title">' + esc(h.title || h.doc_id || '(无标题)') + '</div>' +
+        '<div class="crumb">' + esc(h.breadcrumb || '') + '</div>' +
+        (h.source_url
+          ? '<div class="url">🔗 <a href="' + esc(h.source_url) + '" target="_blank" rel="noopener noreferrer">' + esc(h.source_url) + '</a></div>'
+          : '<div class="url empty">（无 source_url）</div>') +
+        '<div class="snippet">' + esc(body) + '</div>' +
+      '</div>';
+    });
+    return html;
+  }
+
+  // 把 answer 里的 [1] [2] 变成能跳到来源列表的链接
+  function renderAnswerWithCitations(answer, citations) {
+    var known = {};
+    (citations || []).forEach(function (c) { known[String(c.index)] = true; });
+    return esc(answer).replace(/\[(\d+)\]/g, function (m, n) {
+      if (!known[n]) return m;  // 后端没给对应来源，保持原样，不造假链接
+      return '<a class="cite" href="#cite-' + n + '" title="跳转到来源 [' + n + ']">[' + n + ']</a>';
+    });
+  }
+
+  function renderCitationList(citations) {
+    if (!citations || !citations.length) return '';
+    var html = '<details open><summary>引用来源（citations）</summary><ol>';
+    citations.forEach(function (c) {
+      var label = c.title || c.breadcrumb || ('来源 ' + c.index);
+      var meta = c.breadcrumb && c.breadcrumb !== label ? ' <span class="kv">' + esc(c.breadcrumb) + '</span>' : '';
+      html += '<li id="cite-' + esc(c.index) + '">' +
+        (c.source_url
+          ? '<a href="' + esc(c.source_url) + '" target="_blank" rel="noopener noreferrer">' + esc(label) + '</a>'
+          : esc(label)) + meta + '</li>';
+    });
+    html += '</ol></details>';
+    return html;
+  }
+
+  async function doSearch() {
+    var q = $('q').value.trim();
+    var out = $('searchOut');
+    if (!q) { err('请输入查询内容再提交。'); return; }
+    var mode = document.querySelector('input[name=mode]:checked').value;
+    var topK = parseInt($('topK').value, 10);
+    if (!isFinite(topK) || topK <= 0) topK = 8;
+
+    var btn = $('btnGo');
+    btn.disabled = true;
+    btn.textContent = '请求中…';
+    out.innerHTML = '<span class="empty">正在请求 ' + (mode === 'ask' ? '/ask' : '/search') + ' …</span>';
+
+    try {
+      var body = { q: q, top_k: topK, domain: currentDomain() };
+      if (mode === 'search') {
+        var r = await postJSON('/search', body);
+        var hits = (r && Array.isArray(r.hits)) ? r.hits : [];
+        out.innerHTML = renderHits(hits) + renderDiagnostics(r ? r.diagnostics : null);
+      } else {
+        var a = await postJSON('/ask', body);
+        var html = '';
+        if (a && a.degraded) {
+          warn('未配置 LLM 密钥，仅检索结果：后端返回 degraded=' + JSON.stringify(a.degraded) + '，下面展示的是检索答案而非模型生成内容。');
+        }
+        html += '<div class="hit"><div class="title">回答' +
+                (a && a.degraded ? ' <span class="pill yes">degraded 降级</span>' : '') + '</div>' +
+                '<div class="answer" style="margin-top:6px">' +
+                renderAnswerWithCitations((a && a.answer) || '(后端未返回 answer)', (a && a.citations) || []) +
+                '</div>' +
+                '<div class="kv" style="margin-top:8px">命中片段数：<b>' + esc(a && a.n_hits != null ? a.n_hits : '-') + '</b></div>' +
+                renderDiagnostics(a ? a.diagnostics : null) +
+                '</div>';
+        html += renderCitationList(a ? a.citations : null);
+        out.innerHTML = html;
+      }
+    } catch (e) {
+      out.innerHTML = '';
+      err('请求失败：' + e.message);
+    } finally {
+      btn.disabled = false;
+      btn.textContent = '提交';
+    }
+  }
+
+  // ---------------- 对话（SSE） ----------------
+  function addMsg(role, text) {
+    var el = document.createElement('div');
+    el.className = 'msg ' + role;
+    if (role === 'user' || role === 'assistant') {
+      var who = document.createElement('span');
+      who.className = 'who';
+      who.textContent = role === 'user' ? '我' : '助手';
+      el.appendChild(who);
+    }
+    var span = document.createElement('span');
+    span.textContent = text || '';
+    el.appendChild(span);
+    $('messages').appendChild(el);
+    $('messages').scrollTop = $('messages').scrollHeight;
+    return el;
+  }
+
+  var traceN = 0;
+  function addTrace(ev) {
+    traceN += 1;
+    var lines = $('traceLines');
+    if (traceN === 1) lines.innerHTML = '';
+    var div = document.createElement('div');
+    div.className = 'trace-line';
+
+    var name = ev.name || ev.tool || ev.tool_name || (ev.function && ev.function.name) || '(未知工具)';
+    var args = (ev.args != null ? ev.args
+              : (ev.arguments != null ? ev.arguments
+              : (ev.function && ev.function.arguments != null ? ev.function.arguments : null)));
+    var argsText;
+    if (args == null) argsText = '';
+    else if (typeof args === 'string') argsText = args;
+    else { try { argsText = JSON.stringify(args); } catch (e) { argsText = String(args); } }
+
+    var line = document.createElement('div');
+    line.innerHTML = '<span class="t-muted">🔧 调用</span> ' + esc(name) +
+                     '(' + esc(argsText) + ')';
+    div.appendChild(line);
+
+    var res = (ev.result != null ? ev.result : (ev.output != null ? ev.output : ev.response));
+    if (res != null) {
+      var txt;
+      if (typeof res === 'string') txt = res;
+      else { try { txt = JSON.stringify(res, null, 2); } catch (e) { txt = String(res); } }
+      if (txt.length > 1200) txt = txt.slice(0, 1200) + '…';
+      var d = document.createElement('details');
+      d.innerHTML = '<summary>工具返回</summary><pre>' + esc(txt) + '</pre>';
+      div.appendChild(d);
+    }
+    if (ev.error) {
+      var e2 = document.createElement('div');
+      e2.className = 't-muted';
+      e2.textContent = '⚠ 工具报错：' + (typeof ev.error === 'string' ? ev.error : JSON.stringify(ev.error));
+      div.appendChild(e2);
+    }
+    lines.appendChild(div);
+    $('traceCount').textContent = '（' + traceN + ' 次）';
+  }
+
+  var chatCitations = [];
+  function renderChatCitations() {
+    if (!chatCitations.length) { $('citations').innerHTML = ''; return; }
+    $('citations').innerHTML = renderCitationList(chatCitations);
+  }
+
+  function setStreaming(on) {
+    streaming = on;
+    $('btnSend').disabled = on;
+    $('btnStop').disabled = !on;
+    $('chatInput').disabled = on;
+    $('streamNote').className = 'streaming-note' + (on ? ' on' : '');
+  }
+
+  function resetChat() {
+    if (abortCtl) { try { abortCtl.abort(); } catch (e) {} }
+    threadId = '';
+    chatCitations = [];
+    traceN = 0;
+    $('traceLines').innerHTML = '<span class="empty">本次会话还没有工具调用。</span>';
+    $('traceCount').textContent = '';
+    $('messages').innerHTML = '';
+    $('citations').innerHTML = '';
+    addMsg('sys', '已开启新会话：thread_id 已清空。');
+    setStreaming(false);
+  }
+
+  // 单个 SSE 数据块 -> 分发
+  function dispatchSSE(evName, dataText) {
+    var payload = null;
+    if (dataText !== '' && dataText != null) {
+      try { payload = JSON.parse(dataText); } catch (e) { payload = dataText; }
+    }
+    if (payload && typeof payload === 'object') {
+      if (payload.thread_id) threadId = payload.thread_id;
+      if (Array.isArray(payload.citations) && payload.citations.length) {
+        chatCitations = payload.citations;
+        renderChatCitations();
+      }
+    }
+
+    if (evName === 'tool') {
+      if (payload && typeof payload === 'object') addTrace(payload);
+      else addTrace({ name: String(payload) });
+      return;
+    }
+
+    if (evName === 'done' || evName === 'end') {
+      var cur = $('messages').lastElementChild;
+      if (cur) { var c = cur.querySelector('.caret'); if (c) c.remove(); }
+      setStreaming(false);
+      if (payload && typeof payload === 'object' && payload.error) {
+        addMsg('err', '服务端在收尾时报错：' + (typeof payload.error === 'string' ? payload.error : JSON.stringify(payload.error)));
+      }
+      return;
+    }
+
+    if (evName === 'error') {
+      var m = payload == null ? '未知错误'
+        : (typeof payload === 'string' ? payload : (payload.message || payload.detail || JSON.stringify(payload)));
+      addMsg('err', '流内错误事件：' + m);
+      return;
+    }
+
+    // 其余（含默认 message / token / delta）按文本增量处理
+    var text = '';
+    var isDelta = false;
+    if (typeof payload === 'string') {
+      text = payload;
+    } else if (payload && typeof payload === 'object') {
+      if (typeof payload.delta === 'string') { text = payload.delta; isDelta = true; }
+      else if (typeof payload.text === 'string') text = payload.text;
+      else if (typeof payload.content === 'string') text = payload.content;
+      else if (typeof payload.message === 'string') text = payload.message;
+      else if (typeof payload.answer === 'string') text = payload.answer;
+      else if (payload.message && typeof payload.message === 'object' && typeof payload.message.content === 'string') {
+        text = payload.message.content;
+      }
+    }
+    if (!text) return;
+
+    var last = $('messages').lastElementChild;
+    var bubble = (last && last.dataset && last.dataset.role === 'assistant') ? last : null;
+    if (!bubble) {
+      bubble = addMsg('assistant', '');
+      bubble.dataset.role = 'assistant';
+    }
+    var span = bubble.lastElementChild;
+    if (isDelta) {
+      span.textContent += text;
+    } else if (span.textContent === '') {
+      span.textContent = text;               // 整段消息
+    } else if (span.textContent !== text) {
+      // 既非 delta 又和已有内容不同：避免把最终整段重复追加
+      if (text.indexOf(span.textContent) === 0) span.textContent = text;
+      else span.textContent += text;
+    }
+    $('messages').scrollTop = $('messages').scrollHeight;
+  }
+
+  async function sendChat() {
+    if (streaming) return;
+    var input = $('chatInput');
+    var msg = input.value.trim();
+    if (!msg) { err('请先输入消息内容。'); return; }
+
+    addMsg('user', msg);
+    input.value = '';
+    var bubble = addMsg('assistant', '');
+    bubble.dataset.role = 'assistant';
+    var caret = document.createElement('span');
+    caret.className = 'caret';
+    bubble.appendChild(caret);
+
+    setStreaming(true);
+    abortCtl = typeof AbortController !== 'undefined' ? new AbortController() : null;
+
+    var res;
+    try {
+      res = await fetch(api('/chat'), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ message: msg, thread_id: threadId, patient_id: $('patientId').value || 'anon' }),
+        signal: abortCtl ? abortCtl.signal : undefined
+      });
+    } catch (e) {
+      caret.remove();
+      bubble.className = 'msg err';
+      bubble.textContent = '网络请求失败（/chat）：无法连接后端。' + (e && e.message ? ' 原因：' + e.message : '');
+      setStreaming(false);
+      return;
+    }
+
+    if (!res.ok) {
+      var t = '';
+      try { t = await res.text(); } catch (e) {}
+      var detail = t ? t.slice(0, 400) : '(空响应体)';
+      try { var j = JSON.parse(t); detail = j.detail || j.message || j.error || detail; } catch (e) {}
+      caret.remove();
+      bubble.className = 'msg err';
+      bubble.textContent = 'HTTP ' + res.status + ' ' + (res.statusText || '') + '（/chat）：' + detail;
+      setStreaming(false);
+      return;
+    }
+    if (!res.body || typeof res.body.getReader !== 'function') {
+      caret.remove();
+      bubble.className = 'msg err';
+      bubble.textContent = '当前浏览器不支持流式读取（ReadableStream/getReader），无法解析 SSE。';
+      setStreaming(false);
+      return;
+    }
+
+    var reader = res.body.getReader();
+    var decoder = new TextDecoder('utf-8');
+    var buf = '';          // 跨 chunk 缓冲区：一次 read() 不保证是一个完整事件
+    var sawAny = false;
+
+    function handleBlock(block) {
+      if (!block.trim()) return;
+      var evName = 'message';
+      var dataLines = [];
+      block.split('\n').forEach(function (line) {
+        if (!line || line.charAt(0) === ':') return;      // 注释/心跳
+        var i = line.indexOf(':');
+        var field = i === -1 ? line : line.slice(0, i);
+        var val = i === -1 ? '' : line.slice(i + 1);
+        if (val.charAt(0) === ' ') val = val.slice(1);
+        if (field === 'event') evName = val;
+        else if (field === 'data') dataLines.push(val);
+      });
+      sawAny = true;
+      dispatchSSE(evName, dataLines.join('\n'));
+    }
+
+    try {
+      for (;;) {
+        var chunk = await reader.read();
+        if (chunk.done) break;
+        // 关键：decode(stream:true) + 缓冲区拼接，事件可能跨 chunk
+        buf += decoder.decode(chunk.value, { stream: true }).replace(/\r\n/g, '\n');
+        var idx;
+        while ((idx = buf.indexOf('\n\n')) !== -1) {
+          var block = buf.slice(0, idx);
+          buf = buf.slice(idx + 2);
+          handleBlock(block);
+        }
+      }
+      buf += decoder.decode();                 // flush
+      buf = buf.replace(/\r\n/g, '\n');
+      if (buf.trim()) handleBlock(buf);        // 最后一帧可能没有结尾空行
+      addMsg('sys', '本轮流已结束' + (threadId ? '（thread_id: ' + threadId + '）' : '（后端未返回 thread_id）'));
+    } catch (e) {
+      var aborted = e && (e.name === 'AbortError');
+      addMsg('sys', aborted ? '已手动停止接收流。' : ('流中断：' + (e && e.message ? e.message : String(e)) + '。可以继续输入。'));
+      if (!sawAny) {
+        var sp = bubble.lastElementChild;
+        if (sp && sp.tagName === 'SPAN' && !sp.textContent) bubble.textContent = '(未收到任何事件)';
+      }
+    } finally {
+      var c = bubble.querySelector('.caret');
+      if (c) c.remove();
+      abortCtl = null;
+      setStreaming(false);      // 无论正常结束还是中断，都必须恢复可输入状态
+      $('chatInput').focus();
+    }
+  }
+
+  function stopChat() {
+    if (abortCtl) { try { abortCtl.abort(); } catch (e) {} }
+    setStreaming(false);
+  }
+
+  // ---------------- 事件绑定 ----------------
+  $('btnRefresh').onclick = function () { loadHealth().then(function () { loadDomains().then(loadTools); }); };
+  $('btnGo').onclick = doSearch;
+  $('q').addEventListener('keydown', function (e) { if (e.key === 'Enter') doSearch(); });
+  $('domainSel').onchange = loadTools;
+  $('btnSend').onclick = sendChat;
+  $('btnStop').onclick = stopChat;
+  $('btnNewChat').onclick = resetChat;
+  $('chatInput').addEventListener('keydown', function (e) {
+    if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendChat(); }
+  });
+  $('apiBase').addEventListener('change', function () {
+    API_BASE = this.value.trim().replace(/\/+$/, '');
+    loadHealth().then(function () { loadDomains().then(loadTools); });
+  });
+
+  // ---------------- 启动 ----------------
+  (function init() {
+    var qs = new URLSearchParams(location.search);
+    var fromQuery = qs.get('api');
+    if (fromQuery) { API_BASE = fromQuery.replace(/\/+$/, ''); $('apiBase').value = API_BASE; }
+    addMsg('sys', '对话走 clinic 域（问诊）。第一轮会建立 thread_id，后续轮次自动携带。');
+    $('traceLines').innerHTML = '<span class="empty">本次会话还没有工具调用。</span>';
+
+    if (location.protocol === 'file:') {
+      warn('当前是以 file:// 直接打开的本地文件，跨源请求可能被浏览器拦截；' +
+           '建议由后端在 / 或 /web 上托管本页（同源），或在上方 API 输入框填入完整后端地址。');
+    }
+    loadHealth().then(function () { loadDomains().then(loadTools); });
+  })();
+})();
+</script>
+</body>
+</html>
