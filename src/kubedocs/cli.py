@@ -15,7 +15,7 @@ import sys
 import time
 
 from kubedocs.config import Settings
-from kubedocs.store.sqlite_store import SqliteStore
+from kubedocs.store import BACKENDS, Store, StoreError
 
 EXIT_OK = 0
 EXIT_USER = 1
@@ -29,6 +29,8 @@ def make_settings(args: argparse.Namespace) -> Settings:
     overrides: dict[str, object] = {}
     if getattr(args, "domain", None):
         overrides["domain"] = args.domain
+    if getattr(args, "store", None):
+        overrides["store"] = args.store
     if getattr(args, "provider", None):
         overrides["embedding_provider"] = args.provider
     if getattr(args, "index_dir", None):
@@ -44,13 +46,19 @@ def make_settings(args: argparse.Namespace) -> Settings:
     return Settings(**overrides)  # type: ignore[arg-type]
 
 
-def open_store(settings: Settings, *, require_data: bool = True) -> SqliteStore:
-    from kubedocs.store.sqlite_store import from_settings
+def open_store(settings: Settings, *, require_data: bool = True) -> Store:
+    """按 `KUBEDOCS_STORE` 打开存储后端。
+
+    这里**不做任何后端回退**：后端不可用（sqlite-vec 扩展加载失败、Postgres 连不上）
+    就带着原因报错。一个"悄悄换回另一种实现"的检索服务，其指标变化将无法解释。
+    """
+    from kubedocs.store import from_settings
 
     store = from_settings(settings)
     if require_data and store.stats().n_chunks == 0:
-        print(f"索引为空：{settings.sqlite_path}\n先跑 `python -m kubedocs.cli ingest`",
-              file=sys.stderr)
+        where = (str(settings.sqlite_path) if settings.store != "pgvector"
+                 else f"Postgres schema {settings.domain}（{settings.database_url}）")
+        print(f"索引为空：{where}\n先跑 `python -m kubedocs.cli ingest`", file=sys.stderr)
         raise SystemExit(EXIT_PRECONDITION)
     return store
 
@@ -58,6 +66,13 @@ def open_store(settings: Settings, *, require_data: bool = True) -> SqliteStore:
 def _snippet(text: str, width: int = 160) -> str:
     one = " ".join(text.split())
     return one if len(one) <= width else one[:width] + "…"
+
+
+def _index_label(settings: Settings) -> str:
+    """索引位置的人类可读描述：三种后端存在的位置本来就不同。"""
+    if settings.store == "pgvector":
+        return f"{settings.database_url}（schema={settings.domain}）"
+    return str(settings.sqlite_path)
 
 
 # --------------------------------------------------------------------------- ingest
@@ -72,7 +87,7 @@ def cmd_ingest(args: argparse.Namespace) -> int:
         print(f"嵌入器：{settings.embedding_provider} / {getattr(embedder, 'name', '?')} "
               f"({settings.embedding_dim} 维)")
         print(f"语料：{settings.corpus_path}")
-        print(f"索引：{settings.sqlite_path}")
+        print(f"索引：{settings.store} @ {_index_label(settings)}")
         report = ingest(store, embedder, settings, rebuild=args.rebuild,
                         limit_files=args.limit_files, batch_files=args.batch_files,
                         progress=lambda m: print(m, flush=True))
@@ -192,6 +207,7 @@ def cmd_stats(args: argparse.Namespace) -> int:
         meta = store.meta_dump()
         payload = {
             "domain": settings.domain,
+            "store_backend": settings.store,
             "normalizer": st.normalizer,
             "corpus_dir": str(settings.corpus_path),
             "db": str(settings.sqlite_path),
@@ -211,8 +227,8 @@ def cmd_stats(args: argparse.Namespace) -> int:
         else:
             print(f"域         : {settings.domain}（归一化器 {st.normalizer}）")
             print(f"语料目录   : {payload['corpus_dir']}")
-            print(f"索引库     : {payload['db']}")
-            print(f"向量矩阵   : {payload['vectors']}")
+            print(f"存储后端   : {settings.store}")
+            print(f"索引位置   : {_index_label(settings)}")
             print(f"文档/块数  : {st.n_docs} / {st.n_chunks}")
             print(f"块均长度   : {st.mean_chars:.1f} 字符")
             print(f"含代码块   : {st.n_with_code}（{100.0 * st.n_with_code / max(st.n_chunks, 1):.1f}%）")
@@ -277,6 +293,8 @@ def _add_globals(p: argparse.ArgumentParser, default: object) -> None:
     p.add_argument("--corpus-dir", default=default, help="语料目录（默认 data/raw/k8s-docs）")
     p.add_argument("--domain", default=default,
                    help="域（默认 k8s_docs；可用 `domains` 子命令列出）")
+    p.add_argument("--store", choices=list(BACKENDS), default=default,
+                   help="存储后端（默认 sqlite-vec；sqlite=旧实现，pgvector=生产）")
     p.add_argument("--provider", choices=["bge", "hashing"], default=default,
                    help="嵌入器（bge=真实向量，hashing=离线降级）")
     p.add_argument("--hf-endpoint", default=default,
@@ -375,6 +393,11 @@ def main(argv: list[str] | None = None) -> int:
     except FileNotFoundError as e:
         print(f"找不到文件：{e}", file=sys.stderr)
         return EXIT_PRECONDITION
+    except StoreError as e:
+        # 存储层的可预期错误（维度/模型/后端不一致、扩展缺失、库连不上）是**用户错误**，
+        # 不该以 traceback 形式抛出：调用方需要看到的是"该跑哪条命令"。
+        print(f"存储层错误：{e}", file=sys.stderr)
+        return EXIT_USER
     except KeyboardInterrupt:
         print("已中断", file=sys.stderr)
         return 130

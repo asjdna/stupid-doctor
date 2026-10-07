@@ -81,8 +81,8 @@ from kubedocs.domains.base import DomainRegistry
 from kubedocs.embed import Embedder, build_embedder
 from kubedocs.generate import Answer, Answerer, build_answerer, has_api_key
 from kubedocs.retrieve.hybrid import HybridRetriever
+from kubedocs.store import Store, StoreError, from_settings
 from kubedocs.store.base import StoreStats
-from kubedocs.store.sqlite_store import SqliteStore, StoreError, from_settings
 
 if TYPE_CHECKING:  # 只为标注：不 import langgraph / agent 内核的实现细节
     from kubedocs.agent.kernel import ClinicAgent
@@ -114,7 +114,7 @@ class _DomainRuntime:
         # 嵌入器（bge 那一次就够贵了），也不该各自开一个回答器（会重复读预算文件）
         self._lock = threading.Lock()
         try:
-            self.store: SqliteStore | None = from_settings(settings)
+            self.store: Store | None = from_settings(settings)
         except (StoreError, sqlite3.Error, OSError) as e:
             # 索引不可用 ≠ 服务不可用：记下原因，端点返回 200 + 说明
             self.store = None
@@ -168,7 +168,7 @@ class _DomainRuntime:
             self.store = None
 
 
-def _build_retriever(settings: Settings, store: SqliteStore, embedder: Embedder,
+def _build_retriever(settings: Settings, store: Store, embedder: Embedder,
                      ) -> HybridRetriever:
     """按域构造检索器：优先用域包自己的 `retriever()`，域包未注册时退回默认实现。
 

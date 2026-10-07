@@ -15,21 +15,27 @@
 
 源目录是**上游项目的中间产物**（不是 OpenCMKG 原始三元组）：
 先在上游跑 `scripts/build_knowledge.py`（OpenCMKG -> `data/knowledge/*.json`）。
-默认直接读上游的 `data/knowledge/`，也可以用 `--source` 指向任何同结构的目录。
+
+本脚本**不设默认源目录**：它来自另一个项目，写死任何路径都只对一台机器成立
+（仓库里也不该出现本机绝对路径）。请显式指定：
+
+    --source <上游产物目录>
+    # 或设环境变量 KUBEDOCS_CLINIC_SOURCE=<上游产物目录>
 
 **没有语料也能跑通三条流程**：clinic 域的规则轨（`data/` 下约 271 行词典）不依赖它，
 检索轨只是"为什么这样建议"的接地增强。这正是把受限语料做成可选的原因。
 
 用法：
-    python scripts/clinic_build_cards.py --dry-run
-    python scripts/clinic_build_cards.py --source E:\\Users\\86189\\medical-agent\\data\\knowledge
+    python scripts/clinic_build_cards.py --source <上游产物目录> --dry-run
+    python scripts/clinic_build_cards.py --source <上游产物目录>
 
-退出码：0 成功 / 3 源目录不可用。
+退出码：0 成功 / 3 源目录不可用（含"没指定源目录"）。
 """
 from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -38,7 +44,8 @@ sys.path.insert(0, str(REPO_ROOT / "src"))
 
 from kubedocs.domains.clinic.data.departments import normalize_department  # noqa: E402
 
-DEFAULT_SOURCE = Path("E:/Users/86189/medical-agent/data/knowledge")
+# 不写死机器路径：默认从环境变量取，没有就让调用方显式 --source（见模块文档）。
+DEFAULT_SOURCE = os.environ.get("KUBEDOCS_CLINIC_SOURCE", "")
 OUT_DIR = REPO_ROOT / "data" / "clinic"
 
 # 每种卡片需要的中间文件；缺任何一个就说明源目录还没构建完
@@ -122,12 +129,19 @@ def build_drug_cards(src: Path) -> tuple[list[dict], int]:
 
 def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(description="重建 clinic 域知识卡片（上游派生语料）")
-    p.add_argument("--source", default=str(DEFAULT_SOURCE),
-                   help="含 build_knowledge.py 产物的目录（默认指向上游项目）")
+    p.add_argument("--source", default=DEFAULT_SOURCE,
+                   help="含 build_knowledge.py 产物的目录（必填，或用环境变量 "
+                        "KUBEDOCS_CLINIC_SOURCE 指定；本脚本不猜机器上的路径）")
     p.add_argument("--out", default=str(OUT_DIR))
     p.add_argument("--dry-run", action="store_true")
     args = p.parse_args(argv)
 
+    if not str(args.source).strip():
+        print("未指定源目录：本脚本不设默认值（它指向另一个项目的产物，写死路径只对"
+              "一台机器成立）。请用 --source <上游产物目录>，或设环境变量 "
+              "KUBEDOCS_CLINIC_SOURCE。\n"
+              "（clinic 域的规则轨不依赖它，问诊/挂号/紧急仍可运行）", file=sys.stderr)
+        return 3
     src = Path(args.source)
     if not src.exists():
         print(f"源目录不存在：{src}\n"

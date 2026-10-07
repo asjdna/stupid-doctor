@@ -80,12 +80,31 @@ class Settings(BaseSettings):
     api_port: int = 8080
 
     # ---------- 存储 ----------
-    # 本地/CI 默认用嵌入式 SQLite（零外部依赖）；生产可换成 Postgres+pgvector。
-    # 两者实现同一个 Store 协议，切换只影响配置，不影响检索与生成代码。
+    # 同一 Store 协议下的三种实现（选型理由与实测数字见 docs/adr/0004）：
+    #   sqlite-vec : 默认。SQLite（FTS5 全文）+ sqlite-vec 向量索引，零外部进程/零镜像/零网络
+    #   sqlite     : 旧实现（numpy 暴力内积 + .npy 侧车矩阵），保留作对照与回退
+    #   pgvector   : 生产实现（Postgres + pgvector HNSW），需要 database_url 可达
+    # 环境变量名是 KUBEDOCS_STORE（env_prefix 自动加前缀）。
+    # 非法取值**直接报错**，绝不静默回退到某个默认实现：静默回退会让"我明明切到
+    # pgvector 了为什么数据还是旧的"变成一个没有任何日志的谜。
+    store: Literal["sqlite-vec", "sqlite", "pgvector"] = "sqlite-vec"
     database_url: str = "postgresql://kubedocs:kubedocs@127.0.0.1:5432/kubedocs"
     redis_url: str = "redis://127.0.0.1:6379/0"
     db_pool_min: int = 1
     db_pool_max: int = 10
+    # pgvector HNSW 建索引参数（理由见 ADR-0004：m 决定图的出边数，
+    # ef_construction 决定建图时的候选队列，两者都只影响召回率与建索引耗时）。
+    pg_hnsw_m: int = Field(default=16, ge=2, le=100)
+    pg_hnsw_ef_construction: int = Field(default=64, ge=4, le=1000)
+    # 查询期候选队列：越大召回越高、越慢。**只影响查询，不需要重建索引**。
+    pg_hnsw_ef_search: int = Field(default=100, ge=1, le=1000)
+    # SQLite 页缓存上限（KiB，sqlite-vec 后端）。
+    #
+    # 这个参数是被实测逼出来的，不是抄来的：18861×384 的向量表 29MB，而 SQLite 默认
+    # 页缓存只有 2MB，于是每次 KNN 都在反复穿透页缓存读盘——实测 KNN p50
+    # 默认 66~147ms，调到 128MB 后 **12ms**（同一份数据、同一台机器）。
+    # 只影响本地默认后端；SQLite 按需分配页面，给小索引设大上限不会白占内存。
+    sqlite_cache_kib: int = Field(default=131072, ge=2000)
     # 索引与语料的根目录；实际索引在 <index_dir>/<domain>/ 下，每个域一份、互不干扰。
     index_dir: str = "data/index"
     # 当前域。域包（domains/）自带语料、归一化器与评测集，内核只认这个名字。

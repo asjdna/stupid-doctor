@@ -1,0 +1,73 @@
+name: ✨ 功能建议
+description: 建议一个新能力或一处改进（检索、评测、agent、可观测、clinic 域等）
+title: "[Feature] "
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        ## 提之前先看一眼 Roadmap
+
+        `README.md` 的 Roadmap 与 `docs/adr/` 里可能已经讨论过（甚至已经决定**不做**）了。
+        这个项目对"看起来更高级的做法"有过若干次**负面结论**（self-ask 无收益、多跳更差），
+        所以请先说明你的建议**与这些既有结论的关系**：是没覆盖到，还是有新证据。
+
+        另外：这**不是**安全问题上报渠道——安全问题见 `SECURITY.md`（私有上报）。
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: 你要解决什么问题
+      description: 先讲问题，不要先讲方案。"谁在什么场景下被卡住了"比"加一个模块"有用得多。
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: 你设想的做法
+      description: 如果涉及新依赖/新服务，请说明为什么现成件不够用（本项目的默认取向是先用成熟件）。
+    validations:
+      required: true
+
+  - type: dropdown
+    id: area
+    attributes:
+      label: 涉及哪一块
+      options:
+        - 检索（召回 / 融合 / 重排）
+        - 回答与引用（generate）
+        - 评测与闸门（evaluation / data/eval）
+        - agent 内核与工具（agent/）
+        - clinic 域（医疗问诊 / 挂号 / 红线）
+        - API / 服务化 / 前端
+        - 可观测（OTel / Prometheus / 成本）
+        - 工程脚手架（CI / Docker / Makefile / 依赖）
+        - 文档
+        - 其它
+    validations:
+      required: true
+
+  - type: textarea
+    id: evidence
+    attributes:
+      label: 你怎么知道它能有用（可选的，但很有说服力）
+      description: |
+        这个项目只认实测：一个能先失败、再变好的指标（hit@k / MRR / nDCG / p95 延迟 /
+        成本），或者一段真实失败案例，比任何论证都值钱。
+        如果还没有证据，写"暂无证据，只是猜测"也完全可以——但请写明。
+      render: text
+    validations:
+      required: false
+
+  - type: checkboxes
+    id: confirm
+    attributes:
+      label: 提交前确认
+      options:
+        - label: 我没有在这里贴任何 API key、`.env` 内容或凭据
+          required: true
+        - label: 我读过 README 的「状态（诚实标注）」与 Roadmap，这条建议不在已完成项里
+          required: true
+        - label: 如果这个建议会改变评测口径/标注集，我明白它必须留档（改前改后的数字都要留）
+          required: false

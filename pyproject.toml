@@ -1,11 +1,15 @@
 [build-system]
-requires = ["setuptools>=68", "wheel"]
+# setuptools>=77：PEP 639（SPDX 许可证表达式 `license = "MIT"` 与 `license-files`）
+# 从 77.0.0 起才被 setuptools 接受；只写 >=68 会让 68-76 的构建环境直接报错。
+requires = ["setuptools>=77", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
 name = "kubedocs"
 version = "0.1.0"
 description = "面向 Kubernetes 官方文档的工业级 RAG 服务：混合检索 + 重排 + 带引用回答 + 评测闸门 + 可观测"
+license = "MIT"
+license-files = ["LICENSE"]
 requires-python = ">=3.10"
 dependencies = [
     # Web / API
@@ -19,6 +23,10 @@ dependencies = [
     "psycopg[binary,pool]>=3.2",   # Postgres（pgvector + 全文检索都走它）
     "pgvector>=0.3",               # vector 类型适配
     "redis>=5.0",
+    # 本地/CI 默认后端（KUBEDOCS_STORE=sqlite-vec）的向量表。
+    # 注意：vec0 是**穷举扫描**而非 ANN（实测在本项目 18861×384 上比 numpy 暴力慢约 11 倍），
+    # 选它换的是「向量与块行同事务、可增删、不常驻内存」，不是延迟——见 docs/adr/0004。
+    "sqlite-vec>=0.1.9",
     # 模型
     "litellm>=1.50",               # 多供应商路由/重试/回退/成本统计
     "sentence-transformers>=3.0",  # 本地嵌入（可换成 API，见 embedder 抽象）

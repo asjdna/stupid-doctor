@@ -33,8 +33,7 @@ from kubedocs.domains.clinic.pack import clinic_cards_path
 from kubedocs.embed import Embedder, embed_texts
 from kubedocs.ingest import IngestReport
 from kubedocs.retrieve.hybrid import HybridRetriever
-from kubedocs.store.base import ChunkInput, DocInput
-from kubedocs.store.sqlite_store import SqliteStore
+from kubedocs.store.base import ChunkInput, DocInput, Store
 
 CARDS_PER_DOC = 1
 
@@ -93,7 +92,7 @@ class ClinicPack:
             data: list[dict] = json.load(fh)
         return data
 
-    def build_index(self, store: SqliteStore, embedder: Embedder, settings: Settings, *,
+    def build_index(self, store: Store, embedder: Embedder, settings: Settings, *,
                     rebuild: bool = False, limit_files: int | None = None,
                     progress: object = None) -> IngestReport:
         """把卡片灌入 clinic 域自己的索引。
@@ -128,7 +127,7 @@ class ClinicPack:
             "要启用稠密路需用 bge-small-zh 重跑一次全量编码。")
         return report
 
-    def retriever(self, store: SqliteStore, embedder: Embedder,
+    def retriever(self, store: Store, embedder: Embedder,
                   settings: Settings) -> HybridRetriever:
         return HybridRetriever(store, embedder, settings)
 

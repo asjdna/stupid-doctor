@@ -32,8 +32,7 @@ import numpy as np
 from kubedocs.chunker import Chunk, chunk_document, doc_id_from_path
 from kubedocs.config import Settings
 from kubedocs.embed import BgeEmbedder, Embedder, embed_texts
-from kubedocs.store.base import ChunkInput, DocInput, Vector
-from kubedocs.store.sqlite_store import SqliteStore
+from kubedocs.store.base import ChunkInput, DocInput, Store, Vector
 
 
 def file_digest(path: Path) -> str:
@@ -105,7 +104,7 @@ def _chunks_to_inputs(chunks: Iterable[Chunk], doc_id: str) -> list[ChunkInput]:
 
 
 def collect_plan(
-    store: SqliteStore, files: list[Path], root: Path, settings: Settings,
+    store: Store, files: list[Path], root: Path, settings: Settings,
     *, detect_removals: bool = True,
 ) -> tuple[list[tuple[Path, str]], list[str]]:
     """第一遍：只读文件哈希，判断哪些文件需要重切、哪些文件已从语料消失。
@@ -132,7 +131,7 @@ def collect_plan(
 
 
 def ingest(
-    store: SqliteStore,
+    store: Store,
     embedder: Embedder,
     settings: Settings,
     *,
@@ -208,7 +207,7 @@ def ingest(
 
 
 def _vectors_for(
-    store: SqliteStore,
+    store: Store,
     embedder: Embedder,
     chunk_inputs: list[ChunkInput],
     report: IngestReport,

@@ -12,7 +12,7 @@ from kubedocs.config import Settings
 from kubedocs.embed import Embedder
 from kubedocs.ingest import IngestReport, ingest
 from kubedocs.retrieve.hybrid import HybridRetriever
-from kubedocs.store.sqlite_store import SqliteStore
+from kubedocs.store.base import Store
 
 GOLD = Path("data/eval/retrieval_gold.jsonl")
 
@@ -27,13 +27,13 @@ class K8sDocsPack:
     def corpus_root(self, settings: Settings) -> Path:
         return settings.corpus_path
 
-    def build_index(self, store: SqliteStore, embedder: Embedder, settings: Settings, *,
+    def build_index(self, store: Store, embedder: Embedder, settings: Settings, *,
                     rebuild: bool = False, limit_files: int | None = None,
                     progress: object = None) -> IngestReport:
         return ingest(store, embedder, settings, rebuild=rebuild, limit_files=limit_files,
                       progress=progress)  # type: ignore[arg-type]
 
-    def retriever(self, store: SqliteStore, embedder: Embedder,
+    def retriever(self, store: Store, embedder: Embedder,
                   settings: Settings) -> HybridRetriever:
         return HybridRetriever(store, embedder, settings)
 

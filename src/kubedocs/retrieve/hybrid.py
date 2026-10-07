@@ -25,8 +25,7 @@ from kubedocs.config import Settings
 from kubedocs.embed import Embedder, EmbedderError
 from kubedocs.retrieve.fusion import Fused, explanation, rrf_fuse
 from kubedocs.retrieve.rerank import CrossEncoderReranker, Reranker, apply_rerank
-from kubedocs.store.base import ChunkHit
-from kubedocs.store.sqlite_store import SqliteStore
+from kubedocs.store.base import ChunkHit, Store
 
 
 @dataclass
@@ -80,7 +79,7 @@ class SearchResult:
 class HybridRetriever:
     """检索入口。构造一次可复用（嵌入模型与 SQLite 连接都会被持有）。"""
 
-    def __init__(self, store: SqliteStore, embedder: Embedder, settings: Settings,
+    def __init__(self, store: Store, embedder: Embedder, settings: Settings,
                  reranker: Reranker | None = None) -> None:
         self.store = store
         self.embedder = embedder

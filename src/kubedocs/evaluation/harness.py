@@ -28,7 +28,7 @@ from kubedocs.config import Settings, repo_root
 from kubedocs.embed import build_embedder
 from kubedocs.evaluation.metrics import aggregate, evaluate_one, percentile
 from kubedocs.retrieve.hybrid import HybridRetriever
-from kubedocs.store.sqlite_store import SqliteStore
+from kubedocs.store.base import Store
 
 BASELINE_SCHEMA = 1
 # 闸门阈值：绝对分差。检索分数本身有噪声，容差太紧会因为无关改动红，
@@ -127,7 +127,7 @@ def gold_sha256(rows: list[GoldRow]) -> str:
     return hashlib.sha256(blob).hexdigest()[:16]
 
 
-def validate_gold(rows: list[GoldRow], store: SqliteStore) -> list[GoldProblem]:
+def validate_gold(rows: list[GoldRow], store: Store) -> list[GoldProblem]:
     """标注集自检：引用的文档必须在索引里，且关键词确实出现在该文档中。"""
     problems: list[GoldProblem] = []
     known = store.existing_doc_ids()
@@ -254,7 +254,7 @@ def _print_table(results: dict[str, ModeResult], k: int, n_by_kind: dict[str, in
                   f"{m.get('mrr', 0):>8.4f} {m.get('ndcg', 0):>8.4f}")
 
 
-def run_eval(args: Namespace, settings: Settings, store: SqliteStore) -> int:
+def run_eval(args: Namespace, settings: Settings, store: Store) -> int:
     from kubedocs.cli import EXIT_GATE_FAIL, EXIT_OK, EXIT_PRECONDITION
 
     repo = repo_root()
@@ -357,7 +357,7 @@ def run_eval(args: Namespace, settings: Settings, store: SqliteStore) -> int:
     return EXIT_OK
 
 
-def _corpus_fingerprint(store: SqliteStore) -> str:
+def _corpus_fingerprint(store: Store) -> str:
     """索引内容指纹：块 id + content_hash 的哈希。用于判断两次评测是否同一批数据。"""
     h = hashlib.sha256()
     for row in store.doc_summary(limit=10**9):

@@ -1,6 +1,21 @@
 """本地嵌入式索引：SQLite（FTS5 全文） + numpy 向量矩阵。
 
-## 为什么是这套组合而不是 Postgres+pgvector
+## 现状（2026-09 之后）：这是**旧实现**，保留作对照与回退
+
+同一 Store 协议下现在有三个实现，`KUBEDOCS_STORE` 选择（见 `store/__init__.py`）：
+
+| 取值 | 实现 | 定位 |
+|---|---|---|
+| `sqlite-vec` | `sqlite_vec_store.SqliteVecStore` | **默认**：FTS5 + sqlite-vec 向量索引 |
+| `sqlite` | 本文件 | 旧实现：FTS5 + numpy 暴力内积 + `.npy` 侧车矩阵 |
+| `pgvector` | `pgvector_store.PgVectorStore` | 生产：Postgres + pgvector HNSW |
+
+**为什么保留本文件而不是删掉**：它是唯一"零扩展、纯 numpy"的实现，
+既能在 sqlite-vec 扩展装不上/加载失败时当回退，也是性能对照的基线
+（ADR-0004 里的 p50/p95 三方对照就以它为一列）。删掉它，那条对照数字
+就再也无法复现——而"凭记忆比较性能"是没有价值的。
+
+## 为什么当初是这套组合而不是 Postgres+pgvector
 
 先把"业务逻辑跑通"和"可一键部署"拆成两件事。前者只需要一个能落盘、
 能全文检索、能做向量近邻的存储；这套组合全部由标准库 + numpy 提供，
@@ -8,8 +23,9 @@
 
 代价与边界（写清楚，免得日后误判）：
 - 单写者：SQLite 并发写入有限，只适合单进程摄取；线上多实例写要走 pgvector 版；
-- 全量向量常驻内存：18861×384 float32 ≈ 29MB，可接受；再大两个数量级就该换 ANN 索引；
-- 无 ANN：暴力内积在 10 万块量级仍是毫秒级，超过就该上 HNSW/IVF。
+- 全量向量常驻内存：18861×384 float32 ≈ 29MB，可接受；再大两个数量级就该换索引；
+- 删除一篇文档要**重建整个矩阵**（`finalize` 压实 `vector_row`）：18861 块约 29MB
+  的重写，语料频繁增删时这是纯浪费——`sqlite-vec` 版没有这一步，向量随块行增删。
 
 架构上这不算"降级实现"，而是同一 Store 协议下的**另一种实现**——
 检索与生成代码一行都不用改，切换只改配置。
@@ -26,7 +42,6 @@
 from __future__ import annotations
 
 import json
-import re
 import sqlite3
 import threading
 import time
@@ -42,9 +57,24 @@ from kubedocs.store.base import (
     ChunkHit,
     ChunkInput,
     DocInput,
+    MissingVectorError,
+    StoreError,
     StoreStats,
     Vector,
 )
+
+# 词元抽取与 MATCH 表达式在 store/textquery.py 里（三个后端共用同一套词元规则，
+# 只在表达式语法上分叉）。这里转出 `build_match_expr` 保持既有导入路径可用。
+from kubedocs.store.textquery import build_match_expr
+
+__all__ = [
+    "MissingVectorError",
+    "SqliteStore",
+    "StoreError",
+    "build_match_expr",
+    "dump_json",
+    "from_settings",
+]
 
 SCHEMA_VERSION = 2
 
@@ -98,49 +128,6 @@ CREATE VIRTUAL TABLE IF NOT EXISTS chunks_fts USING fts5(
 # 标题命中比正文命中更能说明"这一块就是讲这件事的"，面包屑次之。
 _BM25_WEIGHTS = (1.0, 3.0, 1.5)
 
-# 词元抽取：`\w` 在 Python 3 下含 CJK，因此中文分词后的词元同样能被抽出来。
-# 用 `[A-Za-z0-9_]+` 会让中文查询一个词元都抽不到——这是个必须避免的静默失效。
-_TOKEN_RE = re.compile(r"\w+", re.UNICODE)
-
-# 只清掉功能词。不做词形还原——那是 FTS5 的 porter 分词器负责的事。
-_STOPWORDS = frozenset({
-    "a", "an", "and", "are", "as", "at", "be", "by", "can", "do", "does", "for", "from",
-    "how", "i", "if", "in", "into", "is", "it", "its", "me", "my", "not", "of", "on",
-    "or", "that", "the", "their", "then", "there", "these", "this", "to", "up", "use",
-    "used", "using", "was", "we", "what", "when", "where", "which", "who", "why",
-    "will", "with", "you", "your",
-})
-
-
-class StoreError(RuntimeError):
-    """存储层可预期错误（配置/一致性问题），调用方应把它当用户错误处理。"""
-
-
-class MissingVectorError(StoreError):
-    """某块的向量既不在本次运行的结果里、也不在旧矩阵里——不能静默填 0。"""
-
-
-def build_match_expr(query: str) -> str:
-    """把自由文本查询改写成安全的 FTS5 MATCH 表达式。
-
-    直接 `WHERE chunks_fts MATCH ?` 传原文是**注入面**：FTS5 的 MATCH 有自己的
-    语法（`-` `*` `"` `(` `:` `AND/OR/NOT`），用户输入 `pod -limit` 会被解释成
-    "含 pod 且不含 limit"，输入 `"` 直接报语法错、请求 500。
-
-    这里只抽取字母数字下划线词元，逐个加双引号短语化，再用 OR 连接：
-    - 词元集天然不含特殊字符，注入面关闭；
-    - 用 OR 而非 AND 是为了**召回**（多词查询在文档里往往并不同现），
-      相关性交给 BM25 排序——包含全部词元的文档排名自然会高。
-    """
-    tokens = [t for t in _TOKEN_RE.findall(query) if t.lower() not in _STOPWORDS]
-    if not tokens:
-        # 全是被停用词/特殊符号，此时"什么都不匹配"比"匹配全部"更诚实
-        return ""
-    # 同一个词重复出现会拉高该项权重，先去重保序
-    seen: dict[str, None] = {}
-    for t in tokens:
-        seen.setdefault(t.lower(), None)
-    return " OR ".join(f'"{t}"' for t in seen)
 
 
 class SqliteStore:
@@ -456,7 +443,21 @@ class SqliteStore:
                     (rowid, self.normalizer.index_text(c.body), c.title, c.breadcrumb),
                 )
                 self._pending[c.chunk_id] = np.asarray(vectors[c.chunk_id], dtype=np.float32)
+            self._index_chunk_vectors(con, chunks, vectors)
         self._dirty = True
+
+    def _index_chunk_vectors(self, con: sqlite3.Connection, chunks: list[ChunkInput],
+                             vectors: dict[str, Vector]) -> None:
+        """钩子：把刚写入事务的块向量落到本实现的向量结构里。
+
+        基类（numpy 矩阵）的向量**不在这里落盘**：`chunks.rowid` 会被 SQLite 回收，
+        矩阵必须等本批全部插入完成后按最终 rowid 顺序重建（见 `finalize`），
+        所以基类只把向量暂存在 `_pending`。这个钩子因此是空实现。
+
+        `SqliteVecStore` 覆写它，把向量写进 `vec0` 虚表——与块行**同一事务**提交，
+        不存在"重排"这一步，也不会出现"块写了、向量没写"的中间态。
+        """
+        return
 
     def finalize(self) -> None:
         """把本轮新增向量并入矩阵、压实 vector_row 并落盘。

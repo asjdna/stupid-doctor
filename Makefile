@@ -11,7 +11,7 @@ RUN = $(PY) 2>/dev/null || $(PY_ALT)
 # 受限网络下模型下载源与离线加载（模型已缓存后必须离线，否则联网校验会挂死）
 HF := --hf-endpoint https://hf-mirror.com
 
-.PHONY: help install check lint type test corpus cstats ingest ingest-hash search stats \
+.PHONY: help install check lint type test lock corpus cstats ingest ingest-hash search stats \
         gold eval eval-baseline up down logs clean
 
 help:
@@ -32,6 +32,9 @@ type:  ## mypy（阻塞）
 
 test:  ## 单元测试（零依赖、秒级，不加载模型）
 	$(RUN) -m pytest tests/unit -q
+
+lock:  ## 重跑依赖锁文件（改了 pyproject 依赖后必须做；只查漂移见 scripts/gen_lock.py --check）
+	$(RUN) scripts/gen_lock.py
 
 # ---------------------------------------------------------------- 数据
 corpus:  ## 拉取 Kubernetes 官方文档（1720 篇 / 16.2MB）

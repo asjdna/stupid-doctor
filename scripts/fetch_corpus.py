@@ -15,11 +15,15 @@ import shutil
 import sys
 import tarfile
 import time
+from pathlib import Path
 
 import httpx
 
 URL = "https://codeload.github.com/kubernetes/website/tar.gz/refs/heads/main"
-ROOT = r"F:\86189\Documents\kubedocs"
+# 仓库根**从脚本位置推导**，不写死机器路径：写死的路径只在作者那台机器上成立，
+# 而"照抄 README 把命令跑起来"的人会在第一时间撞墙（且报错信息还是一句无关的
+# "文件不存在"）。其它脚本（clinic_build_cards / check_gold / eval_clinic）用的是同一套推导。
+ROOT = str(Path(__file__).resolve().parents[1])
 TARBALL = os.path.join(ROOT, ".cache", "k8s-website.tar.gz")
 OUT_DIR = os.path.join(ROOT, "data", "raw", "k8s-docs")
 # tarball 内的路径形如 `kubernetes-website-<sha>/content/en/docs/concepts/foo.md`，

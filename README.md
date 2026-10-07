@@ -65,6 +65,102 @@ python -m kubedocs.cli --hf-offline eval --gate   # 评测并卡闸门
 
 ## 架构
 
+下面这张图是**按 `src/kubedocs/` 的实际文件画的组件与数据流**（每个框都对应真实模块，
+不是设想的架构）；再下面的示意图讲的是"本机形态 vs 生产形态"的取舍。
+
+```mermaid
+flowchart TB
+    subgraph entry["入口（两条并列路径）"]
+        CLI["CLI<br/>cli.py / __main__.py<br/>ingest · search · ask · eval · stats · domains · serve"]
+        API["FastAPI<br/>api/app.py 的 create_app()<br/>/healthz /domains /tools /search /ask /chat"]
+        WEB["前端演示页<br/>data/web/index.html"]
+    end
+
+    subgraph dom["域层 domains/（内核与域之间唯一的边界）"]
+        REG["DomainRegistry<br/>domains/base.py"]
+        K8SP["k8s_docs 域包<br/>domains/k8s_docs.py"]
+        CLIP["clinic 域包<br/>domains/clinic/domain.py"]
+    end
+
+    subgraph ing["摄取 ingest.py"]
+        CORPUS["K8s 官方文档<br/>data/raw/k8s-docs"]
+        CHUNKER["chunker.py<br/>切块 + 上下文头"]
+        NORM["normalize.py<br/>identity / chinese"]
+        EMBED["embed.py<br/>bge / hashing / api"]
+    end
+
+    subgraph st["存储 store/（换实现只改配置）"]
+        SPROTO["Store 协议（唯一耦合点）<br/>store/base.py"]
+        SQLITE["SqliteStore<br/>SQLite + FTS5（bm25 列权重）<br/>+ numpy 向量矩阵<br/>store/sqlite_store.py"]
+    end
+
+    subgraph ret["检索 retrieve/"]
+        HYBRID["HybridRetriever<br/>retrieve/hybrid.py"]
+        FUSION["RRF 融合<br/>retrieve/fusion.py"]
+        RERANK["cross-encoder 精排（默认关）<br/>retrieve/rerank.py"]
+    end
+
+    subgraph gen["回答 generate.py"]
+        CTX["build_context<br/>上下文编号 + 同文档最多 2 段"]
+        BUD["DailyBudget<br/>data/index/&lt;域&gt;/llm_spend.json"]
+        LLMC["LiteLLMClient<br/>litellm.completion"]
+        VC["validate_citations<br/>越界 [n] 剥除 + 记入诊断"]
+    end
+
+    subgraph ag["agent/"]
+        REDLINE["RiskGuard 红线（确定性）<br/>domains/clinic/redline.py<br/>在进循环之前判定"]
+        LOOP["run_tool_loop<br/>agent/tool_loop.py"]
+        TOOLS["ToolRegistry + 幂等装配<br/>agent/tools.py · bootstrap.py"]
+        CALLER["LiteLLMToolCaller<br/>agent/llm_tool_caller.py"]
+        GRAPH["ClinicAgent 图<br/>agent/kernel.py"]
+        SAVER["InMemorySaver（默认）"]
+    end
+
+    subgraph ev["评测 evaluation/"]
+        HARNESS["harness.py<br/>标注集自检 + 引用完整性 + 单路消融"]
+        METRICS["metrics.py<br/>hit / recall / MRR / nDCG"]
+        CGATE["clinic.py<br/>红线硬闸门 + 分诊/挂号软指标"]
+        BASELINE["冻结基线<br/>data/eval/*.json"]
+    end
+
+    CORPUS --> CHUNKER --> NORM --> EMBED --> SQLITE
+    CLI -->|"ingest"| CHUNKER
+    CLI -->|"search / ask"| HYBRID
+    CLI -->|"eval --gate"| HARNESS
+    CLI -->|"domains / stats"| REG
+    API -->|"/search · /ask"| HYBRID
+    API -->|"/chat"| REDLINE
+    API --> REG
+    WEB --> API
+    REG --> K8SP
+    REG --> CLIP
+    HYBRID --> SPROTO
+    SQLITE -.->|"实现"| SPROTO
+    HYBRID --> FUSION --> RERANK
+    RERANK -->|"带引用的命中"| CTX
+    CTX --> LLMC --> VC
+    BUD -.->|"达上限即拒绝新调用"| LLMC
+    REDLINE -->|"未命中 · 有 LLM 密钥"| LOOP
+    REDLINE -.->|"未命中 · 无密钥则降级"| GRAPH
+    LOOP --> TOOLS
+    LOOP --> CALLER
+    CALLER --> LLMC
+    GRAPH --> SAVER
+    HARNESS --> METRICS
+    HARNESS --> BASELINE
+    CGATE --> BASELINE
+```
+
+图里刻意保留的三个真实边界（都与上面的「状态（诚实标注）」一致）：
+
+- `SqliteStore` 是 `Store` 协议**当前唯一的实现**；Postgres + pgvector 还只是计划，
+  所以图里没有它。
+- `LiteLLMClient` 是 `generate.py` 与 `agent/llm_tool_caller.py` **共用的那一个模型出口**，
+  但**日预算闸门只挂在 `generate.py` 这条边上**——`/chat` 的工具循环不走它。
+  这条差异是有意的（图里用虚线画出来），原因见 `SECURITY.md` 的 S-2。
+- `/chat` 有两条路径：有密钥走工具循环（模型决定控制流），无密钥降级到确定性图；
+  红线在两条路径里都是**进循环之前**的确定性判定。
+
 ```
    本机（当前，零外部依赖）                             生产形态（同一套业务代码）
    ─────────────────────────────                        ─────────────────────────
@@ -316,3 +412,8 @@ python -m kubedocs.cli --provider hashing ingest --limit-files 100
 - [ ] 精排（cross-encoder）用真实模型实测收益（里程碑 9）
 - [ ] 嵌入量化/ONNX 提速 + k6 压测 + P95/成本 SLO（里程碑 10）
 - [ ] Docker 全栈实测（受限于本机 Docker Hub 不可达）
+
+---
+
+本项目以 [MIT 许可证](LICENSE) 发布。
+

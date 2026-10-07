@@ -23,8 +23,8 @@ from kubedocs.api.app import create_app
 from kubedocs.config import Settings
 from kubedocs.embed import HashingEmbedder
 from kubedocs.generate import Answerer, LLMResult
+from kubedocs.store import from_settings
 from kubedocs.store.base import ChunkInput, DocInput
-from kubedocs.store.sqlite_store import from_settings
 
 DIM = 32
 """与 `Settings.embedding_dim` 一致；hashing 维度只影响向量空间大小，不影响管道正确性。"""

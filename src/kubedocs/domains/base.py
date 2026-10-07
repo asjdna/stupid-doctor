@@ -32,7 +32,7 @@ if TYPE_CHECKING:  # 只用于类型标注，避免 domains → store/retrieval 
     from kubedocs.embed import Embedder
     from kubedocs.ingest import IngestReport
     from kubedocs.retrieve.hybrid import HybridRetriever
-    from kubedocs.store.sqlite_store import SqliteStore
+    from kubedocs.store.base import Store
 
 
 @runtime_checkable
@@ -51,13 +51,13 @@ class DomainPack(Protocol):
     def corpus_root(self, settings: Settings) -> Path:
         """该域的语料根目录。"""
 
-    def build_index(self, store: SqliteStore, embedder: Embedder,
+    def build_index(self, store: Store, embedder: Embedder,
                     settings: Settings, *, rebuild: bool = False,
                     limit_files: int | None = None,
                     progress: object = None) -> IngestReport:
         """把该域语料灌入索引。返回摄取报告（内核据此打印统计）。"""
 
-    def retriever(self, store: SqliteStore, embedder: Embedder,
+    def retriever(self, store: Store, embedder: Embedder,
                   settings: Settings) -> HybridRetriever:
         """构造该域的检索器。域不同，检索器内部配置可以不同。"""
 

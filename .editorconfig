@@ -1,0 +1,32 @@
+# EditorConfig：让不同的编辑器在同一份文件上给出同一套基础格式。
+# https://editorconfig.org
+#
+# 与 .gitattributes 保持一致：那边是 `* text=auto eol=lf`，
+# 这里对应 `end_of_line = lf`。开发机是 Windows、CI 跑 ubuntu，
+# 不约定换行就会让每次提交变成整文件 diff。
+root = true
+
+[*]
+charset = utf-8
+end_of_line = lf
+insert_final_newline = true
+trim_trailing_whitespace = true
+indent_style = space
+indent_size = 4
+
+# Makefile 的配方行**必须是 tab**，否则 make 直接报 "missing separator"。
+# 这是本仓库唯一强制 tab 的地方（与 Makefile 自身一致）。
+[Makefile]
+indent_style = tab
+
+# YAML / JSON 习惯 2 空格（GitHub 工作流、issue 表单、数据文件）。
+[*.{yml,yaml,json,jsonl}]
+indent_size = 2
+
+# Markdown 行尾两个空格是"硬换行"，是有意义的内容，不能自动删掉。
+[*.{md,markdown}]
+trim_trailing_whitespace = false
+
+# 与 .gitattributes 的 `*.cmd text eol=crlf` / `*.bat text eol=crlf` 对应。
+[*.{cmd,bat}]
+end_of_line = crlf
