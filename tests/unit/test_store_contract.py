@@ -1,30 +1,36 @@
-"""多后端一致性测试：同一批输入在 `sqlite` / `sqlite-vec` / `pgvector` 上的行为对照。
+"""多后端一致性测试：同一批输入在 `sqlite` / `sqlite-vec` / `pgvector` / `milvus` 上的行为对照。
 
 ## 这个文件守的是什么
 
-存储层有三个实现，它们必须满足**同一个契约**。契约不写在文档里，写在这里：
+存储层有四个实现，它们必须满足**同一个契约**。契约不写在文档里，写在这里：
 
 1. `dense_search` / `keyword_search` 的返回形态都是 `list[(chunk_id, rank)]`，
    rank 从 1 起连续；
 2. 同一批输入下，**向量路必须给出同样的排序**（向量已归一化时，
    内积序与余弦序严格相同——这是"换后端不改指标"的前提）；
-3. 全文路在 `sqlite` 与 `sqlite-vec` 之间必须**逐字节相同**（两者共用同一份
+3. 全文路在 `sqlite` / `sqlite-vec` / `milvus` 之间必须**逐字节相同**（三者共用同一份
    FTS5 索引与同一段代码）；`pgvector` 允许排序差异，原因写在下面与 ADR-0004 里；
 4. 覆盖语义（同一 doc 重写）、删除语义（两个通道都不再召回）、
-   无向量必须**拒绝写入**——这三条在三个后端上必须一致。
+   无向量必须**拒绝写入**——这三条在四个后端上必须一致。
 
-## pgvector 的"允许差异"到底是什么（不是含糊过去）
+## 谁"允许差异"，差在哪（不是含糊过去）
 
-`pgvector` 的全文路用 `ts_rank`，SQLite 用 FTS5 的 `bm25()`。**两者不同源**：
-BM25 含 IDF 与文档长度归一化，`ts_rank` 没有。所以相同命中集合下的**排序可能不同**，
-这是真实差异，不是 bug。因此对 pgvector 断言的是**命中集合相同**，
-而排序的精确一致只对两个 SQLite 后端断言。
+- `pgvector` 的全文路用 `ts_rank`，SQLite 用 FTS5 的 `bm25()`。**两者不同源**：
+  BM25 含 IDF 与文档长度归一化，`ts_rank` 没有。所以相同命中集合下的**排序可能不同**，
+  这是真实差异，不是 bug。因此对 pgvector 断言的是**命中集合相同**，
+  而排序的精确一致只对共用 FTS5 的三个后端断言。
+- `pgvector` / `milvus` 的向量路是 **HNSW 近似索引**，理论上允许给出与精确检索不同的
+  top-k。在本文件的 5 块小索引上它们与精确检索一致（另有一组 `dense_search_exact()`
+  对拍用例）；大索引上的召回率是**另一个问题**，结论与实测见 ADR-0005 第五节。
 
-## pgvector 的接入方式
+## pgvector / milvus 的接入方式
 
-数据库不可达时整个参数**不出现**（而不是出现后 skip 掉全部用例）——
-这样"本地没 Docker"不会让报告里出现一堆带 skip 的绿点，掩盖"这一路没跑过"。
-`test_pgvector_store.py` 里另有一组显式 skip 的用例，用来标明"未验证"。
+- **pgvector**：数据库不可达时整个参数**不出现**（而不是出现后 skip 掉全部用例）——
+  这样"本地没 Docker"不会让报告里出现一堆带 skip 的绿点，掩盖"这一路没跑过"。
+  `test_pgvector_store.py` 里另有一组显式 skip 的用例，用来标明"未验证"。
+- **milvus**：依赖是本地文件（不需要 Docker/服务端），所以它**始终**留在参数化里；
+  真的不可用（没装包 / 文件打不开）时由夹具 `pytest.skip` 并打印原因——
+  skip 是显式可见的"没跑过"，而"悄悄从参数里消失"看起来像"这一路根本不需要存在"。
 """
 from __future__ import annotations
 
@@ -36,6 +42,7 @@ import pytest
 
 from kubedocs.config import Settings
 from kubedocs.store.base import ChunkInput, DocInput, Store, StoreError
+from kubedocs.store.milvus_store import deps_available
 from kubedocs.store.sqlite_store import MissingVectorError, SqliteStore
 from kubedocs.store.sqlite_vec_store import SqliteVecStore
 from tests.unit.store_seed import DIM, make_seed, vec
@@ -54,17 +61,30 @@ def _pg_available() -> tuple[bool, str]:
     return pgvector_store.probe(Settings().database_url, timeout=2.0)
 
 
+def _milvus_available() -> tuple[bool, str]:
+    """探测 Milvus Lite **依赖**是否装好（本地数据目录，无需服务端）。
+
+    刻意只查依赖、不真的打开数据目录：milvus-lite 的数据目录一旦打开，
+    **在进程存活期间不会被释放**（LOCK 一直占着，连目录都删不掉），
+    模块级探测不该为此在每个测试进程里留一份垃圾。真正打不开的情形
+    （目录被别的进程独占等）由夹具在构造 store 时 skip 并打印原因。
+    """
+    return deps_available()
+
+
 _PG_OK, _PG_WHY = _pg_available()
+_MILVUS_OK, _MILVUS_WHY = _milvus_available()
 
 
-@pytest.fixture(params=["sqlite", "sqlite-vec"] + (["pgvector"] if _PG_OK else []))
+@pytest.fixture(params=["sqlite", "sqlite-vec", "milvus"]
+                + (["pgvector"] if _PG_OK else []))
 def backend(request: pytest.FixtureRequest) -> str:
     return str(request.param)
 
 
 @pytest.fixture
 def stores(backend: str, tmp_path: Any) -> Iterator[Store]:
-    """按后端构造 store：两个 SQLite 后端各用一个独立文件，pgvector 用一个独立 schema。"""
+    """按后端构造 store：三个本地后端各用一个独立文件，pgvector 用一个独立 schema。"""
     settings = Settings(
         index_dir=str(tmp_path / "index"), domain="contract",
         embedding_provider="hashing", embedding_dim=DIM, embedding_model="hashing-test",
@@ -83,6 +103,25 @@ def stores(backend: str, tmp_path: Any) -> Iterator[Store]:
         finally:
             _drop_schema(store, schema)
             store.close()
+        return
+
+    if backend == "milvus":
+        if not _MILVUS_OK:
+            pytest.skip(f"Milvus Lite 不可用，milvus 这一路未验证：{_MILVUS_WHY}")
+        from kubedocs.store.milvus_store import MilvusStore
+
+        try:
+            ms = MilvusStore(db_path=settings.sqlite_path, vector_path=settings.vector_path,
+                             dim=DIM, embedding_model="hashing-test",
+                             milvus_path=tmp_path / "milvus" / "contract.db")
+        except StoreError as e:
+            # 打不开（例如数据目录被另一个进程独占）属于环境原因：skip 并带上原因，
+            # 不失败、也不假装跑过。真正的代码缺陷会在这里之外的地方红。
+            pytest.skip(f"Milvus Lite 数据目录打不开，milvus 这一路未验证：{e}")
+        try:
+            yield ms
+        finally:
+            ms.close()
         return
 
     store_cls = SqliteStore if backend == "sqlite" else SqliteVecStore

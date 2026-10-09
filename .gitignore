@@ -17,6 +17,8 @@ venv/
 .mypy_cache/
 .ruff_cache/
 .coverage
+# pytest-cov 并行跑（xdist / 分片）写的是 .coverage.<host>.<pid>，只忽略 .coverage 会漏
+.coverage.*
 htmlcov/
 
 # 数据（原始语料与派生语料都不入库：由 scripts/fetch_corpus.py 与摄取管线重建）
@@ -31,12 +33,22 @@ logs/
 *.log
 *.db
 *.sqlite3
+# SQLite 开 WAL 之后会在库文件旁边再生成 `-wal` / `-shm` 两个附属文件
+# （`sqlite_store.py` 里显式 `PRAGMA journal_mode=WAL`）。只忽略 `*.db`
+# 会把它俩漏成未跟踪噪声——它们与库文件同生命周期，本就该一起忽略。
+*.db-wal
+*.db-shm
 
 # 编辑器/系统
 .idea/
 .vscode/
 .DS_Store
 Thumbs.db
+# 合并/改写留下的临时副本与备份：永远不该入库
+*.bak
+*.orig
+*.rej
+*~
 
 # clinic 域的知识卡片（上游派生语料，标注「仅用于学术研究」）
 data/clinic/

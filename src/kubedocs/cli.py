@@ -69,9 +69,13 @@ def _snippet(text: str, width: int = 160) -> str:
 
 
 def _index_label(settings: Settings) -> str:
-    """索引位置的人类可读描述：三种后端存在的位置本来就不同。"""
+    """索引位置的人类可读描述：四种后端存在的位置本来就不同。"""
     if settings.store == "pgvector":
         return f"{settings.database_url}（schema={settings.domain}）"
+    if settings.store == "milvus":
+        # 块行/全文在 SQLite，向量在 Milvus 的本地文件里——两个位置都要说清楚，
+        # 否则"索引到底在哪"这个问题会变成一次翻源码。
+        return f"{settings.sqlite_path}（块行+全文） + {settings.milvus_path}（向量）"
     return str(settings.sqlite_path)
 
 
@@ -294,7 +298,8 @@ def _add_globals(p: argparse.ArgumentParser, default: object) -> None:
     p.add_argument("--domain", default=default,
                    help="域（默认 k8s_docs；可用 `domains` 子命令列出）")
     p.add_argument("--store", choices=list(BACKENDS), default=default,
-                   help="存储后端（默认 sqlite-vec；sqlite=旧实现，pgvector=生产）")
+                   help="存储后端（默认 sqlite-vec；sqlite=旧实现，pgvector=生产，"
+                        "milvus=Milvus Lite 本地文件 + HNSW）")
     p.add_argument("--provider", choices=["bge", "hashing"], default=default,
                    help="嵌入器（bge=真实向量，hashing=离线降级）")
     p.add_argument("--hf-endpoint", default=default,

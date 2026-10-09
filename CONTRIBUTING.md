@@ -43,19 +43,23 @@ make check          # = lint + type + test，与 CI 的 quality job 等价
 |---|---|---|
 | `make lint` | `ruff check .` | `E/F/W/B/I/UP/S/C4/RET/SIM`（含 flake8-bandit 的 `S` 子集） |
 | `make type` | `mypy src scripts` | `disallow_untyped_defs` 等，**新函数必须带类型注解** |
-| `make test` | `pytest tests/unit` | 单元测试；零外部依赖、秒级、不加载嵌入模型 |
+| `make test` | `pytest tests/unit -p no:cacheprovider` | 单元测试；零外部依赖、秒级、不加载嵌入模型 |
 
 单独跑也一样：
 
 ```bash
 python -m ruff check .
 python -m mypy src scripts
-python -m pytest tests/unit
+python -m pytest tests/unit -p no:cacheprovider
 ```
 
 > ⚠️ **直接调 pytest 时不要再加 `-q`**：`pyproject.toml` 的
-> `addopts = "-q --strict-markers"` 里已经有一个，再叠一层会把
+> `addopts = "-q --strict-markers"` 里已经有一个，再叠一层会变成 `-qq`，把
 > **最后那行汇总**（`N passed`）一起吞掉，你会看不到实际通过数。
+>
+> `-p no:cacheprovider` 只是为了不留下 `.pytest_cache`（`make test`、CI 与
+> `make clean` 的清单都按这个来），与测试结果无关。这三处的命令是**同一份**：
+> `Makefile` 的 `test` 目标、`.github/workflows/ci.yml`、以及上面这个代码块。
 
 **没有 `make` 的机器**（原生的 Windows 环境常见）可以直接跑上面三条命令——
 它们才是真相，`make` 只是把它们串起来。

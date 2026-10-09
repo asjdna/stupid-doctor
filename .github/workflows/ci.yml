@@ -39,8 +39,11 @@ jobs:
           pip install -e ".[dev]"
       # 单元测试**不需要**数据库、模型与网络：这是刻意的设计（纯函数 + 依赖注入），
       # 让反馈回路保持在秒级。需要真实模型的评测见下面的 pipeline job 与 README。
+      # **不要再叠加 `-q`**：pyproject 的 addopts 里已经有一个 `-q`，两个叠成 `-qq`
+      # 会把 "N passed" 汇总行一起吞掉（CI 日志里就看不到实际通过数了）。
+      # `-p no:cacheprovider` 与 `make test`、CONTRIBUTING.md 的命令保持一致（CI 不需要缓存）。
       - name: 单元测试（零依赖、秒级）
-        run: pytest tests/unit -q
+        run: pytest tests/unit -p no:cacheprovider
       - name: ruff（阻塞）
         run: ruff check .
       - name: mypy（阻塞）

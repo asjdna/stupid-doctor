@@ -12,7 +12,10 @@
 
 ## 这一路的"未验证"是什么
 
-没起 Docker 时这些用例是 skip 的，报告里必须写"未验证"而不是"通过"。
+起 Docker 之前这些用例整文件 skip，报告里写的是"未验证"而不是"通过"。起库之后
+它们**真的跑起来了**，并暴露出两处断言本身的错误（`chunk_id` 逐位相等、
+在**非池连接**上查 `hnsw.ef_search`），修法与原因见对应用例的 docstring——
+这两处都是"从没执行过"才会一直存在的错，正是把它们跑起来的意义所在。
 `test_store_backend.py` 里另有一组不依赖数据库的探测用例
 （`probe()` 的错误路径），它们在任何环境下都会跑。
 """
@@ -27,7 +30,7 @@ import psycopg
 import pytest
 
 from kubedocs.config import Settings
-from kubedocs.store.base import MissingVectorError, Store
+from kubedocs.store.base import MissingVectorError, Store, Vector
 from kubedocs.store.pgvector_store import PgVectorStore, probe
 from kubedocs.store.sqlite_vec_store import SqliteVecStore
 from tests.unit.store_seed import DIM, make_seed, vec
@@ -66,6 +69,30 @@ def _seed_pg(store: PgVectorStore) -> None:
     seed = make_seed()
     store.upsert_docs(seed.docs, seed.chunks, seed.vectors)
     store.finalize()
+
+
+def _sims(ids: list[str], vectors: dict[str, Vector], q: np.ndarray) -> list[float]:
+    """把后端返回的 chunk_id 序列换算成**余弦相似度**序列（用种子向量自己算）。
+
+    为什么必须这样比而不是比 chunk_id 序列：两个后端都是**精确**近邻——
+    `vec0` 是穷举扫描，而 pgvector 在小索引上的 HNSW 与关掉索引的精确检索逐位一致
+    （见 `test_hnsw_matches_exact_search_on_small_index`）——所以差别只可能来自
+    **并列时谁排前面**，而那不属于契约：`vec0` 按行序、HNSW 按图遍历序，两者都不会
+    也不需要对齐。本种子语料在第 4 位上**必然**并列（`e_a` 对 `beta::0000` /
+    `beta::0001` / `gamma::0000` 的相似度都是 0.0，而只剩 2 个位置），
+    因此"chunk_id 逐位相等"这个断言在数学上就不可能稳定成立——它是本文件
+    第一次真正跑起来时暴露出来的两处断言错误之一。
+
+    可比、且必须相等的是**相似度序列**：它同时证明了两件事——名次按同一条度量
+    单调降序，且岔开的位置上分数确实相等（并列），而不是"某个后端少召回了"。
+    """
+    qn = np.asarray(q, dtype=np.float64)
+    qn = qn / np.linalg.norm(qn)
+    out: list[float] = []
+    for cid in ids:
+        v = np.asarray(vectors[cid], dtype=np.float64)
+        out.append(round(float(np.dot(v / np.linalg.norm(v), qn)), 6))
+    return out
 
 
 # --------------------------------------------------------------------------- schema
@@ -107,19 +134,29 @@ def test_hnsw_parameters_are_the_configured_ones(pg: PgVectorStore) -> None:
         ddl = conn.execute(
             "SELECT indexdef FROM pg_indexes WHERE schemaname = %s "
             "AND indexname = 'idx_chunks_embedding'", (pg.schema,)).fetchone()[0]
-        ef_search = conn.execute("SHOW hnsw.ef_search").fetchone()[0]
     assert "hnsw" in ddl and "vector_cosine_ops" in ddl
     assert f"m='{pg.hnsw_m}'" in ddl or f"m={pg.hnsw_m}" in ddl
     assert f"ef_construction='{pg.hnsw_ef_construction}'" in ddl \
         or f"ef_construction={pg.hnsw_ef_construction}" in ddl
-    # ef_search 是**查询期**参数（池的连接在 configure 里设过）
+    # ef_search 是**查询期**参数，由池的 `configure` 逐连接下发。
+    # ⚠️ 因此必须在**池里取出来的连接**上查：`psycopg.connect(_DSN)` 拿到的是
+    # 一条池外的裸连接，它从没走过 `configure`，`SHOW` 只会给出该 GUC 的默认值 40，
+    # 断言 `== 100` 永远不成立。这正是本文件第一次真正跑起来时报出的第二处断言错误
+    # ——它验证的必须是"商店（store）实际发给查询的连接"，而不是随便一条连接。
+    with pg._pool.connection() as pooled:
+        ef_search = pooled.execute("SHOW hnsw.ef_search").fetchone()[0]
     assert ef_search == str(pg.hnsw_ef_search)
 
 
 # --------------------------------------------------------------------------- 与 SQLite 对照
 def test_dense_search_matches_sqlite_vec_on_same_input(pg: PgVectorStore,
                                                        tmp_path: Path) -> None:
-    """核心对照：同一批语料下，pgvector 的向量路排序必须与 sqlite-vec 完全一致。"""
+    """核心对照：同一批语料下，pgvector 的向量路必须与 sqlite-vec 给出**同一个名次语义**。
+
+    比的是**相似度序列**而不是 chunk_id 序列（理由见 `_sims`）：两个后端都是精确近邻，
+    并列名次的先后不属于契约。这样断言既不允许"某个后端少召回"，
+    也不强求 HNSW 与 vec0 在并列处对齐。
+    """
     _seed_pg(pg)
     sqlite_store = SqliteVecStore(db_path=tmp_path / "s.db", vector_path=tmp_path / "s.npy",
                                  dim=DIM, embedding_model="hashing-test")
@@ -128,7 +165,12 @@ def test_dense_search_matches_sqlite_vec_on_same_input(pg: PgVectorStore,
         sqlite_store.upsert_docs(seed.docs, seed.chunks, seed.vectors)
         sqlite_store.finalize()
         for q in (vec(a=1.0), vec(b=1.0), vec(c=1.0)):
-            assert pg.dense_search(q, 4) == sqlite_store.dense_search(q, 4)
+            got = [c for c, _ in pg.dense_search(q, 4)]
+            want = [c for c, _ in sqlite_store.dense_search(q, 4)]
+            got_sims, want_sims = _sims(got, seed.vectors, q), _sims(want, seed.vectors, q)
+            for sims in (got_sims, want_sims):
+                assert sims == sorted(sims, reverse=True), "名次必须按相似度降序"
+            assert got_sims == want_sims, "两个后端的相似度序列不一致：向量路语义变了"
     finally:
         sqlite_store.close()
 

@@ -27,26 +27,67 @@ orchestrator 在"控制流由谁决定"这一点上并无本质区别。本模�
 """
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Any
 
 from kubedocs.agent.bootstrap import register_domain_tools
 from kubedocs.agent.tool_loop import AgentTurn, run_tool_loop
-from kubedocs.agent.tools import ToolRegistry
+from kubedocs.agent.tools import ToolRegistry, ToolSpec
 from kubedocs.config import Settings
 from kubedocs.domains.clinic.pack import wants_booking
 from kubedocs.domains.clinic.redline import RiskGuard, emergency_advice, emergency_menu
 
-SYSTEM = """你是医院预问诊助手，帮助患者判断该挂哪个科、并协助挂号。
+SYSTEM_TEMPLATE = """你是医院预问诊助手，帮助患者判断该挂哪个科、并协助挂号。
 
 规则：
 1. **只做导诊与挂号协助，不下诊断结论**，不推荐具体用药与剂量。
-2. 需要资料时用工具查（科室列表、号源余量、知识库检索），不要凭记忆编造科室名或号源。
-3. 挂号（book_appointment）只有在**用户明确要求挂号**时才调；调用前先用
-   get_availability 确认有号，并把科室名说清楚。
-4. 症状信息不足时就问一个最关键的问题，一次只问一件事。
-5. 出现胸痛、呼吸困难、意识不清、大出血等紧急情况，提示立即拨打 120 或去急诊。
-6. 用简体中文，简洁分点。"""
+2. 需要事实资料（科室名、号源、医学常识）时**先用工具查证**，不要凭记忆编造。
+3. 你**只有**下列工具可用。不要调用没有列出的工具，也不要凭印象编一个工具名——
+   调用不存在的工具只会拿到一句错误，然后白白多走一步：
+{tool_list}
+4. 有副作用的工具（例如挂号）只有在**用户明确要求**时才调；调用前先用查询类工具
+   确认有号，并把科室名说清楚。
+5. 症状信息不足时就问一个最关键的问题，一次只问一件事。
+6. 出现胸痛、呼吸困难、意识不清、大出血等紧急情况，提示立即拨打 120 或去急诊。
+7. 用简体中文，简洁分点。"""
+
+TOOL_LIST_HEADER = "可用工具清单（只能调用这些）："
+"""工具清单那一行的**机器可读标记**：测试靠它把「提示承诺的工具集合」抠出来，
+与 `ToolRegistry` 里实际注册的集合逐名比对。改这句话要同步改测试。"""
+
+
+def build_system_prompt(tools: Sequence[ToolSpec]) -> str:
+    """按**实际注册的工具**生成系统提示。
+
+    ## 为什么必须动态生成，而不是写死一段常量
+
+    写死的提示词会脱离事实：`/chat` 路径是 `ClinicReactRuntime(settings, service)`
+    构造的（`api/app.py` 不传 retriever），于是 `bootstrap.register_domain_tools`
+    里的 `if retriever is not None` 不成立、**`search_docs` 根本没注册**。
+    而老提示词却对模型说"需要资料时用工具查（科室列表、号源余量、**知识库检索**）"——
+    模型被告知有一个它没有的工具，会去调它，每次都拿回"没有名为 search_docs 的工具"，
+    白烧一轮预算还拖长响应。
+
+    ## 为什么只列工具名，不复述每个工具的说明
+
+    说明与 `when_not` 已经随 function calling 的 schema 一起交给模型了
+    （见 `ToolSpec.schema()`）。在系统提示里再抄一遍，就等于有两个会各自漂移的
+    描述源；而"只能调这些"这条**约束**是 schema 表达不了的，才是提示词该管的事。
+
+    ## 不变量
+
+    提示词承诺的工具集合 == 实际注册的工具集合（`tests/unit/test_prompt_tool_parity.py`
+    钉住了这一点）。多做（承诺了没注册的）会让模型空转，少做（注册了没承诺）会让
+    工具白注册——两个方向都要防。
+    """
+    names = sorted(t.name for t in tools)
+    # 空清单那行**故意不以 “- ” 开头**：`- ` 前缀是“这是一个工具名”的约定，
+    # 让占位文案也用这个前缀，会把“没有工具”读成“有一个叫（当前没有任何工具可用）的工具”。
+    block = ("\n".join([TOOL_LIST_HEADER, *(f"- {name}" for name in names)]) if names
+             else f"{TOOL_LIST_HEADER}\n（当前没有任何工具可用：不要声称自己查过任何资料）")
+    # 用 replace 而不是 str.format：提示词里将来出现花括号（例如 JSON 示例）时不会炸。
+    return SYSTEM_TEMPLATE.replace("{tool_list}", block)
 
 
 @dataclass
@@ -81,6 +122,16 @@ class ClinicReactRuntime:
     def tools(self) -> list[Any]:
         return list(ToolRegistry.for_domain("clinic"))
 
+    @property
+    def system_prompt(self) -> str:
+        """这一轮实际发给模型的系统提示：按**刚才注册进去的工具**生成。
+
+        每次取都重新生成（而不是在 `__init__` 里缓存一份）：`ToolRegistry` 是全局的，
+        幂等装配随时可能把它换掉，缓存下来的提示词就会与真实可调用的工具脱节——
+        而"提示承诺 == 实际注册"这条不变量正是这个属性存在的理由。
+        """
+        return build_system_prompt(self.tools)
+
     def has_llm(self) -> bool:
         from kubedocs.generate import has_api_key
 
@@ -106,14 +157,15 @@ class ClinicReactRuntime:
         from kubedocs.agent.llm_tool_caller import LiteLLMToolCaller
 
         caller = LiteLLMToolCaller(self.settings)
-        messages: list[dict[str, Any]] = [{"role": "system", "content": SYSTEM}]
+        prompt = self.system_prompt
+        messages: list[dict[str, Any]] = [{"role": "system", "content": prompt}]
         messages.extend(history or [])
         messages.append({"role": "user", "content": message})
 
         # 用户这一轮明确要求挂号 = 对他的取号确认；否则拒绝执行有副作用的工具
         user_asked_to_book = wants_booking(message)
         turn: AgentTurn = run_tool_loop(
-            message, tools=self.tools, llm=caller, system=SYSTEM, max_steps=5,
+            message, tools=self.tools, llm=caller, system=prompt, max_steps=5,
             confirm=(lambda _call: True) if user_asked_to_book else None,
         )
         return ClinicTurn(

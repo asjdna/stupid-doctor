@@ -11,7 +11,9 @@
 - 查询文本来自金标集（真实用户问法），用与建索引相同的嵌入器编码成查询向量，
   编码只做一次、不计入延迟；
 - 每个后端跑满 `--repeats` 轮 × 全部查询，取 p50/p95；
-- 同时记录**跨后端 top-k 一致性**：换后端不许改变检索结果，这一点比延迟更重要；
+- 同时记录**跨后端 top-k 一致性**：换后端不许改变检索结果，这一点比延迟更重要。
+  一致性分两个口径报（见 `_agreement`）：**名次逐个相同**与**命中集合相同**——
+  `ts_rank`（Postgres）与 BM25（FTS5）天然只可能满足后者，混为一谈会误判召回；
 - `--top-k` 默认 10（与评测口径一致）。
 
 ## 用法
@@ -53,7 +55,7 @@ class BenchResult:
     keyword_ms: dict[str, float] = field(default_factory=dict)
     dense_top: list[list[str]] = field(default_factory=list)
     keyword_top: list[list[str]] = field(default_factory=list)
-    agreement: dict[str, str] = field(default_factory=dict)
+    agreement: dict[str, object] = field(default_factory=dict)
 
     def to_json(self) -> dict[str, object]:
         """落盘用：不含逐查询明细（那个只有跨后端对照时才用，体积大且无独立价值）。"""
@@ -106,6 +108,29 @@ def _summary(values: list[float]) -> dict[str, float]:
         "p95": round(percentile(values, 0.95), 3),
         "mean": round(statistics.fmean(values), 3),
         "max": round(max(values), 3),
+    }
+
+
+def _agreement(base: list[list[str]], other: list[list[str]], top_k: int) -> dict[str, str]:
+    """跨后端 top-k 一致性的**两个口径**（都必须报，因为它们说的不是一回事）。
+
+    - `identical_topk`：名次逐个相同。换后端不该改结果，这是最强的一档；
+    - `same_hit_set`：命中**集合**相同、只是排序不同。`ts_rank` 与 BM25 的差异
+      正好长这样（Postgres 核心没有 BM25，见 `pgvector_store` 模块文档第 1 条）。
+      只报第一个口径，会把"排序变了"误读成"召回坏了"。
+    - `mean_set_overlap`：平均集合重合率，用来量化"变了多少"，避免只有 是/否。
+    """
+    total = len(base)
+    identical = sum(1 for a, b in zip(base, other, strict=True) if a == b)
+    same_set = sum(1 for a, b in zip(base, other, strict=True) if set(a) == set(b))
+    overlap = statistics.fmean(
+        len(set(a) & set(b)) / max(min(len(a), len(b)), 1)
+        for a, b in zip(base, other, strict=True)) if total else 0.0
+    return {
+        "n_queries": str(total),
+        "identical_topk": f"{identical}/{total}",
+        "same_hit_set": f"{same_set}/{total}",
+        "mean_set_overlap": f"{overlap:.4f}",
     }
 
 
@@ -181,18 +206,13 @@ def main(argv: list[str] | None = None) -> int:
         base = results[0]
         print(f"\n跨后端 top-{args.top_k} 一致性（基准 = {base.backend}）")
         for r in results[1:]:
-            total = len(base.dense_top)
-            same_dense = sum(1 for a, b in zip(base.dense_top, r.dense_top, strict=True)
-                             if a == b)
-            same_kw = sum(1 for a, b in zip(base.keyword_top, r.keyword_top, strict=True)
-                          if a == b)
-            r.agreement = {
-                "vs": base.backend,
-                "dense_identical_topk": f"{same_dense}/{total}",
-                "keyword_identical_topk": f"{same_kw}/{total}",
-            }
-            print(f"  {r.backend:<12} 向量路完全相同 {same_dense}/{total}，"
-                  f"全文路完全相同 {same_kw}/{total}")
+            dn = _agreement(base.dense_top, r.dense_top, args.top_k)
+            kw = _agreement(base.keyword_top, r.keyword_top, args.top_k)
+            r.agreement = {"vs": base.backend, "dense": dn, "keyword": kw}
+            print(f"  {r.backend:<12} 向量路 名次相同 {dn['identical_topk']:>8}，"
+                  f"集合相同 {dn['same_hit_set']:>8}（平均重合 {dn['mean_set_overlap']}）")
+            print(f"  {'':<12} 全文路 名次相同 {kw['identical_topk']:>8}，"
+                  f"集合相同 {kw['same_hit_set']:>8}（平均重合 {kw['mean_set_overlap']}）")
 
         out = Path(args.json_out)
         out = out if out.is_absolute() else root / out

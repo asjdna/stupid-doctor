@@ -31,9 +31,9 @@ python -m kubedocs.cli --hf-offline eval --gate   # 评测并卡闸门
 | 带引用回答 + 拒答 + 预算上限 | ✅ 已验证（含真实 LLM 端到端） |
 | 金标集（50 条）+ 指标 + 闸门 | ✅ 已验证（标注集自检 + 闸门能红） |
 | **P0 双域地基**：域协议 / 多域索引 / 中文归一化 | ✅ 已完成（k8s 域指标零回归） |
-| P1 医疗域资产迁移 | 🚧 进行中 |
-| P2 agent 内核（图 / 工具 / 持久化 / 中断） | 🚧 未开始 |
-| P5 FastAPI + 对话前端 | 🚧 未开始 |
+| P1 医疗域资产迁移 | ✅ 已完成（三维门控 / 急诊红线 `domains/clinic/redline.py` / 号源库 `booking.py` · `sqlite_provider.py` / 知识卡片脚本 `scripts/clinic_build_cards.py`） |
+| P2 agent 内核（图 / 工具 / 持久化 / 中断） | ✅ 已完成（`agent/` 13 个模块：LangGraph `StateGraph` + 工具循环 + `InMemorySaver` + `interrupt` 续跑；单测在闸门内） |
+| P5 FastAPI + 对话前端 | ✅ 已完成（`api/app.py` 6 个 API 端点 + `data/web/index.html` + `scripts/smoke_api.py` 冒烟） |
 | `docker compose up` 全栈 | ⚠️ **文件已写，本机 Docker Hub 不可达，未实测** |
 
 > 本项目坚持一件事：**没跑过的就不写"已完成"**。
@@ -49,12 +49,12 @@ python -m kubedocs.cli --hf-offline eval --gate   # 评测并卡闸门
 | 部件 | 本项目选择 | 理由 |
 |---|---|---|
 | 全文检索 | **SQLite FTS5**（带 `bm25()` 排序 + 列权重） | 标准库自带、零运维；能力与"用 Postgres 全文检索"等价 |
-| 向量检索 | **numpy 暴力内积**（可换 pgvector） | 2 万块量级毫秒级返回；同一 `Store` 协议下 pgvector 可直接替换 |
+| 向量检索 | **sqlite-vec**（默认；`sqlite`+numpy 与 `pgvector` 也在同一协议下） | 同一 `Store` 协议下换实现只改配置（`KUBEDOCS_STORE`）。vec0 换来的是"向量与块行同事务、可增删、不常驻内存"，**不是延迟**——它比 numpy 暴力内积慢约 11 倍（实测见 [`docs/adr/0004-向量存储后端.md`](docs/adr/0004-向量存储后端.md)） |
 | 多路融合 | **RRF**（自实现，约 20 行） | 免标定、跨语料稳定，与 OpenSearch 内置策略同源 |
 | 嵌入 | 本地 BGE-small-en（可切 API） | 医疗/企业语料常不允许出境；本地可离线复现，CI 不吃密钥 |
 | 评测 | **自建金标闸门 + 标注集自检** | 闸门纪律（能失败、拒绝跨集比较、基线溯源）是框架给不了的 |
-| LLM 网关 | **LiteLLM**（计划） | 多供应商路由/重试/回退/成本统计，自研是重复劳动 |
-| Agent 编排 | **LangGraph**（计划） | 耐久状态 + 中断恢复，不必自己写状态机与持久化 |
+| LLM 网关 | **LiteLLM**（两条 LLM 路径各自直接调这个库，不共用同一个客户端类） | 多供应商路由/重试/回退/成本统计，自研是重复劳动 |
+| Agent 编排 | **LangGraph**（`agent/kernel.py` 的图 + `interrupt` 中断续跑） | 耐久状态 + 中断恢复，不必自己写状态机与持久化 |
 
 **存储为什么先是 SQLite 而不是 pgvector**：把"业务逻辑跑通"与"一键可复现部署"
 拆成两个目标后，先做前者。判断依据、代价与边界写在
@@ -91,7 +91,7 @@ flowchart TB
 
     subgraph st["存储 store/（换实现只改配置）"]
         SPROTO["Store 协议（唯一耦合点）<br/>store/base.py"]
-        SQLITE["SqliteStore<br/>SQLite + FTS5（bm25 列权重）<br/>+ numpy 向量矩阵<br/>store/sqlite_store.py"]
+        SQLITE["SqliteVecStore / SqliteStore / PgVectorStore<br/>sqlite-vec（默认）· SQLite+FTS5+numpy · Postgres+pgvector<br/>后端清单见 store/__init__.py 的 BACKENDS"]
     end
 
     subgraph ret["检索 retrieve/"]
@@ -123,11 +123,14 @@ flowchart TB
         BASELINE["冻结基线<br/>data/eval/*.json"]
     end
 
+    LLMLIB["litellm 库<br/>两条 LLM 路径各自 import 直接调"]
+
     CORPUS --> CHUNKER --> NORM --> EMBED --> SQLITE
     CLI -->|"ingest"| CHUNKER
     CLI -->|"search / ask"| HYBRID
     CLI -->|"eval --gate"| HARNESS
-    CLI -->|"domains / stats"| REG
+    CLI -->|"domains"| REG
+    CLI -->|"stats"| SPROTO
     API -->|"/search · /ask"| HYBRID
     API -->|"/chat"| REDLINE
     API --> REG
@@ -139,23 +142,30 @@ flowchart TB
     HYBRID --> FUSION --> RERANK
     RERANK -->|"带引用的命中"| CTX
     CTX --> LLMC --> VC
+    LLMC --> LLMLIB
     BUD -.->|"达上限即拒绝新调用"| LLMC
     REDLINE -->|"未命中 · 有 LLM 密钥"| LOOP
     REDLINE -.->|"未命中 · 无密钥则降级"| GRAPH
     LOOP --> TOOLS
     LOOP --> CALLER
-    CALLER --> LLMC
+    CALLER --> LLMLIB
     GRAPH --> SAVER
     HARNESS --> METRICS
     HARNESS --> BASELINE
     CGATE --> BASELINE
 ```
 
-图里刻意保留的三个真实边界（都与上面的「状态（诚实标注）」一致）：
+图里三处容易看图看错的地方，在这里说明白（都与上面的「状态（诚实标注）」一致）：
 
-- `SqliteStore` 是 `Store` 协议**当前唯一的实现**；Postgres + pgvector 还只是计划，
-  所以图里没有它。
-- `LiteLLMClient` 是 `generate.py` 与 `agent/llm_tool_caller.py` **共用的那一个模型出口**，
+- `Store` 协议**不止一个实现**：`sqlite-vec`（默认，`store/sqlite_vec_store.py`）、
+  `sqlite`（`store/sqlite_store.py`，SQLite + FTS5 + numpy 向量）、`pgvector`
+  （`store/pgvector_store.py`，Postgres）都在，后端名以 `store/__init__.py` 的
+  `BACKENDS` 与 `config.py` 的 `store` 字段为单一出口（默认值 `"sqlite-vec"`）。
+  图里只画一个存储框，是为了突出"换实现只改配置"这条唯一耦合点，**不是"只有一个实现"**。
+- **两条 LLM 路径共用的是 `litellm` 这个库，不是同一个客户端类**：`generate.py` 用
+  `LiteLLMClient`（`generate.py:272`）走 `litellm.completion`；`agent/llm_tool_caller.py`
+  则是自成一体的 `LiteLLMToolCaller`（`llm_tool_caller.py:25`），自己 `import litellm`
+  直接调用，**全文不 import `LiteLLMClient`**。所以图里两条边分别指向 litellm 库。
   但**日预算闸门只挂在 `generate.py` 这条边上**——`/chat` 的工具循环不走它。
   这条差异是有意的（图里用虚线画出来），原因见 `SECURITY.md` 的 S-2。
 - `/chat` 有两条路径：有密钥走工具循环（模型决定控制流），无密钥降级到确定性图；
@@ -164,7 +174,7 @@ flowchart TB
 ```
    本机（当前，零外部依赖）                             生产形态（同一套业务代码）
    ─────────────────────────────                        ─────────────────────────
-    CLI / 未来的 FastAPI                                 api (FastAPI) ─▶ agent (LangGraph)
+    CLI / FastAPI                                        api (FastAPI) ─▶ agent (LangGraph)
         │                                                     │
         ▼                                                     ▼
    ingest: 语料 ─▶ 切块 ─▶ BGE 嵌入 ─▶ 索引            LiteLLM ─▶ LLM 供应商
@@ -406,8 +416,11 @@ python -m kubedocs.cli --provider hashing ingest --limit-files 100
 - [x] 混合检索 + RRF + 单路消融（里程碑 3）
 - [x] 带引用回答 + 拒答 + 预算上限（里程碑 4）
 - [x] 金标集 + 指标 + 自检 + 基线闸门（里程碑 5）
-- [ ] LangGraph Agent（检索不足时重试/改查）+ OTel/Prometheus（里程碑 6）
-- [ ] FastAPI `/healthz` `/search` `/ask`(SSE) `/metrics`（里程碑 7）
+- [x] LangGraph Agent（`agent/kernel.py` 的图 + `agent/tool_loop.py` 的工具循环：
+      模型自选工具、检索不足可改查重试）（里程碑 6）
+- [x] FastAPI `/healthz` `/domains` `/tools` `/search` `/ask`（JSON）`/chat`（SSE）
+      + 前端演示页 `data/web/index.html`（里程碑 7）
+- [ ] OTel/Prometheus 指标导出与 `/metrics`：里程碑 6/7 里**唯一还没落地**的观测部分
 - [ ] pgvector 生产实现（同一 `Store` 协议）+ 对照评测（里程碑 8）
 - [ ] 精排（cross-encoder）用真实模型实测收益（里程碑 9）
 - [ ] 嵌入量化/ONNX 提速 + k6 压测 + P95/成本 SLO（里程碑 10）

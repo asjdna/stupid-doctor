@@ -12,6 +12,12 @@
 - 不做增量对比（默认先清空目标 schema 再灌，保证"镜像"而不是"叠加"；
   `--keep` 可以关掉清空，用于向已有数据追加）。
 
+## 向量从哪来
+
+首选 `chunk_vectors.npy` + `chunks.vector_row` 行号映射（权威原始产物、零扩展依赖）；
+索引里没有该侧车文件时才回退读 `chunks_vec` 虚表（那条路必须在连接上载入 `vec0`，
+否则报 `no such module: vec0`）。取舍理由见 `_read_sidecar` / `_read_vec0`。
+
 ## 用法
 
     python scripts/load_pgvector.py                        # data/index/k8s_docs -> schema k8s_docs
@@ -38,13 +44,76 @@ EXIT_OK = 0
 EXIT_USER = 1
 
 
+def _read_sidecar(settings: Settings, rows: list[sqlite3.Row],
+                  dim: int) -> dict[str, np.ndarray]:
+    """从 `.npy` 侧车矩阵按 `vector_row` 取向量（**首选路径**）。
+
+    为什么它优先于 `chunks_vec`：
+    1. 它是权威原始产物——`sqlite_store.finalize()` 先原子落盘矩阵、再回写
+       `vector_row`，两者是同一份数据的两半，而 `.npy` 是"先写下的那一半"；
+    2. 少一层扩展依赖：读 `chunks_vec` 必须在**这条连接**上
+       `enable_load_extension` + 载入 `vec0`，漏了就是
+       `no such module: vec0`（这正是上一版脚本的真实故障）；
+    3. 本机索引实测 `vector_row` 恰为 `0..N-1` 的排列，且对全部 18861 行
+       与 `chunks_vec.embedding` **逐位相等**（脚本外的复核结论），所以两条路
+       在数据上等价，选依赖更少的这条不丢任何信息。
+
+    `vector_row` 越界即报错，不做"那就跳过一个吧"的静默处理：漏块的后果是
+    向量路静默少召回，而那是**评测指标掉一截却查不出原因**的那类事故。
+    """
+    vec_path = settings.vector_path
+    if not vec_path.exists():
+        return {}
+    mat = np.load(vec_path)
+    if mat.ndim != 2 or mat.shape[1] != dim:
+        raise StoreError(f"{vec_path} 形状 {mat.shape} 与 dim={dim} 不符；换过嵌入模型必须重建索引")
+    vecs: dict[str, np.ndarray] = {}
+    for r in rows:
+        vr = int(r["vector_row"])
+        if vr < 0 or vr >= mat.shape[0]:
+            raise StoreError(f"块 {r['chunk_id']} 的 vector_row={vr} 越界 {mat.shape}")
+        vecs[r["chunk_id"]] = np.asarray(mat[vr], dtype=np.float32)
+    return vecs
+
+
+def _read_vec0(con: sqlite3.Connection, rows: list[sqlite3.Row]) -> dict[str, np.ndarray]:
+    """从 `chunks_vec` 虚表读向量（**回退路径**：索引里没有 `.npy` 时）。
+
+    为什么回退路径必须存在、而且必须修对，而不是删掉了事：
+    `SqliteVecStore.rebuild_from_scratch()` 会 `unlink` 那个 `.npy`
+    （见 `sqlite_vec_store.py`），而它的 `finalize()` 又**不写** `.npy`——
+    所以"用 sqlite-vec 全新 ingest 出来的索引"根本没有侧车矩阵，
+    `chunks_vec` 是它唯一的向量来源。纯 `.npy` 方案会让这类索引无法灌进 Postgres。
+
+    读虚表必须在**当前这条连接**上启用扩展加载并载入 `vec0`，做法照
+    `sqlite_vec_store.SqliteVecStore._load_extension()`：载完立刻关掉扩展加载，
+    不给后续语句留口子。载入失败**硬报错**，不退回"零向量"。
+    """
+    try:
+        import sqlite_vec
+    except ImportError as e:  # pragma: no cover - 取决于环境
+        raise StoreError(
+            f"本地索引既没有 {'.npy'} 侧车矩阵，又缺 sqlite-vec 扩展（{e}）；"
+            "请装 `sqlite-vec>=0.1.9`，或用 `KUBEDOCS_STORE=sqlite` 重建索引以生成 .npy"
+        ) from e
+    con.enable_load_extension(True)
+    try:
+        sqlite_vec.load(con)
+    except (sqlite3.Error, OSError) as e:
+        raise StoreError(f"sqlite-vec 的 vec0 扩展加载失败（{type(e).__name__}: {e}）") from e
+    finally:
+        con.enable_load_extension(False)
+    return {r["chunk_id"]: np.frombuffer(r["embedding"], dtype="<f4").astype(np.float32)
+            for r in con.execute("SELECT chunk_id, embedding FROM chunks_vec")}
+
+
 def _read_local(index_dir: str, domain: str) -> tuple[
         list[DocInput], dict[str, list[ChunkInput]], dict[str, np.ndarray]]:
     """从本地索引读出文档/块/向量。
 
-    向量来源分两种：`chunks_vec` 虚表（sqlite-vec 建的索引）优先，
-    退到 `chunk_vectors.npy`（旧实现）。**按 vector_row 取行**而不是按顺序假设——
-    旧实现的矩阵行号就是 `vector_row`，这是它 `finalize()` 里写下的映射。
+    向量来源有二：`chunk_vectors.npy`（旧实现/`sqlite` 后端的侧车矩阵，**首选**）
+    与 `chunks_vec` 虚表（sqlite-vec 建的索引，**回退**）。两者的取舍见
+    `_read_sidecar` / `_read_vec0` 的 docstring。
     """
     settings = Settings(index_dir=index_dir, domain=domain)
     db = settings.sqlite_path
@@ -67,22 +136,17 @@ def _read_local(index_dir: str, domain: str) -> tuple[
                 title=r["title"], breadcrumb=r["breadcrumb"], source_url=r["source_url"],
                 body=r["body"], content_hash=r["content_hash"], n_chars=r["n_chars"]))
 
-        have_vec_table = con.execute(
-            "SELECT 1 FROM sqlite_master WHERE name = 'chunks_vec'").fetchone() is not None
-        vecs: dict[str, np.ndarray] = {}
-        if have_vec_table:
-            for r in con.execute("SELECT chunk_id, embedding FROM chunks_vec"):
-                vecs[r["chunk_id"]] = np.frombuffer(r["embedding"], dtype="<f4").astype(np.float32)
+        vecs = _read_sidecar(settings, rows, settings.embedding_dim)
+        source = f"侧车矩阵 {settings.vector_path}"
         if not vecs:
-            vec_path = settings.vector_path
-            if not vec_path.exists():
-                raise StoreError(f"本地索引没有向量：既无 chunks_vec，也无 {vec_path}")
-            mat = np.load(vec_path)
-            for r in rows:
-                vr = int(r["vector_row"])
-                if vr < 0 or vr >= mat.shape[0]:
-                    raise StoreError(f"块 {r['chunk_id']} 的 vector_row={vr} 越界 {mat.shape}")
-                vecs[r["chunk_id"]] = np.asarray(mat[vr], dtype=np.float32)
+            have_vec_table = con.execute(
+                "SELECT 1 FROM sqlite_master WHERE name = 'chunks_vec'").fetchone() is not None
+            if not have_vec_table:
+                raise StoreError(
+                    f"本地索引没有向量：既无 {settings.vector_path}，也无 chunks_vec 虚表")
+            vecs = _read_vec0(con, rows)
+            source = "chunks_vec 虚表（需载入 vec0 扩展）"
+        print(f"  向量来源：{source}，{len(vecs)} 条")
     finally:
         con.close()
     return docs, by_doc, vecs

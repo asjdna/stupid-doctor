@@ -56,6 +56,10 @@
 在 100ms 量级，会把检索延迟整体抬一个数量级。池的每条连接在 `configure` 回调里
 设置 `hnsw.ef_search` 并注册 pgvector 类型适配器。
 
+**但 schema 初始化不能走池**：`configure` 里的 `register_vector` 要求 `vector` 类型
+已存在，用池去 `CREATE EXTENSION` 会自己把自己锁死（实测见 `__init__` 的注释）。
+所以顺序固定为「直连建 schema → 再开池」。
+
 SQL 里的表名一律通过 `sql.Identifier` 注入（见 `_q`），值一律走 `%s` 参数绑定：
 不给自己留"这句是我手拼的、应该安全"的口头承诺。
 """
@@ -66,6 +70,7 @@ import time
 from typing import Any
 
 import numpy as np
+import psycopg
 from psycopg import sql
 
 from kubedocs.config import Settings
@@ -85,8 +90,17 @@ from kubedocs.store.textquery import build_tsquery_expr
 PG_SCHEMA_VERSION = 1
 
 # ts_rank 的权重数组顺序是 {D, C, B, A}，必须与建表时的 setweight 对应：
-# body_normalized=D=1.0，breadcrumb=B=1.5，title=A=3.0（C 未使用，占位 1.0）
-_TS_RANK_WEIGHTS = (1.0, 1.0, 1.5, 3.0)
+# body_normalized=D，breadcrumb=B，title=A（C 未使用，占位跟随 body）。
+#
+# ⚠️ `ts_rank` 的权重**必须落在 [0, 1] 内**，否则 Postgres 直接报
+# `InvalidParameterValue: weight out of range`（`tsrank.c` 里就是这么校验的）。
+# 所以这里**不能**照抄 FTS5 `bm25(chunks_fts, 1.0, 3.0, 1.5)` 那组倍数——原实现
+# 写了 1.0/1.5/3.0，导致 `keyword_search` 一调用就抛错（实测），全文路从未跑通。
+# 合法写法是给一组**比例相同、最大值为 1** 的权重：body 1/3、breadcrumb 1/2、title 1。
+# ts_rank 对权重是线性的（整体乘一个常数只等比缩放分数、不改次序），
+# 因此这与"body : breadcrumb : title = 1 : 1.5 : 3"的原意**同序**，只是分数尺度不同；
+# 而 `ORDER BY ts_rank(...) DESC` 只依赖次序，故意图得以保留。
+_TS_RANK_WEIGHTS = (1 / 3, 1 / 3, 1 / 2, 1.0)
 
 _IDENT_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
@@ -181,6 +195,16 @@ class PgVectorStore:
             from psycopg_pool import ConnectionPool
         except ImportError as e:  # pragma: no cover - 取决于环境
             raise StoreError("pgvector 后端需要 psycopg-pool：pip install 'psycopg[pool]'") from e
+        # ⚠️ 顺序是**有意义**的：schema 初始化必须在连接池建立**之前**跑完。
+        # 池的 `configure` 回调会对每条新连接执行 `register_vector`，而那个函数要求
+        # 库里**已经存在** `vector` 类型；池一旦 open，后台就会立刻开始建连接。
+        # 于是"建扩展"被排在"注册类型"之后，而注册类型又只能靠池的连接去执行——
+        # 死锁。实测（compose 刚起、`\dx` 只有 plpgsql 的全新库）100% 复现：
+        #   error connecting in 'kubedocs-pgvector': vector type not found in the database
+        #   psycopg_pool.PoolTimeout: couldn't get a connection after 10.00 sec
+        # 而 `CREATE EXTENSION` 那句**根本没被执行到**。所以 schema 这一步走直连，
+        # 池只服务查询/写入流量（这也是池该干的事：一次性建表不需要 10 条连接）。
+        self._ensure_schema()
         self._pool = ConnectionPool(
             conninfo=dsn, min_size=pool_min, max_size=pool_max, open=False,
             configure=self._configure_connection,
@@ -189,7 +213,6 @@ class PgVectorStore:
             name="kubedocs-pgvector",
         )
         self._pool.open(wait=False)
-        self._ensure_schema()
 
     def _q(self, template: str, **extra: object) -> sql.Composed:
         """把 `{chunks}` / `{documents}` / `{meta}` 换成 **schema 限定的标识符**。
@@ -205,15 +228,28 @@ class PgVectorStore:
 
         `register_vector` 让 numpy 数组可以直接作为向量参数传入/取出
         （否则只能自己拼 `'[1,2,3]'::vector` 文本，读回来还要手写解析）。
+
+        **结尾必须 `commit()`**：`SET` 与类型注册都会开一个隐式事务，而
+        `psycopg_pool` 要求 `configure` 回调把连接留在 **IDLE** 状态。不提交的话
+        每条新连接都会被判为
+        `connection left in status INTRANS by configure function ...: discarded`
+        并立刻丢弃——表现为池永远填不满、每次取连接都等到 `PoolTimeout`。
+        这是实测踩到的第三个坑（前两个见 `__init__` 与 `_init_meta`）。
         """
         conn.execute(f"SET hnsw.ef_search = {int(self.hnsw_ef_search)}")
         self._register_vector(conn)
+        conn.commit()
 
     # ------------------------------------------------------------------ schema
     def _ensure_schema(self) -> None:
-        """建扩展/schema/表/索引（幂等）。摄取与 finalize 都能自己把 schema 准备好。"""
+        """建扩展/schema/表/索引（幂等）。摄取与 finalize 都能自己把 schema 准备好。
+
+        **用直连而不是连接池**：见 `__init__` 里的顺序说明——池的 `configure`
+        会 `register_vector`，而那要求 `vector` 类型已存在；用池来建扩展就是死锁。
+        建表是一次性动作，本来也不需要池。
+        """
         try:
-            with self._pool.connection() as conn:
+            with psycopg.connect(self.dsn, connect_timeout=10) as conn:
                 try:
                     conn.execute("CREATE EXTENSION IF NOT EXISTS vector")
                 except Exception as e:  # noqa: BLE001
@@ -241,18 +277,24 @@ class PgVectorStore:
             ) from e
 
     def _init_meta(self, conn: Any) -> None:
-        """首次写入元信息；已存在则做与 SQLite 侧同样的闸门校验。"""
+        """首次写入元信息；已存在则做与 SQLite 侧同样的闸门校验。
+
+        `executemany` 在 `psycopg.Cursor` 上而**不在** `Connection` 上（实测
+        psycopg 3.3.6：`Connection.executemany` 不存在），所以这里显式开游标——
+        `Connection.execute` 只是"快捷开一个游标"的语法糖，没有对应的批量版本。
+        """
         rows = dict(conn.execute(self._q("SELECT key, value FROM {meta}")).fetchall())
         if not rows:
-            conn.executemany(
-                self._q("INSERT INTO {meta}(key, value) VALUES(%s, %s)"),
-                [("schema_version", str(PG_SCHEMA_VERSION)),
-                 ("embedding_model", self.embedding_model),
-                 ("embedding_dim", str(self.dim)),
-                 ("normalizer", self.normalizer.name),
-                 ("domain", self.domain),
-                 ("indexed_at", "")],
-            )
+            with conn.cursor() as cur:
+                cur.executemany(
+                    self._q("INSERT INTO {meta}(key, value) VALUES(%s, %s)"),
+                    [("schema_version", str(PG_SCHEMA_VERSION)),
+                     ("embedding_model", self.embedding_model),
+                     ("embedding_dim", str(self.dim)),
+                     ("normalizer", self.normalizer.name),
+                     ("domain", self.domain),
+                     ("indexed_at", "")],
+                )
             return
         got = int(rows.get("schema_version", "0"))
         if got != PG_SCHEMA_VERSION:
@@ -310,7 +352,20 @@ class PgVectorStore:
             self._q("SELECT DISTINCT ON (content_hash) content_hash, embedding "
                     "FROM {chunks} WHERE content_hash = ANY(%s) ORDER BY content_hash"),
             (list(hashes),))
-        return {str(h): np.asarray(v, dtype=np.float32) for h, v in rows}
+        return {str(h): self._as_vector(v) for h, v in rows}
+
+    @staticmethod
+    def _as_vector(value: object) -> Vector:
+        """把驱动读回的 pgvector 值统一成 float32 的 `ndarray`。
+
+        **不能直接 `np.asarray(value)`**：pgvector 0.5.0 的 `Vector` 不是 `ndarray`
+        子类（实测 MRO 只有 `object`），`np.asarray` 会把它当标量，报
+        `float() argument must be a string or a real number, not 'Vector'`。
+        它自带 `to_numpy()`；对已经是 ndarray 的情况（没注册适配器时）也兼容。
+        """
+        to_numpy = getattr(value, "to_numpy", None)
+        arr = to_numpy() if callable(to_numpy) else value
+        return np.asarray(arr, dtype=np.float32)
 
     def doc_texts(self, doc_ids: list[str]) -> dict[str, str]:
         """拼接指定文档的全部块正文（小写化，供标注集 `must_contain` 自检）。"""
@@ -450,14 +505,15 @@ class PgVectorStore:
                             "VALUES(%s, %s, %s, %s, %s, %s, %s)"),
                     (d.doc_id, d.rel_path, d.title, d.source_url, d.content_hash,
                      n_chunks, now))
-            conn.executemany(
-                self._q("INSERT INTO {chunks}(chunk_id, doc_id, ordinal, title, breadcrumb, "
-                        "source_url, body, body_normalized, content_hash, n_chars, embedding) "
-                        "VALUES(%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)"),
-                [(c.chunk_id, c.doc_id, c.ordinal, c.title, c.breadcrumb, c.source_url,
-                  c.body, self.normalizer.index_text(c.body), c.content_hash, c.n_chars,
-                  np.ascontiguousarray(np.asarray(vectors[c.chunk_id], dtype=np.float32)))
-                 for c in chunks])
+            with conn.cursor() as cur:
+                cur.executemany(
+                    self._q("INSERT INTO {chunks}(chunk_id, doc_id, ordinal, title, breadcrumb, "
+                            "source_url, body, body_normalized, content_hash, n_chars, embedding) "
+                            "VALUES(%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)"),
+                    [(c.chunk_id, c.doc_id, c.ordinal, c.title, c.breadcrumb, c.source_url,
+                      c.body, self.normalizer.index_text(c.body), c.content_hash, c.n_chars,
+                      np.ascontiguousarray(np.asarray(vectors[c.chunk_id], dtype=np.float32)))
+                     for c in chunks])
         self._dirty = True
 
     def delete_docs(self, rel_paths: set[str]) -> int:
