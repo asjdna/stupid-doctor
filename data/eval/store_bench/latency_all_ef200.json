@@ -1,0 +1,97 @@
+{
+  "top_k": 10,
+  "repeats": 3,
+  "provider": "bge",
+  "n_queries": 50,
+  "computed_at": "2026-10-09T23:48:57",
+  "results": [
+    {
+      "backend": "sqlite",
+      "n_chunks": 18861,
+      "open_ms": 827.5,
+      "n_queries": 50,
+      "n_samples": 150,
+      "dense_ms": {
+        "p50": 2.013,
+        "p95": 2.545,
+        "mean": 2.055,
+        "max": 3.207
+      },
+      "keyword_ms": {
+        "p50": 14.009,
+        "p95": 26.053,
+        "mean": 13.28,
+        "max": 37.557
+      },
+      "agreement": {}
+    },
+    {
+      "backend": "sqlite-vec",
+      "n_chunks": 18861,
+      "open_ms": 45.5,
+      "n_queries": 50,
+      "n_samples": 150,
+      "dense_ms": {
+        "p50": 22.364,
+        "p95": 26.54,
+        "mean": 22.882,
+        "max": 35.472
+      },
+      "keyword_ms": {
+        "p50": 13.3,
+        "p95": 25.915,
+        "mean": 13.421,
+        "max": 36.974
+      },
+      "agreement": {
+        "vs": "sqlite",
+        "dense": {
+          "n_queries": "150",
+          "identical_topk": "150/150",
+          "same_hit_set": "150/150",
+          "mean_set_overlap": "1.0000"
+        },
+        "keyword": {
+          "n_queries": "150",
+          "identical_topk": "150/150",
+          "same_hit_set": "150/150",
+          "mean_set_overlap": "1.0000"
+        }
+      }
+    },
+    {
+      "backend": "pgvector",
+      "n_chunks": 18861,
+      "open_ms": 671.2,
+      "n_queries": 50,
+      "n_samples": 150,
+      "dense_ms": {
+        "p50": 5.572,
+        "p95": 7.587,
+        "mean": 5.7,
+        "max": 9.019
+      },
+      "keyword_ms": {
+        "p50": 47.858,
+        "p95": 92.651,
+        "mean": 48.124,
+        "max": 107.418
+      },
+      "agreement": {
+        "vs": "sqlite",
+        "dense": {
+          "n_queries": "150",
+          "identical_topk": "129/150",
+          "same_hit_set": "129/150",
+          "mean_set_overlap": "0.9800"
+        },
+        "keyword": {
+          "n_queries": "150",
+          "identical_topk": "0/150",
+          "same_hit_set": "0/150",
+          "mean_set_overlap": "0.3140"
+        }
+      }
+    }
+  ]
+}

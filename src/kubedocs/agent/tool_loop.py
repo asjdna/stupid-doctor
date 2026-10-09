@@ -24,6 +24,17 @@
 "挂号"会真实占用号源且不可逆。循环在**执行之前**检查 `confirm` 回调；没有回调就拒绝执行，
 把"需要用户确认"回灌给模型，让它先去征求用户同意。这是安全属性：默认不执行不可逆操作，
 而不是默认执行、出了事再回滚。
+
+## 多轮上下文（`history`）怎么进来
+
+`history` 插在 **system 之后、本轮 `question` 之前**，顺序原样保留：
+
+    [system?] + history... + [本轮 user]
+
+只接受 `role` 为 `user` / `assistant` 的条目，其余**直接报错**（见 `_history_messages`）。
+这个参数是补上一次真实缺陷加上的：调用方（`clinic_react.turn`）把 history 拼进了一个
+本地 `messages` 列表，却**从来没把它交给循环**——而 `messages` 被 `extend` 过，
+所以连 F841 都抓不到。表现是"`/chat` 多轮对话没有上下文"，而日志里看不出任何异常。
 """
 from __future__ import annotations
 
@@ -46,6 +57,16 @@ TOOL_RESULT_LIMIT = 4000
 
 ConfirmFn = Callable[["ToolCall"], bool]
 """副作用工具的执行确认：返回 True 才真的执行。没有它，`side_effect` 工具一律拒绝。"""
+
+HISTORY_ROLES = ("user", "assistant")
+"""`history` 里**允许**出现的角色，只有这两种。
+
+- 不许 `system`：系统提示由调用方的 `system=` 参数独占。允许外部再塞一条，就会出现
+  两个会各自漂移的提示词源（`build_system_prompt` 的 docstring 里同一条理由）。
+- 不许 `tool`：`role="tool"` 的消息要靠 `tool_call_id` 与某条 `assistant.tool_calls`
+  配对。循环自己生成的那些在本轮内部才成立；外部塞进来的 `tool` 消息没有归属，
+  模型会读到一段不知道从哪来的结果——比不传更糟。
+"""
 
 
 @dataclass(frozen=True)
@@ -112,9 +133,41 @@ class _ParsedCall:
                 "function": {"name": self.name, "arguments": _json_text(self.arguments)}}
 
 
+def _history_messages(history: Sequence[dict[str, Any]] | None) -> list[dict[str, Any]]:
+    """把调用方给的多轮上下文**逐条校验**后转成消息（顺序原样保留）。
+
+    非法形状一律 `ValueError`，**不静默丢弃也不静默改写**：丢一条 history 在日志里
+    与"模型没记住"长得一模一样，是查不出来的那类 bug；把非法的 `role` 硬塞进请求
+    则会让供应商报一个与真实原因无关的错。两种静默都不可接受。
+
+    只保留 `role` / `content` 两个键（重建字典，而不是原样透传）：调用方在条目里多带的
+    `tool_calls` 之类字段，会与它自己并不存在的 `tool` 消息配不上对，构造一个"半个
+    工具调用"的上下文。
+    """
+    if not history:
+        return []
+    out: list[dict[str, Any]] = []
+    for index, item in enumerate(history):
+        if not isinstance(item, dict):
+            raise ValueError(f"history[{index}] 不是对象（{type(item).__name__}）："
+                             "需要 {'role': ..., 'content': ...}")
+        role = item.get("role")
+        if role not in HISTORY_ROLES:
+            raise ValueError(
+                f"history[{index}] 的 role={role!r} 不合法：只允许 {list(HISTORY_ROLES)}"
+                "（system 由 system= 参数独占；tool 消息必须与本轮的 assistant.tool_calls 配对）")
+        content = item.get("content")
+        if not isinstance(content, str):
+            raise ValueError(f"history[{index}] 的 content 必须是字符串，"
+                             f"收到 {type(content).__name__}")
+        out.append({"role": role, "content": content})
+    return out
+
+
 def run_tool_loop(question: str, *, tools: Sequence[ToolSpec], llm: ToolCaller,
                   system: str = "", max_steps: int = 5,
-                  confirm: ConfirmFn | None = None) -> AgentTurn:
+                  confirm: ConfirmFn | None = None,
+                  history: Sequence[dict[str, Any]] | None = None) -> AgentTurn:
     """跑一轮"模型选工具 -> 执行 -> 回灌 -> 再选"的循环，直到模型给出最终回答。
 
     `max_steps` 是 **LLM 轮次**的硬上限（不是工具执行次数）：一轮里模型可以要求调多个
@@ -122,6 +175,12 @@ def run_tool_loop(question: str, *, tools: Sequence[ToolSpec], llm: ToolCaller,
     烧预算。
 
     `confirm` 只对 `side_effect=True` 的工具生效；为 `None` 时这类工具一律拒绝执行。
+
+    `history` 是**此前几轮**的对话（`{"role", "content"}`，role 只允许 user/assistant），
+    会被插在 system 与本轮 `question` 之间。默认 `None` 的行为与没有这个参数时**逐字相同**：
+    只有 `system`（若有）与本轮 `question` 两条。这里**不做长度/字符截断**——上下文窗口
+    的预算属于调用方的职责（`api/app.py` 用 `[-8:]` 保留最近 4 轮），循环自己不猜一个
+    没验证过的截断策略。
     """
     if max_steps < 1:
         raise ValueError(f"max_steps 必须 >= 1（收到 {max_steps}）：0 步的循环没有意义")
@@ -139,6 +198,9 @@ def run_tool_loop(question: str, *, tools: Sequence[ToolSpec], llm: ToolCaller,
     messages: list[dict[str, Any]] = []
     if system:
         messages.append({"role": "system", "content": system})
+    # 顺序固定为 system -> history（原序）-> 本轮 user。history 里的角色原样保留，
+    # 不做合并/重排：调用方给什么顺序就是什么顺序，改了就等于替它猜意图。
+    messages.extend(_history_messages(history))
     messages.append({"role": "user", "content": question})
 
     unknown_name = ""

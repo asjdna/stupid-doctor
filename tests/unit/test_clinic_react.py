@@ -7,6 +7,7 @@
 """
 from __future__ import annotations
 
+import copy
 from typing import Any
 
 import pytest
@@ -127,3 +128,68 @@ class TestConfirmationPolicy:
         assert turn.tool_calls[0].error == ""
         assert (turn.tool_calls[0].result or {}).get("ticket_no")
         assert runtime.service.my_appointments("anon")
+
+
+class TestHistoryReachesTheModel:
+    """`/chat` 的多轮上下文必须真的到模型——这是补过的一次真实缺陷。
+
+    缺陷形态：`ClinicReactRuntime.turn` 收下 `history`，拼进一个本地 `messages` 列表，
+    然后**从来没把它交给 `run_tool_loop`**（循环当时也没有这个参数）。`messages` 被
+    `extend` 过，所以连 F841 都不报。结果是工具循环路径的多轮上下文全丢，而
+    `app.state.clinic_history` 那边看起来一切正常。
+
+    这组用例直接抓模型收到的 messages：**只断言"history 被传进 turn 了"是抓不到它的**
+    ——缺陷版同样收下了这个参数。
+    """
+
+    def _capture(self, runtime, monkeypatch, message: str,
+                 history: list[dict[str, Any]] | None = None) -> list[dict[str, Any]]:
+        seen: list[list[dict[str, Any]]] = []
+
+        class _Capturing:
+            """打桩 ToolCaller：记下 messages，直接作答（不调工具、不联网）。"""
+
+            def __init__(self, _settings: Any) -> None:
+                pass
+
+            def choose(self, messages: list[dict[str, Any]],
+                       tools: list[dict[str, Any]]) -> dict[str, Any]:
+                seen.append(copy.deepcopy(messages))
+                return {"content": "好的，请继续测血压。", "tool_calls": []}
+
+        monkeypatch.setattr(ClinicReactRuntime, "has_llm", lambda self: True)
+        # `turn()` 在函数体内 `from ... import LiteLLMToolCaller`，所以补丁打在被导入的模块上
+        monkeypatch.setattr("kubedocs.agent.llm_tool_caller.LiteLLMToolCaller", _Capturing)
+        turn = runtime.turn(message, history=history)
+
+        assert turn.text == "好的，请继续测血压。"
+        assert seen, "模型一次都没被调用"
+        return seen[0]
+
+    def test_history_entries_are_sent_to_the_model_in_order(self, runtime, monkeypatch):
+        history: list[dict[str, Any]] = [
+            {"role": "user", "content": "我最近总是头晕"},
+            {"role": "assistant", "content": "头晕多久了？"},
+        ]
+
+        messages = self._capture(runtime, monkeypatch, "昨天量了 150/95", history)
+
+        assert [m["role"] for m in messages] == ["system", "user", "assistant", "user"]
+        assert messages[1] == {"role": "user", "content": "我最近总是头晕"}
+        assert messages[2] == {"role": "assistant", "content": "头晕多久了？"}
+        assert messages[3] == {"role": "user", "content": "昨天量了 150/95"}
+        # 系统提示仍是 index 0 那一条（history 不会插到它前面，也不会顶掉它）
+        assert "预问诊助手" in messages[0]["content"]
+
+    def test_without_history_only_system_and_the_current_question(self, runtime, monkeypatch):
+        """回归：不带 history 时序列不变（system + 本轮 user）。"""
+        messages = self._capture(runtime, monkeypatch, "我咳嗽")
+
+        assert [m["role"] for m in messages] == ["system", "user"]
+        assert messages[1] == {"role": "user", "content": "我咳嗽"}
+
+    def test_invalid_history_fails_loudly_instead_of_being_dropped(self, runtime, monkeypatch):
+        """非法 role 一路报错到调用方，而不是被悄悄丢掉（丢掉的症状与"模型没记住"同形）。"""
+        with pytest.raises(ValueError, match=r"history\[0\]"):
+            self._capture(runtime, monkeypatch, "我咳嗽",
+                          [{"role": "system", "content": "顶掉系统提示"}])

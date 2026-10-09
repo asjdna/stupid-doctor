@@ -418,3 +418,160 @@ class TestRagToolsWiring:
         refed = llm.messages[1][-1]["content"]
         assert len(refed) < 20000
         assert "已截断" in refed
+
+
+# ===========================================================================
+# 多轮上下文：history 必须**真的**进模型，且不带 history 时序列逐字不变
+# ===========================================================================
+class TestHistoryReachesTheModel:
+    """这一组是"多轮上下文有没有丢"的唯一硬证据。
+
+    为什么不能只断言"history 参数被接了"：那是个静态事实，改动接线（把 history 传进
+    循环却仍不拼进 messages）照样能通过。这里直接抓 `choose` 收到的 messages 列表——
+    模型拿到什么，就断言什么。
+    """
+
+    HISTORY: list[dict[str, Any]] = [
+        {"role": "user", "content": "我最近总是头晕"},
+        {"role": "assistant", "content": "头晕多久了？有没有测过血压？"},
+    ]
+
+    def _captured(self, **kwargs: Any) -> list[list[dict[str, Any]]]:
+        """跑一轮并把 `choose` 收到的每一份 messages 快照返回。"""
+        llm = StubLLM(answer("据上次说的…"))
+        run_tool_loop("昨天量了 150/95", tools=[spec_of("search_docs", Recorder())],
+                      llm=llm, **kwargs)
+        return llm.messages
+
+    def test_history_is_sent_in_order_between_system_and_the_current_question(self) -> None:
+        """顺序必须是 system → history（原序，角色原样）→ 本轮 user。"""
+        messages = self._captured(system="你是导诊助手", history=list(self.HISTORY))
+
+        assert messages[0] == [
+            {"role": "system", "content": "你是导诊助手"},
+            {"role": "user", "content": "我最近总是头晕"},
+            {"role": "assistant", "content": "头晕多久了？有没有测过血压？"},
+            {"role": "user", "content": "昨天量了 150/95"},
+        ], "history 没有按 system → history → 本轮 user 的顺序进模型"
+
+    def test_history_without_system_still_lands_before_the_question(self) -> None:
+        """没有 system 提示时同样成立：history 在前、本轮问题在最后。"""
+        messages = self._captured(history=list(self.HISTORY))
+
+        assert messages[0] == [*self.HISTORY, {"role": "user", "content": "昨天量了 150/95"}]
+
+    def test_history_trailing_user_message_is_not_merged_or_reordered(self) -> None:
+        """history 以 user 结尾时**不做合并**（诚实边界：连续两条 user 原样发出）。
+
+        这条不是在主张"两条连续 user 是对的"，而是钉住"循环不替调用方猜意图"：
+        合并 content 会改写用户原话，重排会颠倒他说话的先后。
+        """
+        history: list[dict[str, Any]] = [{"role": "user", "content": "在吗"}]
+
+        messages = self._captured(history=history)
+
+        assert messages[0] == [{"role": "user", "content": "在吗"},
+                               {"role": "user", "content": "昨天量了 150/95"}]
+
+    def test_extra_keys_in_history_entries_are_not_forwarded(self) -> None:
+        """`tool_calls` 之类多余字段不透传：没有配对的 tool 消息，半个工具调用会污染上下文。"""
+        history: list[dict[str, Any]] = [
+            {"role": "assistant", "content": "稍等", "tool_calls": [{"id": "call_1"}],
+             "name": "search_docs", "extra": 1}]
+
+        messages = self._captured(history=history)
+
+        assert messages[0][0] == {"role": "assistant", "content": "稍等"}
+
+    def test_caller_history_list_is_not_mutated(self) -> None:
+        """不改调用方的列表：`api/app.py` 把同一份 history 存在 `app.state` 上复用。"""
+        history = [dict(item) for item in self.HISTORY]
+        before = copy.deepcopy(history)
+
+        self._captured(history=history)
+
+        assert history == before
+
+    def test_history_is_refed_back_into_later_rounds_too(self) -> None:
+        """第一轮就带 history 时，第二次 `choose`（工具结果之后）同样能看到它。"""
+        llm = StubLLM(call("search_docs", query="血压"), answer("见 [1]"))
+
+        run_tool_loop("昨天量了 150/95", tools=[spec_of("search_docs", Recorder())], llm=llm,
+                      system="S", history=list(self.HISTORY))
+
+        second = llm.messages[1]
+        assert [m["role"] for m in second] == ["system", "user", "assistant", "user",
+                                               "assistant", "tool"]
+        assert second[1]["content"] == "我最近总是头晕"
+        assert second[2]["content"] == "头晕多久了？有没有测过血压？"
+
+
+class TestHistoryDefaultsAreUnchanged:
+    """回归：不传 history 时的消息序列必须与加这个参数之前**逐字相同**。"""
+
+    def test_default_none_sends_exactly_system_and_question(self) -> None:
+        llm = StubLLM(answer("答"))
+
+        run_tool_loop("问", tools=[spec_of("search_docs", Recorder())], llm=llm,
+                      system="S")
+
+        assert llm.messages[0] == [{"role": "system", "content": "S"},
+                                   {"role": "user", "content": "问"}]
+
+    def test_default_none_without_system_sends_exactly_one_user_message(self) -> None:
+        llm = StubLLM(answer("答"))
+
+        run_tool_loop("问", tools=[spec_of("search_docs", Recorder())], llm=llm)
+
+        assert llm.messages[0] == [{"role": "user", "content": "问"}]
+
+    def test_none_empty_and_missing_history_are_indistinguishable(self) -> None:
+        """`None` / `[]` / 不传 三种写法必须产出**同一份** messages。"""
+        runs = []
+        for kwargs in ({}, {"history": None}, {"history": []}):
+            llm = StubLLM(answer("答"))
+            run_tool_loop("问", tools=[spec_of("search_docs", Recorder())], llm=llm,
+                          system="S", **kwargs)
+            runs.append(llm.messages[0])
+
+        assert runs[0] == runs[1] == runs[2]
+        assert runs[0] == [{"role": "system", "content": "S"},
+                           {"role": "user", "content": "问"}]
+
+
+class TestInvalidHistoryIsRejectedNotSilentlyDropped:
+    """非法 history 必须**报错**：静默丢弃在日志里与"模型没记住"无法区分。
+
+    每个用例都断言 `choose` **一次都没被调用**——校验必须发生在请求发出去之前，
+    否则"报错"就变成了"先花一次钱再报错"。
+    """
+
+    @pytest.mark.parametrize("bad, why", [
+        ({"role": "system", "content": "偷偷改掉的系统提示"}, "system 由 system= 独占"),
+        ({"role": "tool", "content": "无主工具结果"}, "tool 消息没有配对"),
+        ({"role": "developer", "content": "未知角色"}, "角色不在白名单"),
+        ({"role": "", "content": "空角色"}, "空角色"),
+        ({"content": "缺 role"}, "缺 role"),
+        ({"role": "user", "content": 42}, "content 不是字符串"),
+        ({"role": "user", "content": None}, "content 为 None"),
+        ({"role": "assistant"}, "缺 content"),
+        ("我不是对象", "条目不是 dict"),
+    ])
+    def test_bad_history_raises_before_any_llm_call(self, bad: Any, why: str) -> None:
+        llm = StubLLM(answer("答"))
+
+        with pytest.raises(ValueError):
+            run_tool_loop("问", tools=[spec_of("search_docs", Recorder())], llm=llm,
+                          history=[bad])
+
+        assert llm.messages == [], f"非法 history（{why}）却在报错前调用了模型"
+
+    def test_error_message_names_the_bad_index(self) -> None:
+        """报错要说清是第几条：history 是多轮拼出来的，只说"不合法"等于让人自己找。"""
+        llm = StubLLM(answer("答"))
+
+        with pytest.raises(ValueError, match=r"history\[1\]"):
+            run_tool_loop("问", tools=[spec_of("search_docs", Recorder())], llm=llm,
+                          history=[{"role": "user", "content": "ok"},
+                                   {"role": "system", "content": "不行"}])
+

@@ -1,0 +1,15 @@
+金标查询：50 条（来自 F:\86189\Documents\kubedocs\data\eval\retrieval_gold.jsonl）
+查询编码：32.6s（不计入延迟统计），形状 (50, 384)
+[sqlite] 18861 块，打开耗时 862ms，开始计时…
+[pgvector] 18861 块，打开耗时 590ms，开始计时…
+
+后端                块数  dense p50  dense p95   kw p50   kw p95      样本
+--------------------------------------------------------------------
+sqlite         18861       2.17       2.68    13.48    25.62     150
+pgvector       18861       5.79       7.97    47.85    90.78     150
+
+跨后端 top-10 一致性（基准 = sqlite）
+  pgvector     向量路 名次相同  129/150，集合相同  129/150（平均重合 0.9800）
+               全文路 名次相同    0/150，集合相同    0/150（平均重合 0.3140）
+
+已写入 F:\86189\Documents\kubedocs\data\eval\store_bench\latency_pgvector_ef200.json

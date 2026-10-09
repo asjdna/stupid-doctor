@@ -31,8 +31,20 @@ HF := --hf-endpoint https://hf-mirror.com
 .PHONY: help install check lint type test lock corpus cstats ingest ingest-hash search stats \
         gold eval eval-baseline up down logs clean
 
+# help 也用 $(PY) -c 实现，与 clean 同一手法、同一理由：
+#   · 原实现是 `grep -E ... | awk ...`，而本机 PATH 上**没有** grep / awk：
+#     实测 `mingw32-make help` 打印 `'grep' is not recognized ...`、退出码 2；
+#   · venv 解释器是本仓库的运行前提，一定在；正则与格式化用 Python 表达也更清楚。
+# 帮助约定不变：`target:  ## 说明` 的“说明”就是被打印的那一列（`$(MAKEFILE_LIST)`
+# 里仍然只有遵守该约定的行会出现在帮助里）。
+# 关于那串转义：`$$` 是 make 的字面 `$`（正则的行尾锚点）；`\033` 由 Python 解释成
+# 终端转义符，保持与原 awk 版本相同的青色高亮。`#` 在 recipe 行里会原样交给 shell
+# （make 只在非 recipe 行把 `#` 当注释），所以正则里的 `##` 不需要特殊处理。
+# `.split()` 不是多余的：本机实测 mingw32-make 3.82.90 的 `$(MAKEFILE_LIST)` 展开后
+# **带一个前导空格**（直接 `open()` 会 FileNotFoundError: ' Makefile'），
+# 而且 include 了别的 makefile 时它是空格分隔的多个文件名。
 help:
-	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | awk 'BEGIN{FS=":.*?## "}{printf "  \033[36m%-16s\033[0m %s\n", $$1, $$2}'
+	@$(PY) -c "import re;pat=re.compile(r'^([A-Za-z_-]+):.*?## (.*)$$');[print('  \033[36m'+m.group(1).ljust(16)+'\033[0m '+m.group(2)) for f in '$(MAKEFILE_LIST)'.split() for m in map(pat.match,open(f).read().splitlines()) if m]"
 
 install:  ## 建 venv 并安装（含 dev 依赖）
 	python -m venv --system-site-packages .venv

@@ -25,7 +25,7 @@ python -m kubedocs.cli --hf-offline eval --gate   # 评测并卡闸门
 |---|---|
 | 语料获取（1720 篇官方 markdown / 16.2 MB） | ✅ 已验证 |
 | 切块器 + 真实语料体检 | ✅ 已验证（见「实测数字」） |
-| 本地索引：SQLite + FTS5 + numpy 向量 | ✅ 已验证（含 FTS 一致性自检） |
+| 本地索引：SQLite + FTS5 + `sqlite-vec`（默认后端） | ✅ 已验证（含 FTS 一致性自检） |
 | 增量/幂等摄取（文档级 + 块级跳过） | ✅ 已验证（幂等复跑 0 变更 / 1.6 秒） |
 | 混合检索 + RRF 融合 + 单路消融 | ✅ 已验证（hybrid hit@10 = **0.84**） |
 | 带引用回答 + 拒答 + 预算上限 | ✅ 已验证（含真实 LLM 端到端） |
@@ -162,9 +162,9 @@ flowchart TB
   （`store/pgvector_store.py`，Postgres）都在，后端名以 `store/__init__.py` 的
   `BACKENDS` 与 `config.py` 的 `store` 字段为单一出口（默认值 `"sqlite-vec"`）。
   图里只画一个存储框，是为了突出"换实现只改配置"这条唯一耦合点，**不是"只有一个实现"**。
-- **两条 LLM 路径共用的是 `litellm` 这个库，不是同一个客户端类**：`generate.py` 用
-  `LiteLLMClient`（`generate.py:272`）走 `litellm.completion`；`agent/llm_tool_caller.py`
-  则是自成一体的 `LiteLLMToolCaller`（`llm_tool_caller.py:25`），自己 `import litellm`
+- **两条 LLM 路径共用的是 `litellm` 这个库，不是同一个客户端类**：`generate.py` 里的
+  `LiteLLMClient` 走 `litellm.completion`；`agent/llm_tool_caller.py`
+  则是自成一体的 `LiteLLMToolCaller`，自己 `import litellm`
   直接调用，**全文不 import `LiteLLMClient`**。所以图里两条边分别指向 litellm 库。
   但**日预算闸门只挂在 `generate.py` 这条边上**——`/chat` 的工具循环不走它。
   这条差异是有意的（图里用虚线画出来），原因见 `SECURITY.md` 的 S-2。
@@ -183,7 +183,7 @@ flowchart TB
    ┌──────────────────────────────┐                  ┌───────────────────────┐
    │ Store 协议（唯一耦合点）     │  ← 换实现只需改配置 →  │ Postgres + pgvector │
    │ · SQLite FTS5（bm25 排序）   │                  │ · 同一 Store 协议     │
-   │ · numpy 向量矩阵（余弦）     │                  └───────────────────────┘
+   │ · sqlite-vec 向量索引（余弦）│                  └───────────────────────┘
    └──────────────────────────────┘
         │
         ▼
@@ -421,7 +421,14 @@ python -m kubedocs.cli --provider hashing ingest --limit-files 100
 - [x] FastAPI `/healthz` `/domains` `/tools` `/search` `/ask`（JSON）`/chat`（SSE）
       + 前端演示页 `data/web/index.html`（里程碑 7）
 - [ ] OTel/Prometheus 指标导出与 `/metrics`：里程碑 6/7 里**唯一还没落地**的观测部分
-- [ ] pgvector 生产实现（同一 `Store` 协议）+ 对照评测（里程碑 8）
+- [x] pgvector 生产实现（`store/pgvector_store.py`，同一 `Store` 协议）（里程碑 8 的实现部分）
+- [ ] pgvector 的**检索质量对齐**：对照评测已实测并落盘
+      （`data/eval/store_bench/eval_pgvector.json`、`latency_pgvector_ef{100,200,400}.json`、
+      `eval_pgvector_attrib.json`、`eval_pgvector_gate_raw.txt`），结论是
+      **hybrid hit@10 0.84 → 0.74、recall 0.76 → 0.68**，根因是 Postgres 核心没有 BM25
+      （与 HNSW 无关，四组对照见 [`docs/adr/0004-向量存储后端.md`](docs/adr/0004-向量存储后端.md) 第五节），
+      所以 `cli eval --store pgvector --gate` 目前**不通过**（退出码 2）。
+      待决策项（装 ParadeDB 引真 BM25 / 跨引擎混用 / 另立基线）见该 ADR 第九节
 - [ ] 精排（cross-encoder）用真实模型实测收益（里程碑 9）
 - [ ] 嵌入量化/ONNX 提速 + k6 压测 + P95/成本 SLO（里程碑 10）
 - [ ] Docker 全栈实测（受限于本机 Docker Hub 不可达）

@@ -43,10 +43,14 @@
   32 以上收益递减而索引体积/建图时间线性上升。**m 只能重建索引才能改。**
 - `ef_construction = 64`：建图时的候选队列。默认值。与 m 一起决定图的质量；
   本规模下建索引只需数秒到数十秒，调到 200 的收益要在更大规模上才体现。
-- `ef_search = 100`（查询期 `hnsw.ef_search`）：默认 40。**加大的理由是精确召回**：
-  1.9 万块时用 100 的代价仍然很小（实测见 ADR-0004），而召回更接近精确检索——
-  在"换存储后端不该让检索指标退化"这条纪律下，这点延迟是划算的。
+- `ef_search = 200`（查询期 `hnsw.ef_search`）：pgvector 默认 40，本仓库原先取 100，
+  2026-10-09 起提到 200。**加大的理由是精确召回**，依据是本机实测（同轮、同一份
+  18861 块索引、50 条金标 ×3 轮）：向量路 top-10 与 numpy 精确检索逐位相同的查询数
+  100 → 200 时从 36/50 涨到 43/50（平均集合重合 0.9420 → 0.9800），而 dense p50 只从
+  4.29ms 涨到 5.79ms；再调到 400 只多 1 条（44/50、0.9840）却再贵 1.45ms，**收益递减**。
   它**不需要重建索引**，可随时按需调（`Settings.pg_hnsw_ef_search`）。
+  ⚠️ 注意它治不了混合检索的质量落差——那条落差来自全文路，与 ef_search 无关
+  （实测：ef=100/200/400 的 hybrid hit/recall 完全一样），见 ADR-0004 第九节。
 - 距离用 `vector_cosine_ops` + `<=>`：与另外两个实现的余弦语义一致。
   向量已归一化时，余弦序与内积序严格相同。
 
@@ -173,7 +177,11 @@ class PgVectorStore:
                  normalizer: Normalizer | None = None, domain: str = "",
                  pool_min: int = 1, pool_max: int = 10,
                  hnsw_m: int = 16, hnsw_ef_construction: int = 64,
-                 hnsw_ef_search: int = 100) -> None:
+                 hnsw_ef_search: int = 200) -> None:
+        """`hnsw_ef_search` 的默认值必须与 `Settings.pg_hnsw_ef_search` **保持一致**：
+        两处默认值不同就会出现"直接构造时是 100、走配置时是 200"的双真相，
+        而这类差异只会表现为"同一份数据换个入口召回就不一样"。
+        """
         if not _IDENT_RE.match(schema):
             raise StoreError(f"非法的 schema 名 {schema!r}：只允许 [A-Za-z_][A-Za-z0-9_]*")
         self.dsn = dsn

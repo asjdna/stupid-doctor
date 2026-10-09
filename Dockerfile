@@ -62,7 +62,8 @@ USER app
 EXPOSE 8080
 
 # 生产用 gunicorn+uvicorn worker 更稳；这里保持单进程以简化本地复现
-# 目标必须是 `kubedocs.api.app:app`（模块里 `app = create_app()`，api/app.py:643）：
+# 目标必须是 `kubedocs.api.app:app`（模块末尾的 `app = create_app()`；这里刻意不写行号——
+# 已经在文件里改过两次别的东西，写死的行号每次都跟着烂）：
 # `kubedocs.api` 这个包**没有** `app` 属性——它的 `__init__.py` 用 PEP 562 的
 # 模块级 `__getattr__` 只惰性暴露 `create_app`，别的名字一律抛 AttributeError
 # （这样 `import kubedocs.api` 不会顺带打开一份索引库）。

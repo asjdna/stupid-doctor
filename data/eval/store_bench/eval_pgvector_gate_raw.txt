@@ -1,0 +1,35 @@
+标注集：F:\86189\Documents\kubedocs\data\eval\retrieval_gold.jsonl
+  条数 50，自检通过（引用的文档与关键词均已在索引中）
+  类型分布：{'identifier': 15, 'paraphrase': 15, 'concept': 20}
+索引：18861 块 / 1720 文档，BAAI/bge-small-en-v1.5（384 维）
+预热完成：冷启动 31.3s（不计入下面的延迟统计）
+跑 hybrid …
+
+模式             hit@10   recall      mrr     ndcg   p50ms   p95ms
+--------------------------------------------------------------------
+hybrid         0.7400   0.6800   0.5157   0.5369   118.9   169.2
+
+按问题类型（模式=hybrid）：
+类型              条数      hit      mrr     ndcg
+identifier      15   1.0000   0.6167   0.7028
+paraphrase      15   0.4667   0.2911   0.2911
+concept         20   0.7500   0.6083   0.5969
+
+引用完整性：通过（每条结果都有可点击且可重算的官方 URL）
+
+未命中 13 条：
+  ✗ g016[paraphrase] how do I stop a container from using more memory than it should
+  ✗ g021[paraphrase] give every replica its own stable name and its own disk
+  ✗ g022[paraphrase] let people on the internet reach my app using a hostname
+  ✗ g023[paraphrase] block traffic between pods running in two different namespaces
+  ✗ g026[paraphrase] run a setup step before the main container starts
+  ✗ g028[paraphrase] make sure one copy of my agent runs on every node
+  ✗ g029[paraphrase] protect my app while I take nodes down for maintenance
+  ✗ g030[paraphrase] add or remove pods automatically as traffic changes
+  ✗ g033[concept] inject configuration into a container without rebuilding the image
+  ✗ g035[concept] keep pods away from a node that is being repaired
+  ✗ g041[concept] how do I attach my own key value metadata to objects
+  ✗ g049[concept] share a single persistent disk between several pods
+  ✗ hit@10 从 0.8400 掉到 0.7400（容差 0.02）
+
+闸门：不通过

@@ -1,0 +1,77 @@
+# 构建上下文过滤清单。
+#
+# 动机（本机实测）：不加过滤时上下文里装着 .venv 297.7MB、.mypy_cache 189.0MB、
+# data 138.5MB —— 用一个 `COPY . /ctx` 探针真量：容器内 `du -sb` **675,714,814 字节**
+# （`du -sh` 692M），BuildKit 传输行报到 **661.79MB / 22.2s**；加上本文件后同一个探针是
+# **1,621,316 字节（`du -sh` 2.0M）**，传输 14.88kB 起步、按需补齐合计约 2MB。
+#
+# 纪律：**Dockerfile 真正 COPY 的东西一个都不排**。逐行读 Dockerfile 核对过，
+# 构建与运行真正需要的是这五个：
+#     pyproject.toml   （builder 阶段 `pip install .` 要读）
+#     README.md        （同上：pyproject 的 readme 指向它）
+#     LICENSE          （PEP 639 的 license-files = ["LICENSE"]）
+#     src/             （包本体）
+#     scripts/         （runtime 阶段 COPY 进去，供 `python scripts/xxx.py` 手工调用）
+# 改完用"照抄真实 COPY 清单"的探针验过：三个文件都在且非空，src 1.4M / scripts 188K。
+# 其余一律按“构建不需要”排除，每条给出具体理由。
+
+# --------------------------------------------------------------- 密钥与虚拟环境
+# .env 里有**真实 LLM key**。当前 Dockerfile 没有 COPY 它，而 BuildKit 默认**惰性**传输
+# 上下文（只发 Dockerfile 真正引用到的文件），所以按现在的 Dockerfile 它发不出去。
+# 但只要换成经典构建器、或哪天有人加一句 `COPY . .`，整份上下文（含 .env）就会被送到
+# 守护进程、甚至烤进层里。这条写的不是"现在有洞"，而是**不给这个洞出现的机会**。
+# compose 的 `env_file: .env` 是**宿主侧**读取，与构建上下文无关，排掉不影响 compose up。
+.env
+.env.*
+!.env.example
+.venv/
+venv/
+
+# --------------------------------------------------------------- 版本控制与缓存
+# .mypy_cache 在本机实测 189.0MB——比 .git 大两个数量级，且完全是本地产物。
+.git/
+.gitignore
+.gitattributes
+.github/
+__pycache__/
+*.py[cod]
+.mypy_cache/
+.pytest_cache/
+.ruff_cache/
+.cache/
+htmlcov/
+.coverage
+.coverage.*
+dist/
+build/
+*.egg-info/
+
+# --------------------------------------------------------------- 数据
+# 索引 115.0MB + 原始语料 15.4MB + clinic 卡片（上游派生、仅学术用途）7.8MB：
+# 都是能重建的本机产物，既不该进镜像也不该进上下文。
+# `data/eval`（0.2MB：金标集 + 冻结基线）与 `data/web`（前端演示页）**故意保留**——
+# 它们很小，而且是“把评测资产与演示页带进构建产物”唯一可能用到的东西，没有理由排掉；
+# 注意 compose 在运行期另把 `./data:/app/data` 挂进容器，与构建上下文是两回事。
+data/raw/
+data/index/
+data/clinic/
+data/derived/
+
+# --------------------------------------------------------------- 本机运行产物
+*.db
+*.db-wal
+*.db-shm
+*.sqlite3
+*.npy
+*.log
+logs/
+
+# --------------------------------------------------------------- 文档与开发用文件
+# 这四类都不被任何 COPY 指令引用，也不参与运行；`docs/` 与 ADR 只对人有用。
+docs/
+tests/
+Makefile
+docker-compose.yml
+CHANGELOG.md
+CONTRIBUTING.md
+SECURITY.md

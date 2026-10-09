@@ -1,0 +1,22 @@
+金标 50 条；top_k=10
+sqlite-vec：18861 块 / 1720 文档
+标注集自检（对 sqlite-vec）：通过
+pgvector：18861 块 / 1720 文档；verify_hnsw=ok，verify_fts=ok
+[sqlite-vec（基线口径）] hybrid hit=0.8400 recall=0.7600 mrr=0.5205 ndcg=0.5464 | bm25 hit=0.7000 | dense hit=0.7800
+[pgvector ef=100（HNSW）] hybrid hit=0.7400 recall=0.6800 mrr=0.5157 ndcg=0.5369 | bm25 hit=0.5400 | dense hit=0.7800
+[pgvector ef=200（HNSW）] hybrid hit=0.7400 recall=0.6800 mrr=0.5157 ndcg=0.5369 | bm25 hit=0.5400 | dense hit=0.7800
+[pgvector ef=400（HNSW）] hybrid hit=0.7400 recall=0.6800 mrr=0.5157 ndcg=0.5369 | bm25 hit=0.5400 | dense hit=0.7800
+[pgvector 精确向量 + ts_rank 全文] hybrid hit=0.7400 recall=0.6800 mrr=0.5140 ndcg=0.5355 | bm25 hit=0.5400 | dense hit=0.7800
+[FTS5 全文 + pgvector 精确向量] hybrid hit=0.8400 recall=0.7600 mrr=0.5205 ndcg=0.5464 | bm25 hit=0.7000 | dense hit=0.7800
+[FTS5 全文 + pgvector HNSW(ef=100)] hybrid hit=0.8400 recall=0.7600 mrr=0.5199 ndcg=0.5458 | bm25 hit=0.7000 | dense hit=0.7800
+全文路 top-10：名次相同 0/50，集合相同 0/50，平均重合 0.3140
+向量路 top-10 ef=100（对 numpy 精确）：名次相同 36/50，集合相同 36/50，平均重合 0.9420
+向量路 top-10 ef=200（对 numpy 精确）：名次相同 43/50，集合相同 43/50，平均重合 0.9800
+向量路 top-10 ef=400（对 numpy 精确）：名次相同 44/50，集合相同 44/50，平均重合 0.9840
+向量路 top-10 ef=100（对 pg 自己精确）：名次相同 36/50，平均重合 0.9420
+向量路 top-10 ef=200（对 pg 自己精确）：名次相同 43/50，平均重合 0.9800
+向量路 top-10 ef=400（对 pg 自己精确）：名次相同 44/50，平均重合 0.9840
+pgvector 向量路延迟：HNSW(ef=100) p50 4.28ms，精确 p50 51.79ms，加速 12.1×
+Postgres 全文真实计划：Seq Scan 37 条（p50 54.5ms），GIN/Bitmap 13 条（p50 1.0ms），其他 0
+
+已写入 F:\86189\Documents\kubedocs\data\eval\store_bench\eval_pgvector_attrib.json

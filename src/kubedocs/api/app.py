@@ -350,6 +350,11 @@ class _ChatOutcome:
         工具循环是无状态的（不像图有 checkpointer），所以多轮上下文由本文件
         用 `app.state.clinic_history` 按 thread_id 维护——这是与图路径的**真实差异**，
         不是实现细节：图路径重启进程后能续聊，工具循环路径不能。
+
+        这份 history 是**真的会进模型**的（`_converse_with_tools` 交给
+        `ClinicReactRuntime.turn`，再由它传给 `run_tool_loop(history=...)`）。
+        在补上那条接线之前，这里维护的 history 被 `turn()` 收下之后就丢掉了
+        ——维护动作看起来一切正常，模型却永远只看到当轮。
         """
         self = cls.__new__(cls)
         self.state = {}                       # 工具循环无图状态，留空字典占位

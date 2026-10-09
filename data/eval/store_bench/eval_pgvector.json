@@ -1,0 +1,121 @@
+{
+  "gold_sha256": "3eee2503682df8ca",
+  "embedding_model": "BAAI/bge-small-en-v1.5",
+  "embedding_provider": "bge",
+  "n_chunks": 18861,
+  "n_docs": 1720,
+  "top_k": 10,
+  "n_gold": 50,
+  "metrics": {
+    "hit": 0.74,
+    "mrr": 0.5157,
+    "ndcg": 0.5369,
+    "recall": 0.68
+  },
+  "ablation": {
+    "hybrid": {
+      "overall": {
+        "hit": 0.74,
+        "mrr": 0.5157,
+        "ndcg": 0.5369,
+        "recall": 0.68
+      },
+      "by_kind": {
+        "identifier": {
+          "hit": 1.0,
+          "mrr": 0.6167,
+          "ndcg": 0.7028,
+          "recall": 0.9667
+        },
+        "paraphrase": {
+          "hit": 0.4667,
+          "mrr": 0.2911,
+          "ndcg": 0.2911,
+          "recall": 0.4
+        },
+        "concept": {
+          "hit": 0.75,
+          "mrr": 0.6083,
+          "ndcg": 0.5969,
+          "recall": 0.675
+        }
+      },
+      "latency_ms": {
+        "p50": 120.8,
+        "p95": 169.4
+      },
+      "n_misses": 13,
+      "n_citation_violations": 0
+    },
+    "bm25-only": {
+      "overall": {
+        "hit": 0.54,
+        "mrr": 0.3607,
+        "ndcg": 0.387,
+        "recall": 0.51
+      },
+      "by_kind": {
+        "identifier": {
+          "hit": 0.8,
+          "mrr": 0.4889,
+          "ndcg": 0.5677,
+          "recall": 0.8
+        },
+        "paraphrase": {
+          "hit": 0.2667,
+          "mrr": 0.1778,
+          "ndcg": 0.1613,
+          "recall": 0.2
+        },
+        "concept": {
+          "hit": 0.55,
+          "mrr": 0.4017,
+          "ndcg": 0.4206,
+          "recall": 0.525
+        }
+      },
+      "latency_ms": {
+        "p50": 53.2,
+        "p95": 92.1
+      },
+      "n_misses": 23,
+      "n_citation_violations": 0
+    },
+    "dense-only": {
+      "overall": {
+        "hit": 0.78,
+        "mrr": 0.4257,
+        "ndcg": 0.4762,
+        "recall": 0.71
+      },
+      "by_kind": {
+        "identifier": {
+          "hit": 0.9333,
+          "mrr": 0.5944,
+          "ndcg": 0.684,
+          "recall": 0.9333
+        },
+        "paraphrase": {
+          "hit": 0.4667,
+          "mrr": 0.2689,
+          "ndcg": 0.2713,
+          "recall": 0.3667
+        },
+        "concept": {
+          "hit": 0.9,
+          "mrr": 0.4169,
+          "ndcg": 0.4741,
+          "recall": 0.8
+        }
+      },
+      "latency_ms": {
+        "p50": 57.4,
+        "p95": 62.3
+      },
+      "n_misses": 11,
+      "n_citation_violations": 0
+    }
+  },
+  "n_citation_violations": 0,
+  "corpus_sha": "5261cdb659934b52"
+}

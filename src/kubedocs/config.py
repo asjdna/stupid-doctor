@@ -98,7 +98,15 @@ class Settings(BaseSettings):
     pg_hnsw_m: int = Field(default=16, ge=2, le=100)
     pg_hnsw_ef_construction: int = Field(default=64, ge=4, le=1000)
     # 查询期候选队列：越大召回越高、越慢。**只影响查询，不需要重建索引**。
-    pg_hnsw_ef_search: int = Field(default=100, ge=1, le=1000)
+    #
+    # 默认 200 是被本机实测逼出来的（2026-10-09，18861 块真实索引、50 条金标 ×3 轮，
+    # 同轮对照、原始数据在 `data/eval/store_bench/latency_pgvector_ef*.json`）：
+    #   ef=100 → top-10 与 numpy 精确检索**逐位相同** 36/50，平均集合重合 0.9420，dense p50 4.29ms
+    #   ef=200 → 43/50，0.9800，p50 5.79ms（多召回 7 条查询的代价是 +1.5ms）
+    #   ef=400 → 44/50，0.9840，p50 7.24ms（再多 1 条、再贵 1.45ms，**收益已递减**）
+    # 归因与"为什么 pgvector 的混合检索质量仍低于冻结基线"是两件事，见 ADR-0004 第九节：
+    # 那条落差来自全文路（Postgres 核心没有 BM25），与 ef_search 无关。
+    pg_hnsw_ef_search: int = Field(default=200, ge=1, le=1000)
     # SQLite 页缓存上限（KiB，sqlite-vec 后端）。
     #
     # 这个参数是被实测逼出来的，不是抄来的：18861×384 的向量表 29MB，而 SQLite 默认

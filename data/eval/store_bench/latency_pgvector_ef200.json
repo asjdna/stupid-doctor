@@ -1,0 +1,63 @@
+{
+  "top_k": 10,
+  "repeats": 3,
+  "provider": "bge",
+  "n_queries": 50,
+  "computed_at": "2026-10-09T23:53:56",
+  "results": [
+    {
+      "backend": "sqlite",
+      "n_chunks": 18861,
+      "open_ms": 861.7,
+      "n_queries": 50,
+      "n_samples": 150,
+      "dense_ms": {
+        "p50": 2.17,
+        "p95": 2.681,
+        "mean": 2.21,
+        "max": 3.126
+      },
+      "keyword_ms": {
+        "p50": 13.483,
+        "p95": 25.624,
+        "mean": 13.155,
+        "max": 30.246
+      },
+      "agreement": {}
+    },
+    {
+      "backend": "pgvector",
+      "n_chunks": 18861,
+      "open_ms": 589.6,
+      "n_queries": 50,
+      "n_samples": 150,
+      "dense_ms": {
+        "p50": 5.791,
+        "p95": 7.969,
+        "mean": 5.997,
+        "max": 9.014
+      },
+      "keyword_ms": {
+        "p50": 47.855,
+        "p95": 90.78,
+        "mean": 46.862,
+        "max": 108.379
+      },
+      "agreement": {
+        "vs": "sqlite",
+        "dense": {
+          "n_queries": "150",
+          "identical_topk": "129/150",
+          "same_hit_set": "129/150",
+          "mean_set_overlap": "0.9800"
+        },
+        "keyword": {
+          "n_queries": "150",
+          "identical_topk": "0/150",
+          "same_hit_set": "0/150",
+          "mean_set_overlap": "0.3140"
+        }
+      }
+    }
+  ]
+}

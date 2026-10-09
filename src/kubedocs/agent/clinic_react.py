@@ -158,14 +158,17 @@ class ClinicReactRuntime:
 
         caller = LiteLLMToolCaller(self.settings)
         prompt = self.system_prompt
-        messages: list[dict[str, Any]] = [{"role": "system", "content": prompt}]
-        messages.extend(history or [])
-        messages.append({"role": "user", "content": message})
 
+        # ⚠️ 这里曾经拼过一个 `messages = [system] + history + [user]` 的列表，然后**从来没有
+        # 把它交给循环**（循环的签名里当时根本没有 history）。它被 `extend` 过，所以连 F841
+        # 都不报——表现就是"工具循环路径的多轮上下文全丢"，而日志里一切正常。
+        # 现在 history 只走 `run_tool_loop(history=...)` 这一条路：消息顺序（system → history
+        # → 本轮 user）与角色校验都在循环里做，本模块不再自己拼消息。
         # 用户这一轮明确要求挂号 = 对他的取号确认；否则拒绝执行有副作用的工具
         user_asked_to_book = wants_booking(message)
         turn: AgentTurn = run_tool_loop(
             message, tools=self.tools, llm=caller, system=prompt, max_steps=5,
+            history=history,
             confirm=(lambda _call: True) if user_asked_to_book else None,
         )
         return ClinicTurn(
