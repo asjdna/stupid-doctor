@@ -4,6 +4,7 @@
 内核提供**控制流**（图、工具协议、状态、持久化、中断、推理）。内核里不出现
 任何 `if domain == ...`。
 """
+
 from __future__ import annotations
 
 from kubedocs.agent.state import (

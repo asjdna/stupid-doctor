@@ -18,6 +18,7 @@
 越界一律 422（由 pydantic/FastAPI 给出），**不在这里手工判**：
 手工判会散落成"有的端点判了、有的没判"。
 """
+
 from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
@@ -63,9 +64,7 @@ class Hit(BaseModel):
         而调用方（前端/探针）多数时候只需要判断"这条讲的是不是我要的"。
         `source_url` **不截断**——它才是正文被截之后仍能追溯原文的保证。
         """
-        return cls.model_validate(chunk).model_copy(
-            update={"body": _clip(chunk.body, body_limit)}
-        )
+        return cls.model_validate(chunk).model_copy(update={"body": _clip(chunk.body, body_limit)})
 
 
 class SearchResponse(BaseModel):
@@ -130,8 +129,7 @@ class SearchRequest(BaseModel):
 
     q: str = Field(min_length=1, max_length=300, description="自然语言查询")
     top_k: int = Field(default=8, ge=1, le=20, description="返回条数，1~20")
-    domain: str = Field(default="", max_length=32,
-                        description="域；留空表示用服务当前配置的域")
+    domain: str = Field(default="", max_length=32, description="域；留空表示用服务当前配置的域")
 
     @field_validator("q")
     @classmethod
@@ -156,8 +154,9 @@ class ChatRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     message: str = Field(min_length=1, max_length=2000, description="用户这一轮说的话")
-    thread_id: str = Field(default="", max_length=64,
-                           description="会话 id；留空则由服务端生成并在首个 SSE 事件里返回")
+    thread_id: str = Field(
+        default="", max_length=64, description="会话 id；留空则由服务端生成并在首个 SSE 事件里返回"
+    )
     patient_id: str = Field(default="anon", max_length=64, description="患者标识（号源系统用）")
 
     @field_validator("message")

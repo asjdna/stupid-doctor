@@ -23,16 +23,38 @@ kubedocs 原有的全文检索走 SQLite FTS5 + `unicode61` 分词器。它按"�
 「不胸痛」与「胸痛」在索引里就变成同一个东西——这是安全相关的事故，
 不是检索质量问题。所以中文停用词只收纯语气词与寒暄语。
 """
+
 from __future__ import annotations
 
 from typing import Protocol
 
 # 中文停用词：只收纯语气助词与寒暄。
 # ⚠️ 严禁加入 不/没/无/未/别/否 —— 它们是否定标记，丢弃会让「不胸痛」等同于「胸痛」。
-_ZH_STOPWORDS = frozenset({
-    "的", "了", "吗", "呢", "吧", "啊", "呀", "哦", "嗯", "之", "其", "一下",
-    "请问", "你好", "您好", "谢谢", "请", "帮", "麻烦", "就是", "还有",
-})
+_ZH_STOPWORDS = frozenset(
+    {
+        "的",
+        "了",
+        "吗",
+        "呢",
+        "吧",
+        "啊",
+        "呀",
+        "哦",
+        "嗯",
+        "之",
+        "其",
+        "一下",
+        "请问",
+        "你好",
+        "您好",
+        "谢谢",
+        "请",
+        "帮",
+        "麻烦",
+        "就是",
+        "还有",
+    }
+)
 
 
 class Normalizer(Protocol):
@@ -80,7 +102,7 @@ class ChineseNormalizer:
         if self._jieba is None:
             import jieba
 
-            jieba.setLogLevel(60)      # 静音"Building prefix dict"日志
+            jieba.setLogLevel(60)  # 静音"Building prefix dict"日志
             self._jieba = jieba
         return self._jieba
 

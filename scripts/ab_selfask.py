@@ -25,6 +25,7 @@ LLM-as-judge（后者分数波动大、还要再花钱、且不可复现）。
     python scripts/ab_selfask.py --limit 12          # 小样本先跑
     python scripts/ab_selfask.py --limit 12 --json
 """
+
 from __future__ import annotations
 
 import argparse
@@ -70,9 +71,11 @@ class LiteLLMDecomposer:
     def _chat(self, system: str, user: str, *, json_mode: bool = False) -> str:
         kwargs: dict[str, Any] = {
             "model": self.model,
-            "messages": [{"role": "system", "content": system},
-                         {"role": "user", "content": user}],
-            "temperature": 0.0, "max_tokens": 700, "timeout": 60, "num_retries": 2,
+            "messages": [{"role": "system", "content": system}, {"role": "user", "content": user}],
+            "temperature": 0.0,
+            "max_tokens": 700,
+            "timeout": 60,
+            "num_retries": 2,
         }
         if json_mode:
             kwargs["response_format"] = {"type": "json_object"}
@@ -86,9 +89,10 @@ class LiteLLMDecomposer:
 
     def decompose(self, question: str, max_sub: int) -> list[str]:
         raw = self._chat(
-            "把用户的技术问题拆成 2-4 个可以独立检索的子问题。"
-            '只输出 JSON：{"sub_questions": ["...", "..."]}',
-            f"问题：{question}\n最多 {max_sub} 个子问题。", json_mode=True)
+            '把用户的技术问题拆成 2-4 个可以独立检索的子问题。只输出 JSON：{"sub_questions": ["...", "..."]}',
+            f"问题：{question}\n最多 {max_sub} 个子问题。",
+            json_mode=True,
+        )
         try:
             subs = json.loads(raw).get("sub_questions", [])
         except json.JSONDecodeError:
@@ -100,7 +104,8 @@ class LiteLLMDecomposer:
         return self._chat(
             SYSTEM,
             f"【子问题的检索与作答】\n{blocks}\n\n【原问题】\n{question}\n\n"
-            "请综合上面内容回答原问题，并保留 [n] 引用。")
+            "请综合上面内容回答原问题，并保留 [n] 引用。",
+        )
 
 
 def _citations_valid(text: str, n_available: int) -> bool:
@@ -108,8 +113,9 @@ def _citations_valid(text: str, n_available: int) -> bool:
     return bool(marks) and all(1 <= m <= n_available for m in marks)
 
 
-def run_single_shot(question: str, retriever: Any, llm: LiteLLMDecomposer,
-                    *, top_k: int = 5) -> dict[str, Any]:
+def run_single_shot(
+    question: str, retriever: Any, llm: LiteLLMDecomposer, *, top_k: int = 5
+) -> dict[str, Any]:
     """单轮：检索一次 → 生成。"""
     from kubedocs.generate import build_context
 
@@ -118,19 +124,25 @@ def run_single_shot(question: str, retriever: Any, llm: LiteLLMDecomposer,
     ctx, citations = build_context(
         [  # 复用 generate 需要的 ChunkHit 形状
             __import__("kubedocs.store.base", fromlist=["ChunkHit"]).ChunkHit(
-                chunk_id=h.chunk_id, doc_id=h.doc_id, ordinal=h.ordinal, title=h.title,
-                breadcrumb=h.breadcrumb, source_url=h.source_url, body=h.body)
-            for h in hits],
-        max_chars=6000)
+                chunk_id=h.chunk_id,
+                doc_id=h.doc_id,
+                ordinal=h.ordinal,
+                title=h.title,
+                breadcrumb=h.breadcrumb,
+                source_url=h.source_url,
+                body=h.body,
+            )
+            for h in hits
+        ],
+        max_chars=6000,
+    )
     if not citations:
         return {"text": "", "n_citations": 0, "llm_calls": 0}
-    text = llm._chat(SYSTEM, f"【文档片段】\n{ctx}\n\n【问题】\n{question}\n\n"
-                            "请依据片段作答并带 [n] 引用。")
+    text = llm._chat(SYSTEM, f"【文档片段】\n{ctx}\n\n【问题】\n{question}\n\n请依据片段作答并带 [n] 引用。")
     return {"text": text, "n_citations": len(citations), "llm_calls": 1}
 
 
-def run_self_ask(question: str, retriever: Any, llm: LiteLLMDecomposer,
-                 *, top_k: int = 5) -> dict[str, Any]:
+def run_self_ask(question: str, retriever: Any, llm: LiteLLMDecomposer, *, top_k: int = 5) -> dict[str, Any]:
     """self-ask：分解 → 各自检索 → 合成。"""
     from kubedocs.agent.selfask import self_ask
 
@@ -139,9 +151,13 @@ def run_self_ask(question: str, retriever: Any, llm: LiteLLMDecomposer,
 
     before = llm.calls
     result = self_ask(question, search=search, llm=llm, max_sub=3)
-    return {"text": result.answer, "n_citations": len(result.citations),
-            "llm_calls": llm.calls - before, "decomposed": result.decomposed,
-            "notes": result.notes}
+    return {
+        "text": result.answer,
+        "n_citations": len(result.citations),
+        "llm_calls": llm.calls - before,
+        "decomposed": result.decomposed,
+        "notes": result.notes,
+    }
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -150,15 +166,13 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--limit", type=int, default=12, help="跑多少条（控制时间与花费）")
     p.add_argument("--top-k", type=int, default=5)
     p.add_argument("--out", default="data/eval/ab_selfask.json")
-    p.add_argument("--kinds", default="",
-                   help="只跑这些类型，逗号分隔（如 paraphrase,concept）")
+    p.add_argument("--kinds", default="", help="只跑这些类型，逗号分隔（如 paraphrase,concept）")
     p.add_argument("--json", action="store_true")
     args = p.parse_args(argv)
 
     added = load_env_file()
     settings = Settings()
-    if "DEEPSEEK_API_KEY" not in added and not __import__("os").environ.get(
-            "DEEPSEEK_API_KEY"):
+    if "DEEPSEEK_API_KEY" not in added and not __import__("os").environ.get("DEEPSEEK_API_KEY"):
         print("没有可用的 LLM 密钥（DEEPSEEK_API_KEY），A/B 需要真实模型", file=sys.stderr)
         return 3
 
@@ -166,11 +180,11 @@ def main(argv: list[str] | None = None) -> int:
     if args.kinds:
         wanted = {k.strip() for k in args.kinds.split(",") if k.strip()}
         rows = [r for r in rows if r.kind in wanted]
-    rows = rows[:args.limit]
+    rows = rows[: args.limit]
     store = from_settings(settings)
     try:
         retriever = HybridRetriever(store, build_embedder(settings), settings)
-        retriever.search("warmup", top_k=1)        # 排除嵌入冷启动
+        retriever.search("warmup", top_k=1)  # 排除嵌入冷启动
         llm = LiteLLMDecomposer(settings)
 
         out: dict[str, Any] = {"n": len(rows), "top_k": args.top_k, "modes": {}}
@@ -183,40 +197,40 @@ def main(argv: list[str] | None = None) -> int:
                 r = fn(row.q, retriever, llm, top_k=args.top_k)
                 ms = (time.perf_counter() - t0) * 1000
                 text = str(r.get("text", ""))
-                rows_out.append({
-                    "id": row.id, "kind": row.kind,
-                    "term": term, "term_covered": term.lower() in text.lower(),
-                    "cited": bool(_MARKER.search(text)),
-                    "citation_valid": _citations_valid(text, int(r.get("n_citations", 0))),
-                    "llm_calls": int(r.get("llm_calls", 0)),
-                    "latency_ms": round(ms, 1),
-                })
-                print(f"  {i}/{len(rows)} {row.id} cov={rows_out[-1]['term_covered']} "
-                      f"{ms:.0f}ms", flush=True)
+                rows_out.append(
+                    {
+                        "id": row.id,
+                        "kind": row.kind,
+                        "term": term,
+                        "term_covered": term.lower() in text.lower(),
+                        "cited": bool(_MARKER.search(text)),
+                        "citation_valid": _citations_valid(text, int(r.get("n_citations", 0))),
+                        "llm_calls": int(r.get("llm_calls", 0)),
+                        "latency_ms": round(ms, 1),
+                    }
+                )
+                print(f"  {i}/{len(rows)} {row.id} cov={rows_out[-1]['term_covered']} {ms:.0f}ms", flush=True)
             out["modes"][mode] = {
-                "term_coverage": round(sum(x["term_covered"] for x in rows_out)
-                                       / len(rows_out), 4),
+                "term_coverage": round(sum(x["term_covered"] for x in rows_out) / len(rows_out), 4),
                 "cited_rate": round(sum(x["cited"] for x in rows_out) / len(rows_out), 4),
-                "citation_valid_rate": round(sum(x["citation_valid"] for x in rows_out)
-                                             / len(rows_out), 4),
+                "citation_valid_rate": round(sum(x["citation_valid"] for x in rows_out) / len(rows_out), 4),
                 "llm_calls_total": sum(x["llm_calls"] for x in rows_out),
-                "latency_p50_ms": round(statistics.median(
-                    [x["latency_ms"] for x in rows_out]), 1),
+                "latency_p50_ms": round(statistics.median([x["latency_ms"] for x in rows_out]), 1),
                 "rows": rows_out,
             }
         out["cost_usd"] = round(llm.cost, 6)
-        Path(args.out).write_text(json.dumps(out, ensure_ascii=False, indent=2),
-                                  encoding="utf-8")
+        Path(args.out).write_text(json.dumps(out, ensure_ascii=False, indent=2), encoding="utf-8")
         if args.json:
             print(json.dumps(out, ensure_ascii=False, indent=2))
         else:
-            print(f"\n{'模式':<14}{'关键词覆盖':>10}{'带引用':>8}{'引用合规':>10}"
-                  f"{'LLM调用':>9}{'p50ms':>8}")
+            print(f"\n{'模式':<14}{'关键词覆盖':>10}{'带引用':>8}{'引用合规':>10}{'LLM调用':>9}{'p50ms':>8}")
             print("-" * 62)
             for mode, m in out["modes"].items():
-                print(f"{mode:<14}{m['term_coverage']:>10.2%}{m['cited_rate']:>8.2%}"
-                      f"{m['citation_valid_rate']:>10.2%}{m['llm_calls_total']:>9}"
-                      f"{m['latency_p50_ms']:>8.0f}")
+                print(
+                    f"{mode:<14}{m['term_coverage']:>10.2%}{m['cited_rate']:>8.2%}"
+                    f"{m['citation_valid_rate']:>10.2%}{m['llm_calls_total']:>9}"
+                    f"{m['latency_p50_ms']:>8.0f}"
+                )
             print(f"\n模型花费合计：${out['cost_usd']:.4f}（{len(rows)} 条 × 2 模式）")
             print(f"结果已写入 {args.out}")
         return 0

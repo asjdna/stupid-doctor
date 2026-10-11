@@ -16,6 +16,7 @@ RRF 只看名次，**完全不管块的内容**。所以"包含答案的那一�
 失败一律降级为"保持 RRF 顺序并记录诊断"，绝不因为精排不可用而让整个查询失败：
 精排是锦上添花，召回才是生命线。
 """
+
 from __future__ import annotations
 
 from collections.abc import Sequence
@@ -31,8 +32,7 @@ class Reranker(Protocol):
 class CrossEncoderReranker:
     """sentence-transformers cross-encoder 包装（懒加载）。"""
 
-    def __init__(self, model_name: str = "BAAI/bge-reranker-base",
-                 batch_size: int = 32) -> None:
+    def __init__(self, model_name: str = "BAAI/bge-reranker-base", batch_size: int = 32) -> None:
         self.model_name = model_name
         self.batch_size = batch_size
         self._model: object | None = None
@@ -55,8 +55,7 @@ class CrossEncoderReranker:
         return [float(x) for x in raw]
 
 
-def apply_rerank(reranker: Reranker, query: str,
-                 texts: Sequence[str]) -> tuple[list[float], str | None]:
+def apply_rerank(reranker: Reranker, query: str, texts: Sequence[str]) -> tuple[list[float], str | None]:
     """给候选打分；不可用时返回 (空列表, 原因)，由调用方保持原序。
 
     把"失败"表达成返回值而不是异常：调用点需要的是"降级并记录"，

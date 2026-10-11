@@ -1,4 +1,5 @@
 """摄取流水线测试：增量、幂等、删除同步、跨篇复用向量。"""
+
 from __future__ import annotations
 
 from pathlib import Path
@@ -36,8 +37,12 @@ def _ingest(store: SqliteStore, settings: Settings, embedder: HashingEmbedder, *
 
 
 def test_missing_corpus_raises(tmp_path, store, embedder):
-    s = Settings(index_dir=str(tmp_path / "i"), corpus_dir=str(tmp_path / "nope"),
-                 embedding_provider="hashing", embedding_dim=32)
+    s = Settings(
+        index_dir=str(tmp_path / "i"),
+        corpus_dir=str(tmp_path / "nope"),
+        embedding_provider="hashing",
+        embedding_dim=32,
+    )
     with pytest.raises(FileNotFoundError):
         _ingest(store, s, embedder)
 
@@ -66,8 +71,12 @@ def test_only_changed_file_is_reprocessed(settings, store, embedder):
     first = _ingest(store, settings, embedder)
     hashes_before = store.existing_doc_hashes()
 
-    _write(settings.corpus_path, "a.md", "Resource Management",
-           BODY_A + "\n## Added later\n\nThis section is brand new and should be indexed.\n")
+    _write(
+        settings.corpus_path,
+        "a.md",
+        "Resource Management",
+        BODY_A + "\n## Added later\n\nThis section is brand new and should be indexed.\n",
+    )
     r2 = _ingest(store, settings, embedder)
 
     assert r2.files_changed == 1
@@ -144,7 +153,7 @@ def test_intra_batch_dedup_with_duplicate_in_the_middle(settings, store, embedde
 
     r = _ingest(store, settings, embedder)
     assert r.chunks_written == store.stats().n_chunks
-    assert r.chunks_embedded == 2          # dup1 与 dup2 同内容，只编码一次
+    assert r.chunks_embedded == 2  # dup1 与 dup2 同内容，只编码一次
     # 三篇文档的块都拿到向量（否则 dense_search 会漏）
     assert store.dense_search(np.ones(32, dtype=np.float32), 50) != []
     assert len(store.doc_texts(["dup1", "dup2", "other"])) == 3
@@ -156,7 +165,7 @@ def test_empty_document_is_registered_to_avoid_rework(settings, store, embedder)
     r1 = _ingest(store, settings, embedder)
     assert r1.files_empty == 1
     r2 = _ingest(store, settings, embedder)
-    assert r2.files_changed == 0          # 空文档也算"处理过"，不该每次重跑
+    assert r2.files_changed == 0  # 空文档也算"处理过"，不该每次重跑
 
 
 def test_rebuild_clears_previous_index(settings, store, embedder):
@@ -181,23 +190,47 @@ class TestSanityCheck:
     """写入前的最后一道关：零向量会让块在向量路永远排最后，且完全不报错。"""
 
     def test_zero_vector_rejected(self, embedder):
-        chunk = ChunkInput(chunk_id="a::0000", doc_id="a", ordinal=0, title="a",
-                           breadcrumb="s", source_url="u", body="x", content_hash="h",
-                           n_chars=1)
+        chunk = ChunkInput(
+            chunk_id="a::0000",
+            doc_id="a",
+            ordinal=0,
+            title="a",
+            breadcrumb="s",
+            source_url="u",
+            body="x",
+            content_hash="h",
+            n_chars=1,
+        )
         with pytest.raises(RuntimeError, match="零向量"):
             _sanity_check({"a::0000": np.zeros(32, dtype=np.float32)}, [chunk], embedder)
 
     def test_missing_vector_rejected(self, embedder):
-        chunk = ChunkInput(chunk_id="a::0000", doc_id="a", ordinal=0, title="a",
-                           breadcrumb="s", source_url="u", body="x", content_hash="h",
-                           n_chars=1)
+        chunk = ChunkInput(
+            chunk_id="a::0000",
+            doc_id="a",
+            ordinal=0,
+            title="a",
+            breadcrumb="s",
+            source_url="u",
+            body="x",
+            content_hash="h",
+            n_chars=1,
+        )
         with pytest.raises(RuntimeError, match="没有向量"):
             _sanity_check({}, [chunk], embedder)
 
     def test_unnormalised_vector_is_fixed_in_place(self, embedder):
-        chunk = ChunkInput(chunk_id="a::0000", doc_id="a", ordinal=0, title="a",
-                           breadcrumb="s", source_url="u", body="x", content_hash="h",
-                           n_chars=1)
+        chunk = ChunkInput(
+            chunk_id="a::0000",
+            doc_id="a",
+            ordinal=0,
+            title="a",
+            breadcrumb="s",
+            source_url="u",
+            body="x",
+            content_hash="h",
+            n_chars=1,
+        )
         vecs = {"a::0000": np.full(32, 0.5, dtype=np.float32)}
         _sanity_check(vecs, [chunk], embedder)
         assert float(np.linalg.norm(vecs["a::0000"])) == pytest.approx(1.0)

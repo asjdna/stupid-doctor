@@ -10,6 +10,7 @@
 而"两个属主同时认领时只有一个赢"这类竞态必须在**同一个临界区**上验证。
 `/chat` 跑在线程池里，所以并发那条不是假想问题。
 """
+
 from __future__ import annotations
 
 import threading
@@ -109,8 +110,8 @@ class TestBounded:
         store = ThreadStore(max_threads=2)
         store.claim("a", "p1")
         store.claim("b", "p1")
-        store.history("a", "p1")          # a 变成"最近用过"
-        store.claim("c", "p1")            # 该淘汰 b
+        store.history("a", "p1")  # a 变成"最近用过"
+        store.claim("c", "p1")  # 该淘汰 b
 
         assert store.owner_of("c") == "p1"
         assert store.owner_of("a") == "p1", "刚用过的线程被淘汰了"
@@ -122,7 +123,7 @@ class TestBounded:
         store.claim("old", "p1")
         store.claim("new", "p2")
         assert store.owner_of("old") is None
-        store.claim("old", "p2")          # 现在它归 p2，不再被拒
+        store.claim("old", "p2")  # 现在它归 p2，不再被拒
         assert store.owner_of("old") == "p2"
 
     def test_messages_per_thread_are_capped(self) -> None:

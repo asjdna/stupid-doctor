@@ -20,6 +20,7 @@
    并把原因写进 `reason`。路由选错一个域，后面的检索、工具、提示词、引用全都白做，
    所以这里宁可带记录地降级，也不放行一个非法值。
 """
+
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
@@ -36,8 +37,7 @@ class RouteDecision(BaseModel):
 
     domain: str = Field(description="选中的域名，必须是候选之一")
     confidence: float = Field(ge=0.0, le=1.0, description="对本次选择的自评置信度")
-    reason: str = Field(default="", max_length=_REASON_MAX,
-                        description="一句话理由，用于审计与排查")
+    reason: str = Field(default="", max_length=_REASON_MAX, description="一句话理由，用于审计与排查")
 
 
 class Router(Protocol):
@@ -75,8 +75,7 @@ def build_candidates(domains: Sequence[object]) -> list[dict[str, Any]]:
             description = _text(getattr(domain, "description", ""))
         if not name:
             raise ValueError(
-                f"域包 {domain!r} 没有可用的 name，无法作为路由候选："
-                "这是注册环节的编程错误，不该由路由兜底"
+                f"域包 {domain!r} 没有可用的 name，无法作为路由候选：这是注册环节的编程错误，不该由路由兜底"
             )
         candidates.append({"name": name, "description": description})
     return candidates
@@ -103,8 +102,9 @@ def _degrade(default: str, names: Sequence[str], why: str) -> RouteDecision:
     return _make(default, 0.0, why)
 
 
-def route(query: str, *, llm: Router | None, candidates: Sequence[dict[str, Any]],
-          default: str) -> RouteDecision:
+def route(
+    query: str, *, llm: Router | None, candidates: Sequence[dict[str, Any]], default: str
+) -> RouteDecision:
     """返回最终决定。
 
     规则（顺序即优先级）：
@@ -118,9 +118,7 @@ def route(query: str, *, llm: Router | None, candidates: Sequence[dict[str, Any]
        非法域。模型编域名是常见失败模式，静默接受它会让后面全员崩掉。
     """
     if not candidates:
-        raise ValueError(
-            "路由候选为空：没有任何域包注册，这是编程错误，不该由模型或默认值兜底"
-        )
+        raise ValueError("路由候选为空：没有任何域包注册，这是编程错误，不该由模型或默认值兜底")
 
     names = [_text(c.get("name")) for c in candidates]
 
@@ -138,14 +136,17 @@ def route(query: str, *, llm: Router | None, candidates: Sequence[dict[str, Any]
         confidence = min(1.0, max(0.0, float(decision.confidence)))
         reason = _text(decision.reason)
     except Exception as e:  # noqa: BLE001 - 路由失败必须降级，不能让整轮对话崩在这里
-        return _degrade(default, names,
-                        f"路由模型调用失败（{type(e).__name__}: {e}），回退默认域 {default!r}")
+        return _degrade(
+            default, names, f"路由模型调用失败（{type(e).__name__}: {e}），回退默认域 {default!r}"
+        )
 
     if chosen not in names:
         # 精确匹配，不做大小写折叠或模糊匹配：一个"差一点"的域名恰恰说明模型没按
         # schema 选，猜它想选哪个比直接回退更危险。
-        return _degrade(default, names,
-                        f"模型给出了不在候选里的域 {chosen!r}，已拒绝并回退默认域 "
-                        f"{default!r}（合法候选：{names}）")
+        return _degrade(
+            default,
+            names,
+            f"模型给出了不在候选里的域 {chosen!r}，已拒绝并回退默认域 {default!r}（合法候选：{names}）",
+        )
 
     return _make(chosen, confidence, reason or f"模型选择 {chosen}")

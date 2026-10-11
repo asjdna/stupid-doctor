@@ -4,6 +4,7 @@
 - 红线误报 → 把患者本人送进急诊（或反过来漏掉急诊）
 - 号源超卖 → 两个人拿到同一个号
 """
+
 from __future__ import annotations
 
 import sqlite3
@@ -80,8 +81,8 @@ class TestPolarity:
         金标用例刻意保留）。本测试固定这个行为，避免它被无声改掉——
         要修就必须同时更新那份召回率与金标。
         """
-        assert is_negated("无发热、咳嗽", "咳嗽") is True                  # 列举：不该截断
-        assert is_negated("我以前没有胸痛，现在胸痛", "胸痛") is True      # 已知局限
+        assert is_negated("无发热、咳嗽", "咳嗽") is True  # 列举：不该截断
+        assert is_negated("我以前没有胸痛，现在胸痛", "胸痛") is True  # 已知局限
         assert polarity("我以前没有胸痛，现在胸痛", "胸痛") == "absent"
 
 
@@ -91,7 +92,7 @@ class TestPolaritySafetyGate:
     def test_self_present_is_reportable(self):
         assert is_reportable("我现在胸痛", "胸痛") is True
         assert is_reportable("胸痛，喘不上气", "胸痛") is True
-        assert is_reportable("胸痛", "胸痛") is True           # 缺省即本人/现在
+        assert is_reportable("胸痛", "胸痛") is True  # 缺省即本人/现在
 
     def test_other_person_is_not_reportable(self):
         """核心用例：家属的症状不能算患者本人的主诉。"""
@@ -135,22 +136,28 @@ class TestRiskGuard:
     def setup_method(self):
         self.guard = RiskGuard()
 
-    @pytest.mark.parametrize("text", [
-        "我现在胸痛",
-        "胸痛，喘不上气",
-        "突然就晕倒了",
-        "半边身子不能动",
-    ])
+    @pytest.mark.parametrize(
+        "text",
+        [
+            "我现在胸痛",
+            "胸痛，喘不上气",
+            "突然就晕倒了",
+            "半边身子不能动",
+        ],
+    )
     def test_red_lines_trigger(self, text):
         hit = self.guard.check(text)
         assert hit is not None, f"漏掉急诊：{text}"
 
-    @pytest.mark.parametrize("text,why", [
-        ("我老公胸痛，我没事", "他人家属"),
-        ("我去年胸痛过一次，现在好了", "既往"),
-        ("我没有胸痛，就是有点闷", "否认"),
-        ("如果胸痛的话要不要去医院", "假设"),
-    ])
+    @pytest.mark.parametrize(
+        "text,why",
+        [
+            ("我老公胸痛，我没事", "他人家属"),
+            ("我去年胸痛过一次，现在好了", "既往"),
+            ("我没有胸痛，就是有点闷", "否认"),
+            ("如果胸痛的话要不要去医院", "假设"),
+        ],
+    )
     def test_must_not_trigger(self, text, why):
         hit = self.guard.check(text)
         assert hit is None, f"误报急诊（{why}）：{text} -> {hit.describe() if hit else ''}"
@@ -275,11 +282,9 @@ def sqlite_provider(tmp_path: Path):
 class TestSqliteProvider:
     def test_schema_and_constraints_exist(self, sqlite_provider: SqliteAppointmentProvider):
         con = sqlite_provider._con
-        tables = {r[0] for r in con.execute(
-            "SELECT name FROM sqlite_master WHERE type='table'")}
+        tables = {r[0] for r in con.execute("SELECT name FROM sqlite_master WHERE type='table'")}
         assert {"patients", "schedules", "appointments"} <= tables
-        triggers = {r[0] for r in con.execute(
-            "SELECT name FROM sqlite_master WHERE type='trigger'")}
+        triggers = {r[0] for r in con.execute("SELECT name FROM sqlite_master WHERE type='trigger'")}
         assert any("fk" in t for t in triggers)
 
     def test_booking_persists_across_reopen(self, tmp_path: Path):
@@ -300,12 +305,13 @@ class TestSqliteProvider:
         """绕过 ensure_patient 直接插号：触发器必须挡住（外键 PRAGMA 是连接级的，不可靠）。"""
         p = SqliteAppointmentProvider(tmp_path / "t.db")
         try:
-            p.get_availability("心内科")     # 先建号源
+            p.get_availability("心内科")  # 先建号源
             with pytest.raises(sqlite3.IntegrityError, match="不存在的患者"):
                 p._con.execute(
                     "INSERT INTO appointments(patient_id, schedule_id, department, date,"
                     " time_slot, ticket_no, queue_no) VALUES('ghost',1,'心内科',"
-                    "'2026-01-01','上午','X1',1)")
+                    "'2026-01-01','上午','X1',1)"
+                )
         finally:
             p.close()
 
@@ -313,15 +319,15 @@ class TestSqliteProvider:
         """数据库级兜底：任何写入路径都不能把余号改成负数。"""
         sqlite_provider.get_availability("心内科")
         with pytest.raises(sqlite3.IntegrityError, match="CHECK constraint failed"):
-            sqlite_provider._con.execute(
-                "UPDATE schedules SET remaining = -1 WHERE department='心内科'")
+            sqlite_provider._con.execute("UPDATE schedules SET remaining = -1 WHERE department='心内科'")
 
     def test_duplicate_schedule_row_is_refused(self, sqlite_provider):
         sqlite_provider.get_availability("心内科")
         with pytest.raises(sqlite3.IntegrityError, match="UNIQUE constraint failed"):
             sqlite_provider._con.execute(
                 "INSERT INTO schedules(department,date,time_slot,total,remaining)"
-                " SELECT department,date,time_slot,total,remaining FROM schedules LIMIT 1")
+                " SELECT department,date,time_slot,total,remaining FROM schedules LIMIT 1"
+            )
 
     def test_cancel_returns_the_slot(self, sqlite_provider):
         ticket = sqlite_provider.book("心内科", "u1", time_slot="上午")
@@ -346,8 +352,7 @@ class TestSqliteProvider:
             sqlite_provider.book("心内科", "u1", date="2026/1/1", time_slot="上午")
 
     def test_ticket_numbers_are_unique(self, sqlite_provider):
-        numbers = {sqlite_provider.book("心内科", "u1", time_slot="上午")["ticket_no"]
-                   for _ in range(5)}
+        numbers = {sqlite_provider.book("心内科", "u1", time_slot="上午")["ticket_no"] for _ in range(5)}
         assert len(numbers) == 5
 
     def test_queue_numbers_are_sequential_per_department_day(self, sqlite_provider):
@@ -368,14 +373,15 @@ class TestNoOversellUnderConcurrency:
         p = SqliteAppointmentProvider(tmp_path / "race.db")
         try:
             p.get_availability("心内科")
-            p._con.execute("UPDATE schedules SET remaining=1, total=1 "
-                           "WHERE department='心内科' AND time_slot='上午'")
+            p._con.execute(
+                "UPDATE schedules SET remaining=1, total=1 WHERE department='心内科' AND time_slot='上午'"
+            )
             barrier = threading.Barrier(8)
             results: list[str] = []
             lock = threading.Lock()
 
             def worker(i: int) -> None:
-                barrier.wait()                     # 尽量让 8 个线程同时开抢
+                barrier.wait()  # 尽量让 8 个线程同时开抢
                 try:
                     p.book("心内科", f"u{i}", time_slot="上午")
                     with lock:
@@ -393,11 +399,13 @@ class TestNoOversellUnderConcurrency:
             assert results.count("ok") == 1, f"超卖了：{results}"
             assert results.count("sold_out") == 7
             row = p._con.execute(
-                "SELECT remaining FROM schedules WHERE department='心内科' "
-                "AND time_slot='上午'").fetchone()
+                "SELECT remaining FROM schedules WHERE department='心内科' AND time_slot='上午'"
+            ).fetchone()
             assert row[0] == 0
-            assert p._con.execute(
-                "SELECT COUNT(*) FROM appointments WHERE department='心内科'").fetchone()[0] == 1
+            assert (
+                p._con.execute("SELECT COUNT(*) FROM appointments WHERE department='心内科'").fetchone()[0]
+                == 1
+            )
         finally:
             p.close()
 
@@ -414,7 +422,7 @@ class TestNoOversellUnderConcurrency:
                     p.book("心内科", f"u{i}", time_slot="上午")
                 except BookingError:
                     pass
-                except Exception as e:            # noqa: BLE001 - 记录任何意外异常
+                except Exception as e:  # noqa: BLE001 - 记录任何意外异常
                     errors.append(f"{type(e).__name__}: {e}")
 
             threads = [threading.Thread(target=worker, args=(i,)) for i in range(6)]
@@ -424,8 +432,9 @@ class TestNoOversellUnderConcurrency:
                 t.join()
 
             assert not errors, f"并发下出现意外异常：{errors}"
-            queues = [r[0] for r in p._con.execute(
-                "SELECT queue_no FROM appointments WHERE department='心内科'")]
+            queues = [
+                r[0] for r in p._con.execute("SELECT queue_no FROM appointments WHERE department='心内科'")
+            ]
             assert len(queues) == len(set(queues)), f"排队号重复：{sorted(queues)}"
         finally:
             p.close()

@@ -24,6 +24,7 @@
     python scripts/load_pgvector.py --batch-docs 200       # 每批文档数
     python scripts/load_pgvector.py --keep                 # 不清空目标 schema
 """
+
 from __future__ import annotations
 
 import argparse
@@ -44,8 +45,7 @@ EXIT_OK = 0
 EXIT_USER = 1
 
 
-def _read_sidecar(settings: Settings, rows: list[sqlite3.Row],
-                  dim: int) -> dict[str, np.ndarray]:
+def _read_sidecar(settings: Settings, rows: list[sqlite3.Row], dim: int) -> dict[str, np.ndarray]:
     """从 `.npy` 侧车矩阵按 `vector_row` 取向量（**首选路径**）。
 
     为什么它优先于 `chunks_vec`：
@@ -103,12 +103,15 @@ def _read_vec0(con: sqlite3.Connection, rows: list[sqlite3.Row]) -> dict[str, np
         raise StoreError(f"sqlite-vec 的 vec0 扩展加载失败（{type(e).__name__}: {e}）") from e
     finally:
         con.enable_load_extension(False)
-    return {r["chunk_id"]: np.frombuffer(r["embedding"], dtype="<f4").astype(np.float32)
-            for r in con.execute("SELECT chunk_id, embedding FROM chunks_vec")}
+    return {
+        r["chunk_id"]: np.frombuffer(r["embedding"], dtype="<f4").astype(np.float32)
+        for r in con.execute("SELECT chunk_id, embedding FROM chunks_vec")
+    }
 
 
-def _read_local(index_dir: str, domain: str) -> tuple[
-        list[DocInput], dict[str, list[ChunkInput]], dict[str, np.ndarray]]:
+def _read_local(
+    index_dir: str, domain: str
+) -> tuple[list[DocInput], dict[str, list[ChunkInput]], dict[str, np.ndarray]]:
     """从本地索引读出文档/块/向量。
 
     向量来源有二：`chunk_vectors.npy`（旧实现/`sqlite` 后端的侧车矩阵，**首选**）
@@ -122,28 +125,46 @@ def _read_local(index_dir: str, domain: str) -> tuple[
     con = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
     con.row_factory = sqlite3.Row
     try:
-        docs = [DocInput(doc_id=r["doc_id"], rel_path=r["rel_path"], title=r["title"],
-                         source_url=r["source_url"], content_hash=r["content_hash"])
-                for r in con.execute(
-                    "SELECT doc_id, rel_path, title, source_url, content_hash FROM documents")]
+        docs = [
+            DocInput(
+                doc_id=r["doc_id"],
+                rel_path=r["rel_path"],
+                title=r["title"],
+                source_url=r["source_url"],
+                content_hash=r["content_hash"],
+            )
+            for r in con.execute("SELECT doc_id, rel_path, title, source_url, content_hash FROM documents")
+        ]
         by_doc: dict[str, list[ChunkInput]] = {d.doc_id: [] for d in docs}
-        rows = list(con.execute(
-            "SELECT chunk_id, doc_id, ordinal, title, breadcrumb, source_url, body,"
-            " content_hash, n_chars, vector_row FROM chunks ORDER BY rowid"))
+        rows = list(
+            con.execute(
+                "SELECT chunk_id, doc_id, ordinal, title, breadcrumb, source_url, body,"
+                " content_hash, n_chars, vector_row FROM chunks ORDER BY rowid"
+            )
+        )
         for r in rows:
-            by_doc[r["doc_id"]].append(ChunkInput(
-                chunk_id=r["chunk_id"], doc_id=r["doc_id"], ordinal=r["ordinal"],
-                title=r["title"], breadcrumb=r["breadcrumb"], source_url=r["source_url"],
-                body=r["body"], content_hash=r["content_hash"], n_chars=r["n_chars"]))
+            by_doc[r["doc_id"]].append(
+                ChunkInput(
+                    chunk_id=r["chunk_id"],
+                    doc_id=r["doc_id"],
+                    ordinal=r["ordinal"],
+                    title=r["title"],
+                    breadcrumb=r["breadcrumb"],
+                    source_url=r["source_url"],
+                    body=r["body"],
+                    content_hash=r["content_hash"],
+                    n_chars=r["n_chars"],
+                )
+            )
 
         vecs = _read_sidecar(settings, rows, settings.embedding_dim)
         source = f"侧车矩阵 {settings.vector_path}"
         if not vecs:
-            have_vec_table = con.execute(
-                "SELECT 1 FROM sqlite_master WHERE name = 'chunks_vec'").fetchone() is not None
+            have_vec_table = (
+                con.execute("SELECT 1 FROM sqlite_master WHERE name = 'chunks_vec'").fetchone() is not None
+            )
             if not have_vec_table:
-                raise StoreError(
-                    f"本地索引没有向量：既无 {settings.vector_path}，也无 chunks_vec 虚表")
+                raise StoreError(f"本地索引没有向量：既无 {settings.vector_path}，也无 chunks_vec 虚表")
             vecs = _read_vec0(con, rows)
             source = "chunks_vec 虚表（需载入 vec0 扩展）"
         print(f"  向量来源：{source}，{len(vecs)} 条")
@@ -174,9 +195,14 @@ def main(argv: list[str] | None = None) -> int:
     print(f"  文档 {len(docs)}，块 {n_chunks}，向量 {len(vecs)}")
 
     store = PgVectorStore(
-        settings.database_url, schema=settings.domain, dim=settings.embedding_dim,
+        settings.database_url,
+        schema=settings.domain,
+        dim=settings.embedding_dim,
         embedding_model=settings.effective_embedding_model,
-        domain=settings.domain, pool_min=1, pool_max=4)
+        domain=settings.domain,
+        pool_min=1,
+        pool_max=4,
+    )
     try:
         if not args.keep:
             store.rebuild_from_scratch()
@@ -184,7 +210,7 @@ def main(argv: list[str] | None = None) -> int:
         t0 = time.perf_counter()
         done = 0
         for i in range(0, len(docs), args.batch_docs):
-            batch = docs[i:i + args.batch_docs]
+            batch = docs[i : i + args.batch_docs]
             chunks = [c for d in batch for c in by_doc.get(d.doc_id, [])]
             store.upsert_docs(batch, chunks, {c.chunk_id: vecs[c.chunk_id] for c in chunks})
             store.finalize()
@@ -201,10 +227,8 @@ def main(argv: list[str] | None = None) -> int:
         # 抽样校验：向量逐位相等 + 统计口径一致
         rng = np.random.default_rng(7)
         ids = sorted(vecs)
-        picks = [ids[i] for i in rng.choice(len(ids), size=min(args.sample, len(ids)),
-                                           replace=False)]
-        hash_of = {c.chunk_id: c.content_hash
-                   for chunks in by_doc.values() for c in chunks}
+        picks = [ids[i] for i in rng.choice(len(ids), size=min(args.sample, len(ids)), replace=False)]
+        hash_of = {c.chunk_id: c.content_hash for chunks in by_doc.values() for c in chunks}
         got = store.existing_hash_to_vector({hash_of[cid] for cid in picks})
         bad = []
         for cid in picks:

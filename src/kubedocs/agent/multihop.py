@@ -29,6 +29,7 @@
 - 跳1 的答案为空时，依赖它的跳**退化为用原问题检索**并在 notes 记录——
   宁可少一跳的信息，也不能让整条链断掉。
 """
+
 from __future__ import annotations
 
 import re
@@ -103,7 +104,7 @@ def parse_plan(raw: Sequence[Mapping[str, Any]], *, max_hops: int = 3) -> list[H
     `needs_previous=true` 的第一跳，静默接受会让执行时拿到空占位符。
     """
     hops: list[Hop] = []
-    for i, item in enumerate(raw[:max(1, max_hops)], start=1):
+    for i, item in enumerate(raw[: max(1, max_hops)], start=1):
         question = str(item.get("question", "")).strip()
         if not question:
             continue
@@ -124,8 +125,9 @@ def resolve_query(hop: Hop, previous_answer: str) -> str:
     return hop.template
 
 
-def _renumber(citations_by_hop: Sequence[Sequence[Mapping[str, Any]]],
-              ) -> tuple[list[dict[str, Any]], dict[tuple[int, int], int]]:
+def _renumber(
+    citations_by_hop: Sequence[Sequence[Mapping[str, Any]]],
+) -> tuple[list[dict[str, Any]], dict[tuple[int, int], int]]:
     """各跳的局部引用合并成全局编号，按 chunk_id 去重。
 
     返回 (全局引用列表, {(跳下标, 局部编号): 全局编号})。
@@ -145,8 +147,9 @@ def _renumber(citations_by_hop: Sequence[Sequence[Mapping[str, Any]]],
     return merged, mapping
 
 
-def multi_hop(question: str, *, search: Callable[[str], Any], llm: HopPlanner,
-              max_hops: int = 3, per_hop_top_k: int = 4) -> MultiHopResult:
+def multi_hop(
+    question: str, *, search: Callable[[str], Any], llm: HopPlanner, max_hops: int = 3, per_hop_top_k: int = 4
+) -> MultiHopResult:
     """执行多跳：规划 → 逐跳（带依赖）检索作答 → 合成。"""
     result = MultiHopResult(question=question, hops=[], answer="", citations=[])
     try:
@@ -190,6 +193,7 @@ def multi_hop(question: str, *, search: Callable[[str], Any], llm: HopPlanner,
     result.citations = merged
     # 各跳答案里的局部 [n] 换成全局编号，这样合成的答案引用才是对的
     for hop_i, hr in enumerate(result.hops):
+
         def _sub(m: re.Match[str], hop_i: int = hop_i) -> str:
             new = mapping.get((hop_i, int(m.group(1))))
             return f"[{new}]" if new else ""
@@ -208,8 +212,7 @@ def multi_hop(question: str, *, search: Callable[[str], Any], llm: HopPlanner,
     return result
 
 
-def _sub_all(pattern: re.Pattern[str], text: str,
-             fn: Callable[[re.Match[str]], str]) -> str:
+def _sub_all(pattern: re.Pattern[str], text: str, fn: Callable[[re.Match[str]], str]) -> str:
     return pattern.sub(fn, text)
 
 
@@ -218,13 +221,19 @@ def _contexts_and_citations(items: Sequence[Any]) -> tuple[str, list[dict[str, A
     blocks: list[str] = []
     cites: list[dict[str, Any]] = []
     for i, item in enumerate(items, start=1):
-        get = (item.get if isinstance(item, Mapping) else
-               lambda k, d=None, _it=item: getattr(_it, k, d))
+        get = item.get if isinstance(item, Mapping) else lambda k, d=None, _it=item: getattr(_it, k, d)
         body = str(get("body", "") or "")
         title = str(get("title", "") or "")
         crumb = str(get("breadcrumb", "") or "")
         label = f"{title} › {crumb}" if crumb else title
         blocks.append(f"[{i}] {label}\n{body[:900]}")
-        cites.append({"index": i, "chunk_id": get("chunk_id", ""), "title": title,
-                      "breadcrumb": crumb, "source_url": get("source_url", "")})
+        cites.append(
+            {
+                "index": i,
+                "chunk_id": get("chunk_id", ""),
+                "title": title,
+                "breadcrumb": crumb,
+                "source_url": get("source_url", ""),
+            }
+        )
     return "\n\n".join(blocks), cites

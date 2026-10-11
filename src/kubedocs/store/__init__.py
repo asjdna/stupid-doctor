@@ -15,6 +15,7 @@
 还是旧的"变成一个没有任何日志的谜。所以：字面量校验在 `Settings`（启动即失败），
 工厂这里再兜一层（防止有人绕过 Settings 直接构造）。
 """
+
 from __future__ import annotations
 
 from kubedocs.config import Settings

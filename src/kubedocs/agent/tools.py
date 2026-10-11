@@ -15,6 +15,7 @@
 只写"这个工具做什么"会让模型在相似的场景里乱调（例如问诊中途去调挂号）。
 所以 `ToolSpec.when_not` 是必填的——它直接进提示词，是约束模型的主要手段。
 """
+
 from __future__ import annotations
 
 from collections.abc import Callable
@@ -45,8 +46,7 @@ class SearchDocsParams(BaseModel):
 class ListDepartmentsParams(BaseModel):
     """列出可挂号科室。"""
 
-    contains: str = Field(default="", max_length=32,
-                          description="只保留名字里含该字样的科室，留空返回全部")
+    contains: str = Field(default="", max_length=32, description="只保留名字里含该字样的科室，留空返回全部")
 
 
 class GetAvailabilityParams(BaseModel):
@@ -68,8 +68,9 @@ class AskUserParams(BaseModel):
     """向用户追问（人在环路：图会在此挂起）。"""
 
     question: str = Field(min_length=1, max_length=500, description="要问用户的问题")
-    options: list[str] = Field(default_factory=list, max_length=6,
-                               description="可选项；给出选项能显著降低用户的回答成本")
+    options: list[str] = Field(
+        default_factory=list, max_length=6, description="可选项；给出选项能显著降低用户的回答成本"
+    )
 
 
 @dataclass(frozen=True)
@@ -101,9 +102,13 @@ class ToolSpec:
         }
 
     def describe(self) -> dict[str, Any]:
-        return {"name": self.name, "description": self.description,
-                "when_not": self.when_not, "domain": self.domain,
-                "side_effect": self.side_effect}
+        return {
+            "name": self.name,
+            "description": self.description,
+            "when_not": self.when_not,
+            "domain": self.domain,
+            "side_effect": self.side_effect,
+        }
 
 
 class ToolRegistry:
@@ -120,8 +125,7 @@ class ToolRegistry:
         if spec.name in cls._tools:
             raise ValueError(f"工具 {spec.name!r} 已注册，不能重复注册")
         if not spec.when_not:
-            raise ValueError(f"工具 {spec.name!r} 必须声明 when_not："
-                             "只写'做什么'会让模型在相近场景里乱调")
+            raise ValueError(f"工具 {spec.name!r} 必须声明 when_not：只写'做什么'会让模型在相近场景里乱调")
         cls._tools[spec.name] = spec
 
     @classmethod
@@ -140,8 +144,7 @@ class ToolRegistry:
 
     @classmethod
     def schemas(cls, domain: str | None = None) -> list[dict[str, Any]]:
-        specs = ([cls._tools[n] for n in cls.names()] if domain is None
-                 else cls.for_domain(domain))
+        specs = [cls._tools[n] for n in cls.names()] if domain is None else cls.for_domain(domain)
         return [s.schema() for s in specs]
 
     @classmethod

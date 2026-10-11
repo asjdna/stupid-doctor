@@ -15,6 +15,7 @@ BM25 分数与余弦相似度**量纲不同**（前者无上界、随语料长�
 某一路（例如稠密路因模型不可用）返回空时，不能把它的名次算成"全 0 参与融合"，
 否则会把另一路的结果整体稀释。这里只在**有结果的路上**求和。
 """
+
 from __future__ import annotations
 
 from collections.abc import Iterable, Sequence
@@ -30,7 +31,7 @@ class Fused:
 
     key: str
     score: float
-    ranks: dict[str, int]      # 路名 -> 名次（从 1 起）
+    ranks: dict[str, int]  # 路名 -> 名次（从 1 起）
 
 
 def rrf_fuse(
@@ -59,8 +60,7 @@ def rrf_fuse(
             scores[key] = scores.get(key, 0.0) + w / (k + rank)
             ranks.setdefault(key, {})[name] = rank
 
-    out = [Fused(key=key, score=round(score, 6), ranks=ranks.get(key, {}))
-           for key, score in scores.items()]
+    out = [Fused(key=key, score=round(score, 6), ranks=ranks.get(key, {})) for key, score in scores.items()]
     # 同分时按 key 排序，保证**确定性**（否则评测与闸门会随哈希种子抖动）
     out.sort(key=lambda f: (-f.score, f.key))
     return out

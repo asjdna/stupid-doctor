@@ -8,6 +8,7 @@
 把"用户这句话想挂哪个科"交给 agent 的工具调用去决定，是刻意的分层——
 让 NLU 与号源事务各自可测。
 """
+
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -75,15 +76,21 @@ class BookingService:
         return None
 
     # ------------------------------------------------------------------ 取号
-    def book(self, department: str, patient_id: str, *, date: str | None = None,
-             time_slot: str | None = None, patient_name: str = "") -> dict:
+    def book(
+        self,
+        department: str,
+        patient_id: str,
+        *,
+        date: str | None = None,
+        time_slot: str | None = None,
+        patient_name: str = "",
+    ) -> dict:
         """取号。时段缺省时自动挑第一个有余号的时段（少一轮往返）。"""
         dep = self.resolve_department(department)
         slot = time_slot or self.first_available_slot(dep, date)
         if not slot:
             raise BookingError(f"{dep}在 {date or '今天'} 已经没有余号了，建议换日期或科室")
-        return self.provider.book(dep, patient_id, patient_name,
-                                  date=date, time_slot=slot)
+        return self.provider.book(dep, patient_id, patient_name, date=date, time_slot=slot)
 
     def my_appointments(self, patient_id: str, limit: int = 20) -> list[dict]:
         return self.provider.list_appointments(patient_id, limit)
@@ -97,6 +104,8 @@ class BookingService:
 
 def describe_ticket(ticket: dict) -> str:
     """把取号结果渲染成一句人话（agent 回复用）。"""
-    return (f"挂号成功。取号单号 {ticket['ticket_no']}，"
-            f"{ticket['department']} {ticket['date']} {ticket['time']}，"
-            f"排队号 {ticket['queue_no']}，挂号费 {ticket.get('fee', 0)} 元。")
+    return (
+        f"挂号成功。取号单号 {ticket['ticket_no']}，"
+        f"{ticket['department']} {ticket['date']} {ticket['time']}，"
+        f"排队号 {ticket['queue_no']}，挂号费 {ticket.get('fee', 0)} 元。"
+    )

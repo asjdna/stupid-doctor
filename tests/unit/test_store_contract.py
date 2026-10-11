@@ -32,6 +32,7 @@
   真的不可用（没装包 / 文件打不开）时由夹具 `pytest.skip` 并打印原因——
   skip 是显式可见的"没跑过"，而"悄悄从参数里消失"看起来像"这一路根本不需要存在"。
 """
+
 from __future__ import annotations
 
 from collections.abc import Iterator
@@ -76,8 +77,7 @@ _PG_OK, _PG_WHY = _pg_available()
 _MILVUS_OK, _MILVUS_WHY = _milvus_available()
 
 
-@pytest.fixture(params=["sqlite", "sqlite-vec", "milvus"]
-                + (["pgvector"] if _PG_OK else []))
+@pytest.fixture(params=["sqlite", "sqlite-vec", "milvus"] + (["pgvector"] if _PG_OK else []))
 def backend(request: pytest.FixtureRequest) -> str:
     return str(request.param)
 
@@ -86,8 +86,11 @@ def backend(request: pytest.FixtureRequest) -> str:
 def stores(backend: str, tmp_path: Any) -> Iterator[Store]:
     """按后端构造 store：三个本地后端各用一个独立文件，pgvector 用一个独立 schema。"""
     settings = Settings(
-        index_dir=str(tmp_path / "index"), domain="contract",
-        embedding_provider="hashing", embedding_dim=DIM, embedding_model="hashing-test",
+        index_dir=str(tmp_path / "index"),
+        domain="contract",
+        embedding_provider="hashing",
+        embedding_dim=DIM,
+        embedding_model="hashing-test",
         store=backend,  # type: ignore[arg-type]
     )
     if backend == "pgvector":
@@ -95,8 +98,14 @@ def stores(backend: str, tmp_path: Any) -> Iterator[Store]:
 
         schema = f"test_contract_{tmp_path.name[-8:]}"
         store = PgVectorStore(
-            settings.database_url, schema=schema, dim=DIM,
-            embedding_model="hashing-test", domain=schema, pool_min=1, pool_max=2)
+            settings.database_url,
+            schema=schema,
+            dim=DIM,
+            embedding_model="hashing-test",
+            domain=schema,
+            pool_min=1,
+            pool_max=2,
+        )
         store.rebuild_from_scratch()
         try:
             yield store
@@ -111,9 +120,13 @@ def stores(backend: str, tmp_path: Any) -> Iterator[Store]:
         from kubedocs.store.milvus_store import MilvusStore
 
         try:
-            ms = MilvusStore(db_path=settings.sqlite_path, vector_path=settings.vector_path,
-                             dim=DIM, embedding_model="hashing-test",
-                             milvus_path=tmp_path / "milvus" / "contract.db")
+            ms = MilvusStore(
+                db_path=settings.sqlite_path,
+                vector_path=settings.vector_path,
+                dim=DIM,
+                embedding_model="hashing-test",
+                milvus_path=tmp_path / "milvus" / "contract.db",
+            )
         except StoreError as e:
             # 打不开（例如数据目录被另一个进程独占）属于环境原因：skip 并带上原因，
             # 不失败、也不假装跑过。真正的代码缺陷会在这里之外的地方红。
@@ -125,8 +138,12 @@ def stores(backend: str, tmp_path: Any) -> Iterator[Store]:
         return
 
     store_cls = SqliteStore if backend == "sqlite" else SqliteVecStore
-    s = store_cls(db_path=settings.sqlite_path, vector_path=settings.vector_path,
-                  dim=DIM, embedding_model="hashing-test")
+    s = store_cls(
+        db_path=settings.sqlite_path,
+        vector_path=settings.vector_path,
+        dim=DIM,
+        embedding_model="hashing-test",
+    )
     try:
         yield s
     finally:
@@ -254,18 +271,30 @@ def test_upsert_overwrites_and_keeps_vectors_aligned(stores: Store) -> None:
     stores.finalize()
     # 把 beta 整篇换成一个块：新正文 + 正交方向 e4
     new_chunk = ChunkInput(
-        chunk_id="beta::0000", doc_id="beta", ordinal=0, title="beta", breadcrumb="sec",
-        source_url="https://kubernetes.io/docs/beta/", body="uniqueterm zeta",
-        content_hash="h-beta-0-v2", n_chars=18)
-    new_doc = DocInput(doc_id="beta", rel_path="beta.md", title="beta",
-                       source_url="https://kubernetes.io/docs/beta/", content_hash="h-beta-v2")
+        chunk_id="beta::0000",
+        doc_id="beta",
+        ordinal=0,
+        title="beta",
+        breadcrumb="sec",
+        source_url="https://kubernetes.io/docs/beta/",
+        body="uniqueterm zeta",
+        content_hash="h-beta-0-v2",
+        n_chars=18,
+    )
+    new_doc = DocInput(
+        doc_id="beta",
+        rel_path="beta.md",
+        title="beta",
+        source_url="https://kubernetes.io/docs/beta/",
+        content_hash="h-beta-v2",
+    )
     stores.upsert_docs([new_doc], [new_chunk], {"beta::0000": _vec(e=1.0)})
     stores.finalize()
 
     assert stores.dense_search(_vec(e=1.0), 1) == [("beta::0000", 1)]
     assert {c for c, _ in stores.keyword_search("uniqueterm", 5)} == {"beta::0000"}
-    assert stores.keyword_search("crashloopbackoff", 5) == []       # 旧正文已不在索引里
-    assert stores.keyword_search("imagepullbackoff", 5) == []       # 同篇的旧兄弟块也被清掉
+    assert stores.keyword_search("crashloopbackoff", 5) == []  # 旧正文已不在索引里
+    assert stores.keyword_search("imagepullbackoff", 5) == []  # 同篇的旧兄弟块也被清掉
     assert stores.stats().n_chunks == 4
 
 
@@ -285,13 +314,29 @@ def test_delete_then_reinsert_is_consistent(seeded: Store) -> None:
     seeded.delete_docs({"beta.md"})
     seeded.finalize()
     new = ChunkInput(
-        chunk_id="delta::0000", doc_id="delta", ordinal=0, title="delta", breadcrumb="sec",
-        source_url="https://kubernetes.io/docs/delta/", body="deltaterm", content_hash="h-d0",
-        n_chars=9)
+        chunk_id="delta::0000",
+        doc_id="delta",
+        ordinal=0,
+        title="delta",
+        breadcrumb="sec",
+        source_url="https://kubernetes.io/docs/delta/",
+        body="deltaterm",
+        content_hash="h-d0",
+        n_chars=9,
+    )
     seeded.upsert_docs(
-        [DocInput(doc_id="delta", rel_path="delta.md", title="delta",
-                  source_url="https://kubernetes.io/docs/delta/", content_hash="h-delta")],
-        [new], {"delta::0000": _vec(d=1.0)})
+        [
+            DocInput(
+                doc_id="delta",
+                rel_path="delta.md",
+                title="delta",
+                source_url="https://kubernetes.io/docs/delta/",
+                content_hash="h-delta",
+            )
+        ],
+        [new],
+        {"delta::0000": _vec(d=1.0)},
+    )
     seeded.finalize()
     assert seeded.dense_search(_vec(d=1.0), 1) == [("delta::0000", 1)]
     assert seeded.dense_search(_vec(b=1.0), 1)[0][0] == "alpha::0001"
@@ -356,8 +401,13 @@ class TestSqliteVecBackend:
         2MB，不调 cache_size 时每次 KNN 都在穿透页缓存读盘（实测 p50 147ms vs 12ms）。
         它不影响任何正确性断言，所以只能靠这条专门测出来。
         """
-        s = SqliteVecStore(db_path=tmp_path / "c.db", vector_path=tmp_path / "c.npy",
-                           dim=DIM, embedding_model="hashing-test", cache_kib=65536)
+        s = SqliteVecStore(
+            db_path=tmp_path / "c.db",
+            vector_path=tmp_path / "c.npy",
+            dim=DIM,
+            embedding_model="hashing-test",
+            cache_kib=65536,
+        )
         try:
             got = int(s._con.execute("PRAGMA cache_size").fetchone()[0])  # noqa: SLF001
             assert got == -65536, "cache_size 是负值语义（KiB），必须是 -65536"
@@ -370,15 +420,17 @@ class TestSqliteVecBackend:
         这正是"改默认后端后打开旧索引"的第一现场。静默返回空结果会让它
         表现为"检索质量突然崩了"，而不是"你少跑了一步迁移"。
         """
-        legacy = SqliteStore(db_path=tmp_path / "m.db", vector_path=tmp_path / "m.npy",
-                             dim=DIM, embedding_model="hashing-test")
+        legacy = SqliteStore(
+            db_path=tmp_path / "m.db", vector_path=tmp_path / "m.npy", dim=DIM, embedding_model="hashing-test"
+        )
         seed = make_seed()
         legacy.upsert_docs(seed.docs, seed.chunks, seed.vectors)
         legacy.finalize()
         legacy.close()
 
-        vec = SqliteVecStore(db_path=tmp_path / "m.db", vector_path=tmp_path / "m.npy",
-                             dim=DIM, embedding_model="hashing-test")
+        vec = SqliteVecStore(
+            db_path=tmp_path / "m.db", vector_path=tmp_path / "m.npy", dim=DIM, embedding_model="hashing-test"
+        )
         try:
             # 全文路仍然可用（不是把整个索引判死）
             assert vec.keyword_search("kubelet", 5)
@@ -398,14 +450,16 @@ class TestSqliteVecBackend:
 
     def test_adopt_is_idempotent(self, tmp_path: Any) -> None:
         """迁移可以重复跑：结果不变（脚本会重跑，不能越跑越脏）。"""
-        legacy = SqliteStore(db_path=tmp_path / "i.db", vector_path=tmp_path / "i.npy",
-                             dim=DIM, embedding_model="hashing-test")
+        legacy = SqliteStore(
+            db_path=tmp_path / "i.db", vector_path=tmp_path / "i.npy", dim=DIM, embedding_model="hashing-test"
+        )
         seed = make_seed()
         legacy.upsert_docs(seed.docs, seed.chunks, seed.vectors)
         legacy.finalize()
         legacy.close()
-        vec = SqliteVecStore(db_path=tmp_path / "i.db", vector_path=tmp_path / "i.npy",
-                             dim=DIM, embedding_model="hashing-test")
+        vec = SqliteVecStore(
+            db_path=tmp_path / "i.db", vector_path=tmp_path / "i.npy", dim=DIM, embedding_model="hashing-test"
+        )
         try:
             assert vec.adopt_legacy_matrix() == 5
             assert vec.adopt_legacy_matrix() == 5
@@ -417,8 +471,9 @@ class TestSqliteVecBackend:
 
 def legacy_dense(tmp_path: Any) -> list[tuple[str, int]]:
     """用旧实现算一遍向量路 top-2，作为迁移正确性的参照。"""
-    legacy = SqliteStore(db_path=tmp_path / "m.db", vector_path=tmp_path / "m.npy",
-                         dim=DIM, embedding_model="hashing-test")
+    legacy = SqliteStore(
+        db_path=tmp_path / "m.db", vector_path=tmp_path / "m.npy", dim=DIM, embedding_model="hashing-test"
+    )
     try:
         return legacy.dense_search(_vec(a=1.0), 2)
     finally:

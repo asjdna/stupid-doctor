@@ -4,6 +4,7 @@
 重点用例是引用重编号（见 `test_citations_are_renumbered_deduped_and_markers_rewritten`）：
 两个子答案各有局部编号，合并后正文标记必须跟着新编号一起改。
 """
+
 from __future__ import annotations
 
 import re
@@ -38,17 +39,26 @@ LONG_SINGLE = "请详细说明 kubelet 在节点上启动时如何读取配置�
 # --------------------------------------------------------------------------- 测试替身
 def _chunk(cid: str, body: str) -> RetrievedChunk:
     """造一条检索命中。标题/面包屑都带上，方便断言引用内容。"""
-    return RetrievedChunk(chunk_id=cid, doc_id=cid.split("::")[0], ordinal=0,
-                          title=f"文档 {cid}", breadcrumb="小节",
-                          source_url=f"https://kubernetes.io/docs/{cid}", body=body)
+    return RetrievedChunk(
+        chunk_id=cid,
+        doc_id=cid.split("::")[0],
+        ordinal=0,
+        title=f"文档 {cid}",
+        breadcrumb="小节",
+        source_url=f"https://kubernetes.io/docs/{cid}",
+        body=body,
+    )
 
 
 class FakeSearch:
     """假检索器：按 query 回放预置结果，并记录被问过哪些 query。"""
 
-    def __init__(self, table: dict[str, list[RetrievedChunk]] | None = None,
-                 default: list[RetrievedChunk] | None = None,
-                 errors: dict[str, Exception] | None = None) -> None:
+    def __init__(
+        self,
+        table: dict[str, list[RetrievedChunk]] | None = None,
+        default: list[RetrievedChunk] | None = None,
+        errors: dict[str, Exception] | None = None,
+    ) -> None:
         self.table = table or {}
         self.default = default if default is not None else []
         self.errors = errors or {}
@@ -157,22 +167,24 @@ def test_compound_question_decomposes_and_searches_each_sub() -> None:
     """需要分解的复合问题：拆出 2 个子问题、各自检索一次，llm_calls == 2。"""
     subs = ["节点资源不足会导致什么", "调度器配置错误会导致什么"]
     llm = FakeDecomposer(subs=subs, composed="资源不足会驱逐 Pod[1]；调度错误会 Pending[2]。")
-    search = FakeSearch(table={
-        subs[0]: [_chunk("a::0000", "节点资源不足时 kubelet 会驱逐 Pod")],
-        subs[1]: [_chunk("b::0000", "调度器配置错误时 Pod 一直 Pending")],
-    })
+    search = FakeSearch(
+        table={
+            subs[0]: [_chunk("a::0000", "节点资源不足时 kubelet 会驱逐 Pod")],
+            subs[1]: [_chunk("b::0000", "调度器配置错误时 Pod 一直 Pending")],
+        }
+    )
     result = self_ask(COMPOUND, search=search, llm=llm)
 
     assert result.decomposed is True
     assert result.sub_questions == subs
     assert len(result.sub_answers) == 2
-    assert search.queries == subs            # 每个子问题各检索一次
+    assert search.queries == subs  # 每个子问题各检索一次
     assert llm.decompose_calls == 1
     assert llm.compose_calls == 1
     assert result.llm_calls == 2
     assert [c["chunk_id"] for c in result.citations] == ["a::0000", "b::0000"]
     assert _cited_ids(result, result.answer) == ["a::0000", "b::0000"]
-    assert result.notes == []                # 正常路径不该有任何降级记录
+    assert result.notes == []  # 正常路径不该有任何降级记录
 
 
 def test_citations_are_renumbered_deduped_and_markers_rewritten() -> None:
@@ -185,10 +197,12 @@ def test_citations_are_renumbered_deduped_and_markers_rewritten() -> None:
     """
     q1, q2 = "子问题一", "子问题二"
     llm = FakeDecomposer(subs=[q1, q2], composed="结论：B 与 C 都相关[2][3]。")
-    search = FakeSearch(table={
-        q1: [_chunk("A::0000", "A 的正文"), _chunk("B::0000", "B 的正文")],
-        q2: [_chunk("B::0000", "B 的正文"), _chunk("C::0000", "C 的正文")],
-    })
+    search = FakeSearch(
+        table={
+            q1: [_chunk("A::0000", "A 的正文"), _chunk("B::0000", "B 的正文")],
+            q2: [_chunk("B::0000", "B 的正文"), _chunk("C::0000", "C 的正文")],
+        }
+    )
     result = self_ask(COMPOUND, search=search, llm=llm)
 
     # 1) 引用列表：按出现顺序、去重、编号从 1 连续
@@ -203,8 +217,7 @@ def test_citations_are_renumbered_deduped_and_markers_rewritten() -> None:
     # 3) 子答案 2：正文里不能再有 [1]（那是 A），B->[2]、C->[3]
     assert _markers(result.sub_answers[1].answer) == [2, 3]
     assert _cited_ids(result, result.sub_answers[1].answer) == ["B::0000", "C::0000"]
-    assert [str(c["chunk_id"]) for c in result.sub_answers[1].citations] == \
-        ["B::0000", "C::0000"]
+    assert [str(c["chunk_id"]) for c in result.sub_answers[1].citations] == ["B::0000", "C::0000"]
 
     # 4) 最终答案里的 [n] 也必须指向正确来源
     assert _cited_ids(result, result.answer) == ["B::0000", "C::0000"]
@@ -230,17 +243,16 @@ def test_out_of_range_marker_in_composed_answer_is_stripped() -> None:
 # --------------------------------------------------------------------------- 降级
 def test_decompose_failure_degrades_to_direct_search() -> None:
     """llm 抛异常时不崩：退化成"直接检索一次 + 合成"，原因写进 notes。"""
-    llm = FakeDecomposer(decompose_error=RuntimeError("模型超时（测试用）"),
-                         composed="直接回答[1]。")
+    llm = FakeDecomposer(decompose_error=RuntimeError("模型超时（测试用）"), composed="直接回答[1]。")
     search = FakeSearch(default=[_chunk("A::0000", "直接检索到的正文")])
     result = self_ask(COMPOUND, search=search, llm=llm)
 
     assert result.decomposed is False
     assert result.sub_questions == []
     assert result.sub_answers == []
-    assert search.queries == [COMPOUND]      # 只检索一次，且是原问题
-    assert llm.compose_calls == 1            # 依旧给出了答案，没有把异常抛给上层
-    assert result.llm_calls == 1             # 抛异常的分解调用不计入（见 SelfAskResult 文档）
+    assert search.queries == [COMPOUND]  # 只检索一次，且是原问题
+    assert llm.compose_calls == 1  # 依旧给出了答案，没有把异常抛给上层
+    assert result.llm_calls == 1  # 抛异常的分解调用不计入（见 SelfAskResult 文档）
     assert result.answer == "直接回答[1]。"
     assert _cited_ids(result, result.answer) == ["A::0000"]
     assert any("分解失败" in n and "模型超时" in n for n in result.notes)
@@ -254,7 +266,7 @@ def test_compose_failure_falls_back_to_evidence() -> None:
 
     assert result.answer.startswith("[1] 文档 A::0000 › 小节")
     assert "A 的正文" in result.answer
-    assert result.llm_calls == 0             # 唯一一次调用就失败了，成功计数为 0
+    assert result.llm_calls == 0  # 唯一一次调用就失败了，成功计数为 0
     assert any("合成失败" in n for n in result.notes)
 
 
@@ -262,8 +274,9 @@ def test_search_failure_on_one_sub_is_isolated() -> None:
     """单个子问题检索抛异常只让那一路没证据，不影响其它子问题与最终合成。"""
     q1, q2 = "正常子问题", "会炸的子问题"
     llm = FakeDecomposer(subs=[q1, q2], composed="回答[1]。")
-    search = FakeSearch(table={q1: [_chunk("A::0000", "A 的正文")]},
-                        errors={q2: ConnectionError("检索后端不可达（测试用）")})
+    search = FakeSearch(
+        table={q1: [_chunk("A::0000", "A 的正文")]}, errors={q2: ConnectionError("检索后端不可达（测试用）")}
+    )
     result = self_ask(COMPOUND, search=search, llm=llm)
 
     assert result.decomposed is True
@@ -339,7 +352,7 @@ def test_single_sub_question_is_treated_as_undecomposed() -> None:
     assert result.decomposed is False
     assert result.sub_questions == []
     assert search.queries == [COMPOUND]
-    assert result.llm_calls == 2             # 分解成功返回（+1）+ 合成（+1）
+    assert result.llm_calls == 2  # 分解成功返回（+1）+ 合成（+1）
     assert any("不足 2 个子问题" in n for n in result.notes)
 
 
@@ -360,9 +373,9 @@ def test_string_decompose_result_is_not_split_into_characters() -> None:
     search = FakeSearch(default=[_chunk("A::0000", "正文")])
     result = self_ask(COMPOUND, search=search, llm=llm)
 
-    assert result.decomposed is False        # 只有一个子问题 -> 不算分解
+    assert result.decomposed is False  # 只有一个子问题 -> 不算分解
     assert result.sub_questions == []
-    assert search.queries == [COMPOUND]      # 关键：没有把字符串拆成一个个字去检索
+    assert search.queries == [COMPOUND]  # 关键：没有把字符串拆成一个个字去检索
     assert any("字符串" in n for n in result.notes)
 
 
@@ -371,8 +384,17 @@ def test_dict_shaped_search_result_is_tolerated() -> None:
     """检索返回 dict 形状（而非 SearchResult）也能用——内核不认识检索实现。"""
 
     def fake_search(query: str) -> dict[str, object]:
-        return {"results": [{"chunk_id": "A::0000", "title": "标题", "breadcrumb": "小节",
-                             "source_url": "https://example.com/a", "body": "正文"}]}
+        return {
+            "results": [
+                {
+                    "chunk_id": "A::0000",
+                    "title": "标题",
+                    "breadcrumb": "小节",
+                    "source_url": "https://example.com/a",
+                    "body": "正文",
+                }
+            ]
+        }
 
     llm = FakeDecomposer(composed="回答[1]。")
     result = self_ask(SHORT, search=fake_search, llm=llm)
@@ -395,8 +417,18 @@ def test_hit_without_chunk_id_is_skipped_without_shifting_numbering() -> None:
         body = "正文"
 
     def fake_search(query: str) -> dict[str, object]:
-        return {"results": [NoId(), {"chunk_id": "A::0000", "title": "标题", "breadcrumb": "",
-                                     "source_url": "https://example.com/a", "body": "正文"}]}
+        return {
+            "results": [
+                NoId(),
+                {
+                    "chunk_id": "A::0000",
+                    "title": "标题",
+                    "breadcrumb": "",
+                    "source_url": "https://example.com/a",
+                    "body": "正文",
+                },
+            ]
+        }
 
     llm = FakeDecomposer(composed="回答[1]。")
     result = self_ask(SHORT, search=fake_search, llm=llm)

@@ -19,6 +19,7 @@
    注意"真免费"（本地模型的定价就是 0）与"算不出价"是两件事，前者仍然是
    `cost_priced=True`：实测 litellm 1.102.1 对 `ollama/llama3` 正常返回 `0.0`。
 """
+
 from __future__ import annotations
 
 import json
@@ -54,8 +55,7 @@ class LiteLLMToolCaller:
             self._litellm = litellm
         return self._litellm
 
-    def choose(self, messages: list[dict[str, Any]],
-               tools: list[dict[str, Any]]) -> dict[str, Any]:
+    def choose(self, messages: list[dict[str, Any]], tools: list[dict[str, Any]]) -> dict[str, Any]:
         kwargs: dict[str, Any] = {
             "model": self.model,
             "messages": messages,
@@ -84,11 +84,13 @@ class LiteLLMToolCaller:
         self.cost += cost
 
         msg = resp.choices[0].message
-        out: dict[str, Any] = {"content": str(getattr(msg, "content", "") or ""),
-                               "tool_calls": [],
-                               "cost_usd": cost,
-                               "cost_priced": priced}
-        for tc in (getattr(msg, "tool_calls", None) or []):
+        out: dict[str, Any] = {
+            "content": str(getattr(msg, "content", "") or ""),
+            "tool_calls": [],
+            "cost_usd": cost,
+            "cost_priced": priced,
+        }
+        for tc in getattr(msg, "tool_calls", None) or []:
             fn = getattr(tc, "function", None)
             raw = getattr(fn, "arguments", "") or ""
             args: dict[str, Any] = {}
@@ -103,6 +105,5 @@ class LiteLLMToolCaller:
             if parse_error:
                 # 不抛异常：让工具循环把它当"这一步失败"回灌给模型，模型能自己改
                 args = {"__parse_error__": parse_error}
-            out["tool_calls"].append({"name": str(getattr(fn, "name", "")),
-                                      "arguments": args})
+            out["tool_calls"].append({"name": str(getattr(fn, "name", "")), "arguments": args})
         return out

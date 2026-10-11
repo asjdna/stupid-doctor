@@ -3,6 +3,7 @@
 全部用**打桩依赖**（`ClinicDeps` 的每个字段都可注入）：不调模型、不起库、
 秒级完成。内核的价值在于控制流正确，而这些断言恰好就是控制流。
 """
+
 from __future__ import annotations
 
 from typing import Any
@@ -24,10 +25,12 @@ def _book_intent(text: str) -> bool:
     return any(w in text for w in BOOK_WORDS)
 
 
-def _evidence(symptom: str, *, present: bool = True,
-              source: EvidenceSource = EvidenceSource.VOLUNTEERED) -> SymptomEvidence:
-    return SymptomEvidence(symptom=symptom, present=present, source=source, turn=1,
-                           weight=1.0 if present else -0.5)
+def _evidence(
+    symptom: str, *, present: bool = True, source: EvidenceSource = EvidenceSource.VOLUNTEERED
+) -> SymptomEvidence:
+    return SymptomEvidence(
+        symptom=symptom, present=present, source=source, turn=1, weight=1.0 if present else -0.5
+    )
 
 
 def _deps(**over: Any) -> ClinicDeps:
@@ -76,8 +79,7 @@ class TestRedLineForcedEdge:
             asked.append("called")
             return "问点什么"
 
-        agent = ClinicAgent(_deps(check_red_line=lambda text: _FakeHit(),
-                                  next_question=next_q))
+        agent = ClinicAgent(_deps(check_red_line=lambda text: _FakeHit(), next_question=next_q))
         agent.start("我现在胸痛", thread_id="t1")
         assert asked == [], "红线命中后不该再生成追问"
 
@@ -111,8 +113,7 @@ class TestInterruptAndResume:
             rounds.append(text)
             return [_evidence("发热")] if "发热" in text else []
 
-        agent = ClinicAgent(_deps(observe=observe,
-                                  next_question=lambda s, st: "有没有发热？"))
+        agent = ClinicAgent(_deps(observe=observe, next_question=lambda s, st: "有没有发热？"))
         agent.start("我不舒服", thread_id="t1")
         agent.resume("有点发热", thread_id="t1")
         assert rounds == ["我不舒服", "有点发热"]
@@ -139,9 +140,12 @@ class TestInterruptAndResume:
 # ===========================================================================
 class TestBoundedQuestioning:
     def test_stops_when_should_stop_says_so(self):
-        agent = ClinicAgent(_deps(
-            next_question=lambda s, st: "再问一句？",
-            should_stop=lambda scores, turn: (True, "候选已足够集中")))
+        agent = ClinicAgent(
+            _deps(
+                next_question=lambda s, st: "再问一句？",
+                should_stop=lambda scores, turn: (True, "候选已足够集中"),
+            )
+        )
         state = agent.start("我不舒服", thread_id="t1")
         assert state["status"] == "done"
         assert state["stop_reason"] == "候选已足够集中"
@@ -149,9 +153,10 @@ class TestBoundedQuestioning:
 
     def test_stops_at_max_turns_even_if_never_confident(self):
         """永不给"够了"信号时，硬上限必须兜住——否则会变成不肯结束的对话。"""
-        agent = ClinicAgent(_deps(next_question=lambda s, st: "再问一句？",
-                                  should_stop=lambda scores, turn: (False, "")),
-                            max_turns=3)
+        agent = ClinicAgent(
+            _deps(next_question=lambda s, st: "再问一句？", should_stop=lambda scores, turn: (False, "")),
+            max_turns=3,
+        )
         agent.start("我不舒服", thread_id="t1")
         for _ in range(10):
             if agent.pending_question(thread_id="t1") is None:
@@ -182,9 +187,9 @@ class TestBookingBranch:
 
     def test_booking_is_not_triggered_by_unrelated_text(self):
         called: list[int] = []
-        agent = ClinicAgent(_deps(
-            book=lambda state: called.append(1) or {},
-            next_question=lambda s, st: None))
+        agent = ClinicAgent(
+            _deps(book=lambda state: called.append(1) or {}, next_question=lambda s, st: None)
+        )
         agent.start("我最近有点累", thread_id="t1")
         assert called == []
 
@@ -217,8 +222,11 @@ class TestAnswerPath:
 
     def test_diagnostics_are_accumulated_not_overwritten(self):
         """diagnostics 用 operator.add：多轮的可观测信息不能被后一轮覆盖。"""
-        agent = ClinicAgent(_deps(next_question=lambda s, st: "再问一句？",
-                                  should_stop=lambda scores, turn: (turn >= 2, "够了")))
+        agent = ClinicAgent(
+            _deps(
+                next_question=lambda s, st: "再问一句？", should_stop=lambda scores, turn: (turn >= 2, "够了")
+            )
+        )
         agent.start("我不舒服", thread_id="t1")
         agent.resume("嗯", thread_id="t1")
         state = agent.snapshot(thread_id="t1")
@@ -253,8 +261,7 @@ class TestGraphShape:
         conn = sqlite3.connect(str(db), check_same_thread=False)
         saver = SqliteSaver(conn)
         try:
-            a1 = ClinicAgent(_deps(next_question=lambda s, st: "有没有发热？"),
-                             checkpointer=saver)
+            a1 = ClinicAgent(_deps(next_question=lambda s, st: "有没有发热？"), checkpointer=saver)
             a1.start("我不舒服", thread_id="p1")
             # 新实例、同一份 checkpointer 数据 -> 追问仍在等待回答
             a2 = ClinicAgent(_deps(), checkpointer=saver)

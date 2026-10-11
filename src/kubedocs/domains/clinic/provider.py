@@ -13,6 +13,7 @@ kubedocs 现在提供两个实现，它们的差别只在存储：
 > 契约移植自 clinic 域（原 medical-agent 项目）的 `hospital/provider.py`。
 > 原项目就有"换真实系统只实现这个接口"的说明，说明这个缝当初就是按复用设计的。
 """
+
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
@@ -40,8 +41,7 @@ class AppointmentProvider(ABC):
         """某科室的号源时段：[{time, remaining}, ...]。"""
 
     @abstractmethod
-    def book(self, department: str, patient_id: str, patient_name: str = "",
-             **kwargs: object) -> dict:
+    def book(self, department: str, patient_id: str, patient_name: str = "", **kwargs: object) -> dict:
         """取号，返回 {ticket_no, department, date, time, queue_no, fee}。
 
         实现必须保证**并发下不超卖**——这是号源系统唯一不能妥协的性质。

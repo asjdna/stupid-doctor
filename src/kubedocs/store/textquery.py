@@ -23,6 +23,7 @@ FTS5 的 MATCH 与 Postgres 的 tsquery 各有自己的**元语法**
 用 OR 而不是 AND 是为了**召回**：多词查询在文档里往往并不同现，相关性交给
 BM25 / ts_rank 排序——包含全部词元的文档排名自然会高。
 """
+
 from __future__ import annotations
 
 import re
@@ -31,13 +32,61 @@ import re
 TOKEN_RE = re.compile(r"\w+", re.UNICODE)
 
 # 只清掉功能词。不做词形还原——那是 FTS5 的 porter / Postgres 的 english 配置的职责。
-STOPWORDS = frozenset({
-    "a", "an", "and", "are", "as", "at", "be", "by", "can", "do", "does", "for", "from",
-    "how", "i", "if", "in", "into", "is", "it", "its", "me", "my", "not", "of", "on",
-    "or", "that", "the", "their", "then", "there", "these", "this", "to", "up", "use",
-    "used", "using", "was", "we", "what", "when", "where", "which", "who", "why",
-    "will", "with", "you", "your",
-})
+STOPWORDS = frozenset(
+    {
+        "a",
+        "an",
+        "and",
+        "are",
+        "as",
+        "at",
+        "be",
+        "by",
+        "can",
+        "do",
+        "does",
+        "for",
+        "from",
+        "how",
+        "i",
+        "if",
+        "in",
+        "into",
+        "is",
+        "it",
+        "its",
+        "me",
+        "my",
+        "not",
+        "of",
+        "on",
+        "or",
+        "that",
+        "the",
+        "their",
+        "then",
+        "there",
+        "these",
+        "this",
+        "to",
+        "up",
+        "use",
+        "used",
+        "using",
+        "was",
+        "we",
+        "what",
+        "when",
+        "where",
+        "which",
+        "who",
+        "why",
+        "will",
+        "with",
+        "you",
+        "your",
+    }
+)
 
 
 def query_tokens(query: str) -> list[str]:

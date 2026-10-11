@@ -24,6 +24,7 @@
 理由见那个常量的说明——一句话是：**"没测"不等于"测了没问题"**，
 否则删掉语料就能让闸门变绿。
 """
+
 from __future__ import annotations
 
 import json
@@ -70,9 +71,15 @@ DEFAULT_TRIAGE_MIN_ACCURACY = 0.60
   （与红线 1.0 的免责声明同一条，见 SECURITY.md 的 S-4）。
 """
 
-REDLINE_CASES = ("redline_trigger", "redline_other", "redline_past",
-                 "redline_negated", "redline_hypothetical", "redline_uncertain",
-                 "safe_normal")
+REDLINE_CASES = (
+    "redline_trigger",
+    "redline_other",
+    "redline_past",
+    "redline_negated",
+    "redline_hypothetical",
+    "redline_uncertain",
+    "safe_normal",
+)
 
 
 @dataclass(frozen=True)
@@ -132,20 +139,24 @@ class ClinicReport:
             "redline": {
                 "recall": round(self.redline_recall, 4),
                 "false_positive_rate": round(self.redline_false_positive_rate, 4),
-                "tp": self.redline_tp, "fn": self.redline_fn,
-                "fp": self.redline_fp, "tn": self.redline_tn,
-                "missed": self.missed, "false_alarms": self.false_alarms,
+                "tp": self.redline_tp,
+                "fn": self.redline_fn,
+                "fp": self.redline_fp,
+                "tn": self.redline_tn,
+                "missed": self.missed,
+                "false_alarms": self.false_alarms,
             },
             "booking": {
                 "accuracy": round(self.booking_accuracy, 4),
-                "correct": self.booking_correct, "total": self.booking_total,
+                "correct": self.booking_correct,
+                "total": self.booking_total,
                 "wrong": self.booking_wrong,
             },
             "triage": {
                 "evaluated": self.triage_evaluated,
-                "accuracy": (None if self.triage_accuracy is None
-                             else round(self.triage_accuracy, 4)),
-                "hit": self.triage_hit, "total": self.triage_total,
+                "accuracy": (None if self.triage_accuracy is None else round(self.triage_accuracy, 4)),
+                "hit": self.triage_hit,
+                "total": self.triage_total,
                 "missed": self.triage_missed,
             },
         }
@@ -159,19 +170,23 @@ def load_clinic_gold(path: Path) -> list[ClinicCase]:
             if not line or line.startswith("#"):
                 continue
             obj = json.loads(line)
-            cases.append(ClinicCase(
-                id=obj["id"], kind=obj.get("kind", ""), text=obj["text"],
-                expect_red_line=obj.get("expect_red_line"),
-                expect_booking=obj.get("expect_booking"),
-                expect_department=obj.get("expect_department", ""),
-                note=obj.get("note", "")))
+            cases.append(
+                ClinicCase(
+                    id=obj["id"],
+                    kind=obj.get("kind", ""),
+                    text=obj["text"],
+                    expect_red_line=obj.get("expect_red_line"),
+                    expect_booking=obj.get("expect_booking"),
+                    expect_department=obj.get("expect_department", ""),
+                    note=obj.get("note", ""),
+                )
+            )
     if not cases:
         raise ValueError(f"{path} 里没有任何用例")
     return cases
 
 
-def evaluate_redline(cases: Sequence[ClinicCase], *,
-                     guard: RiskGuard | None = None) -> ClinicReport:
+def evaluate_redline(cases: Sequence[ClinicCase], *, guard: RiskGuard | None = None) -> ClinicReport:
     """只跑红线（不依赖语料，任何环境都能跑）。"""
     guard = guard or RiskGuard()
     report = ClinicReport()
@@ -193,8 +208,9 @@ def evaluate_redline(cases: Sequence[ClinicCase], *,
     return report
 
 
-def evaluate_triage(cases: Sequence[ClinicCase], *, candidate_fn: Mapping[str, float]
-                    | None = None) -> tuple[int, int, bool, list[str]]:
+def evaluate_triage(
+    cases: Sequence[ClinicCase], *, candidate_fn: Mapping[str, float] | None = None
+) -> tuple[int, int, bool, list[str]]:
     """分诊科室命中：期望科室是否出现在候选前 3。
 
     `candidate_fn` 是"文本 -> {候选: 分数}"；为 None 或空表示**没有语料**，
@@ -213,9 +229,12 @@ def evaluate_triage(cases: Sequence[ClinicCase], *, candidate_fn: Mapping[str, f
     return len(triage), hit, True, missed
 
 
-def gate_failures(report: ClinicReport, *,
-                  fp_limit: float = DEFAULT_FALSE_POSITIVE_LIMIT,
-                  triage_min_accuracy: float = DEFAULT_TRIAGE_MIN_ACCURACY) -> list[str]:
+def gate_failures(
+    report: ClinicReport,
+    *,
+    fp_limit: float = DEFAULT_FALSE_POSITIVE_LIMIT,
+    triage_min_accuracy: float = DEFAULT_TRIAGE_MIN_ACCURACY,
+) -> list[str]:
     """闸门判定：返回失败原因列表（空 = 通过）。
 
     - 红线召回 < 100% → **一定失败**（安全属性，容差为 0）
@@ -233,12 +252,13 @@ def gate_failures(report: ClinicReport, *,
     """
     fails: list[str] = []
     if report.redline_fn:
-        fails.append(f"红线漏报 {report.redline_fn} 条（召回 "
-                     f"{report.redline_recall:.2%}）——安全属性要求 100%，容差为 0")
+        fails.append(
+            f"红线漏报 {report.redline_fn} 条（召回 "
+            f"{report.redline_recall:.2%}）——安全属性要求 100%，容差为 0"
+        )
         fails.extend(f"  漏: {m}" for m in report.missed[:10])
     if report.redline_false_positive_rate > fp_limit:
-        fails.append(f"红线误报率 {report.redline_false_positive_rate:.2%} 超过上限 "
-                     f"{fp_limit:.0%}")
+        fails.append(f"红线误报率 {report.redline_false_positive_rate:.2%} 超过上限 {fp_limit:.0%}")
         fails.extend(f"  误报: {m}" for m in report.false_alarms[:10])
 
     accuracy = report.triage_accuracy

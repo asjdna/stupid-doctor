@@ -7,6 +7,7 @@
     python scripts/demo_clinic_agent.py            # 默认两轮：描述症状 → 要求挂号
     python scripts/demo_clinic_agent.py --turn "我咳嗽三天了，帮我挂呼吸内科"
 """
+
 from __future__ import annotations
 
 import argparse
@@ -36,14 +37,12 @@ def _show(i: int, message: str, turn: object) -> None:
             result = json.dumps(tc.get("result"), ensure_ascii=False, default=str)
             print(f"       ✓ 返回：{result[:180]}")
     print(f"  助手：{getattr(turn, 'text', '')[:400]}")
-    print(f"  （本轮 LLM 调用 {getattr(turn, 'llm_calls', 0)} 次，"
-          f"步数 {getattr(turn, 'steps', 0)}）")
+    print(f"  （本轮 LLM 调用 {getattr(turn, 'llm_calls', 0)} 次，步数 {getattr(turn, 'steps', 0)}）")
 
 
 def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(description="真实 LLM 的工具循环演示")
-    p.add_argument("--turn", action="append", default=[],
-                   help="指定一轮用户消息（可重复）；不给则用默认两轮")
+    p.add_argument("--turn", action="append", default=[], help="指定一轮用户消息（可重复）；不给则用默认两轮")
     args = p.parse_args(argv)
 
     added = load_env_file()
@@ -53,8 +52,7 @@ def main(argv: list[str] | None = None) -> int:
     print(f"密钥：{'已从 .env 载入 ' + str(added) if added else '环境变量中已有'}")
     print(f"可用工具：{[t.name for t in rt.tools]}")
     if not rt.has_llm():
-        print("\n没有可用密钥，无法演示工具循环（这本身就说明产品会走降级路径）",
-              file=sys.stderr)
+        print("\n没有可用密钥，无法演示工具循环（这本身就说明产品会走降级路径）", file=sys.stderr)
         return 3
 
     messages = args.turn or ["我最近老咳嗽，还有点发烧", "帮我挂个号"]
@@ -66,8 +64,7 @@ def main(argv: list[str] | None = None) -> int:
 
     print(f"\n{'=' * 70}")
     print(f"合计 LLM 调用 {total_calls} 次")
-    print("注意：**工具是被模型选中的**——上面的调用顺序不是代码写死的。"
-          "这正是它与确定性流水线的区别。")
+    print("注意：**工具是被模型选中的**——上面的调用顺序不是代码写死的。这正是它与确定性流水线的区别。")
     return 0
 
 

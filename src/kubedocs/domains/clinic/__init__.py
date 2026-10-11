@@ -25,6 +25,7 @@
 零外部导入、判定逻辑未改，仅调整了文档中的路径引用。`provider` / `sqlite_provider` /
 `booking` 保留原有契约与数据库约束，按 kubedocs 的代码约定重写。
 """
+
 from __future__ import annotations
 
 __all__ = [

@@ -67,6 +67,7 @@
 SQL 里的表名一律通过 `sql.Identifier` 注入（见 `_q`），值一律走 `%s` 参数绑定：
 不给自己留"这句是我手拼的、应该安全"的口头承诺。
 """
+
 from __future__ import annotations
 
 import re
@@ -161,8 +162,7 @@ def probe(dsn: str, *, timeout: float = 3.0) -> tuple[bool, str]:
     try:
         with psycopg.connect(dsn, connect_timeout=int(max(1, timeout))) as conn:
             conn.execute("SELECT 1")
-            row = conn.execute(
-                "SELECT 1 FROM pg_available_extensions WHERE name = 'vector'").fetchone()
+            row = conn.execute("SELECT 1 FROM pg_available_extensions WHERE name = 'vector'").fetchone()
     except Exception as e:  # noqa: BLE001 - 探测就是要吞掉一切异常并转成原因字符串
         return False, f"{type(e).__name__}: {e}"
     if row is None:
@@ -173,11 +173,21 @@ def probe(dsn: str, *, timeout: float = 3.0) -> tuple[bool, str]:
 class PgVectorStore:
     """Postgres + pgvector（HNSW）的生产实现。"""
 
-    def __init__(self, dsn: str, *, schema: str, dim: int, embedding_model: str = "",
-                 normalizer: Normalizer | None = None, domain: str = "",
-                 pool_min: int = 1, pool_max: int = 10,
-                 hnsw_m: int = 16, hnsw_ef_construction: int = 64,
-                 hnsw_ef_search: int = 200) -> None:
+    def __init__(
+        self,
+        dsn: str,
+        *,
+        schema: str,
+        dim: int,
+        embedding_model: str = "",
+        normalizer: Normalizer | None = None,
+        domain: str = "",
+        pool_min: int = 1,
+        pool_max: int = 10,
+        hnsw_m: int = 16,
+        hnsw_ef_construction: int = 64,
+        hnsw_ef_search: int = 200,
+    ) -> None:
         """`hnsw_ef_search` 的默认值必须与 `Settings.pg_hnsw_ef_search` **保持一致**：
         两处默认值不同就会出现"直接构造时是 100、走配置时是 200"的双真相，
         而这类差异只会表现为"同一份数据换个入口召回就不一样"。
@@ -195,8 +205,7 @@ class PgVectorStore:
         self.hnsw_ef_construction = hnsw_ef_construction
         self.hnsw_ef_search = hnsw_ef_search
         self._dirty = False
-        self._tbl = {name: sql.Identifier(schema, name)
-                     for name in ("documents", "chunks", "meta")}
+        self._tbl = {name: sql.Identifier(schema, name) for name in ("documents", "chunks", "meta")}
 
         self._register_vector = _import_register_vector()
         try:
@@ -214,7 +223,10 @@ class PgVectorStore:
         # 池只服务查询/写入流量（这也是池该干的事：一次性建表不需要 10 条连接）。
         self._ensure_schema()
         self._pool = ConnectionPool(
-            conninfo=dsn, min_size=pool_min, max_size=pool_max, open=False,
+            conninfo=dsn,
+            min_size=pool_min,
+            max_size=pool_max,
+            open=False,
             configure=self._configure_connection,
             # 数据库不可达时不该让调用方挂到默认的 30s
             timeout=10.0,
@@ -266,15 +278,19 @@ class PgVectorStore:
                         "需要数据库装了 pgvector 且当前角色有权限（compose 里的 "
                         "pgvector/pgvector:pg16 镜像自带该扩展）"
                     ) from e
-                conn.execute(sql.SQL("CREATE SCHEMA IF NOT EXISTS {}").format(
-                    sql.Identifier(self.schema)))
+                conn.execute(sql.SQL("CREATE SCHEMA IF NOT EXISTS {}").format(sql.Identifier(self.schema)))
                 for stmt in _DDL_STATEMENTS:
-                    conn.execute(self._q(
-                        stmt, dim=sql.Literal(int(self.dim)), m=sql.Literal(int(self.hnsw_m)),
-                        efc=sql.Literal(int(self.hnsw_ef_construction))))
-                conn.execute(self._q(
-                    "CREATE TABLE IF NOT EXISTS {meta} "
-                    "(key text PRIMARY KEY, value text NOT NULL)"))
+                    conn.execute(
+                        self._q(
+                            stmt,
+                            dim=sql.Literal(int(self.dim)),
+                            m=sql.Literal(int(self.hnsw_m)),
+                            efc=sql.Literal(int(self.hnsw_ef_construction)),
+                        )
+                    )
+                conn.execute(
+                    self._q("CREATE TABLE IF NOT EXISTS {meta} (key text PRIMARY KEY, value text NOT NULL)")
+                )
                 self._init_meta(conn)
         except StoreError:
             raise
@@ -296,40 +312,47 @@ class PgVectorStore:
             with conn.cursor() as cur:
                 cur.executemany(
                     self._q("INSERT INTO {meta}(key, value) VALUES(%s, %s)"),
-                    [("schema_version", str(PG_SCHEMA_VERSION)),
-                     ("embedding_model", self.embedding_model),
-                     ("embedding_dim", str(self.dim)),
-                     ("normalizer", self.normalizer.name),
-                     ("domain", self.domain),
-                     ("indexed_at", "")],
+                    [
+                        ("schema_version", str(PG_SCHEMA_VERSION)),
+                        ("embedding_model", self.embedding_model),
+                        ("embedding_dim", str(self.dim)),
+                        ("normalizer", self.normalizer.name),
+                        ("domain", self.domain),
+                        ("indexed_at", ""),
+                    ],
                 )
             return
         got = int(rows.get("schema_version", "0"))
         if got != PG_SCHEMA_VERSION:
-            raise StoreError(
-                f"Postgres 索引 schema 版本不符：库里是 {got}，代码要求 {PG_SCHEMA_VERSION}")
+            raise StoreError(f"Postgres 索引 schema 版本不符：库里是 {got}，代码要求 {PG_SCHEMA_VERSION}")
         old_dim = int(rows.get("embedding_dim", "0"))
         if old_dim != self.dim:
             raise StoreError(
                 f"索引向量维度不符：库里是 {old_dim}，当前配置 {self.dim}；"
-                "换了嵌入模型必须重建索引（ingest --rebuild）")
+                "换了嵌入模型必须重建索引（ingest --rebuild）"
+            )
         old_model = rows.get("embedding_model", "")
         if old_model and self.embedding_model and old_model != self.embedding_model:
             raise StoreError(
                 f"索引嵌入模型不符：库里是 {old_model!r}，当前配置 {self.embedding_model!r}；"
-                "不同模型的向量空间不可混用，请重建索引")
+                "不同模型的向量空间不可混用，请重建索引"
+            )
         old_norm = rows.get("normalizer", "")
         if old_norm and old_norm != self.normalizer.name:
             raise StoreError(
                 f"索引归一化器不符：库里是 {old_norm!r}，当前配置 {self.normalizer.name!r}；"
-                "请用 ingest --rebuild 重建索引")
+                "请用 ingest --rebuild 重建索引"
+            )
 
     def _set_meta(self, key: str, value: str) -> None:
         with self._pool.connection() as conn:
             conn.execute(
-                self._q("INSERT INTO {meta}(key, value) VALUES(%s, %s) "
-                        "ON CONFLICT(key) DO UPDATE SET value = EXCLUDED.value"),
-                (key, value))
+                self._q(
+                    "INSERT INTO {meta}(key, value) VALUES(%s, %s) "
+                    "ON CONFLICT(key) DO UPDATE SET value = EXCLUDED.value"
+                ),
+                (key, value),
+            )
 
     def close(self) -> None:
         self._pool.close()
@@ -342,11 +365,13 @@ class PgVectorStore:
 
     # ------------------------------------------------------------------ 读取
     def existing_doc_hashes(self) -> dict[str, str]:
-        return {str(rel): str(h) for rel, h in
-                self._pairs(self._q("SELECT rel_path, content_hash FROM {documents}"))}
+        return {
+            str(rel): str(h)
+            for rel, h in self._pairs(self._q("SELECT rel_path, content_hash FROM {documents}"))
+        }
 
     def existing_doc_ids(self) -> set[str]:
-        return {cid for cid, in self._pairs(self._q("SELECT doc_id FROM {documents}"))}
+        return {cid for (cid,) in self._pairs(self._q("SELECT doc_id FROM {documents}"))}
 
     def _pairs(self, query: sql.Composed, params: tuple[object, ...] = ()) -> list[tuple[Any, ...]]:
         with self._pool.connection() as conn:
@@ -357,9 +382,12 @@ class PgVectorStore:
         if not hashes:
             return {}
         rows = self._pairs(
-            self._q("SELECT DISTINCT ON (content_hash) content_hash, embedding "
-                    "FROM {chunks} WHERE content_hash = ANY(%s) ORDER BY content_hash"),
-            (list(hashes),))
+            self._q(
+                "SELECT DISTINCT ON (content_hash) content_hash, embedding "
+                "FROM {chunks} WHERE content_hash = ANY(%s) ORDER BY content_hash"
+            ),
+            (list(hashes),),
+        )
         return {str(h): self._as_vector(v) for h, v in rows}
 
     @staticmethod
@@ -382,26 +410,33 @@ class PgVectorStore:
         # 请求了但索引里没有的文档返回空串（与 SQLite 侧一致），而不是缺键
         out: dict[str, str] = dict.fromkeys(doc_ids, "")
         rows = self._pairs(
-            self._q("SELECT doc_id, string_agg(body, E'\\n' ORDER BY ordinal) "
-                    "FROM {chunks} WHERE doc_id = ANY(%s) GROUP BY doc_id"),
-            (doc_ids,))
+            self._q(
+                "SELECT doc_id, string_agg(body, E'\\n' ORDER BY ordinal) "
+                "FROM {chunks} WHERE doc_id = ANY(%s) GROUP BY doc_id"
+            ),
+            (doc_ids,),
+        )
         for doc_id, text in rows:
             out[str(doc_id)] = str(text).lower()
         return out
 
     def stats(self) -> StoreStats:
         with self._pool.connection() as conn:
-            n_docs = int(conn.execute(
-                self._q("SELECT COUNT(*) FROM {documents}")).fetchone()[0])
+            n_docs = int(conn.execute(self._q("SELECT COUNT(*) FROM {documents}")).fetchone()[0])
             row = conn.execute(
-                self._q("SELECT COUNT(*) AS n, COALESCE(SUM(n_chars), 0) AS chars "
-                        "FROM {chunks}")).fetchone()
-            n_code = int(conn.execute(
-                self._q("SELECT COUNT(*) FROM {chunks} WHERE body LIKE %s"),
-                ("%```%",)).fetchone()[0])
+                self._q("SELECT COUNT(*) AS n, COALESCE(SUM(n_chars), 0) AS chars FROM {chunks}")
+            ).fetchone()
+            n_code = int(
+                conn.execute(
+                    self._q("SELECT COUNT(*) FROM {chunks} WHERE body LIKE %s"), ("%```%",)
+                ).fetchone()[0]
+            )
             meta = dict(conn.execute(self._q("SELECT key, value FROM {meta}")).fetchall())
         return StoreStats(
-            n_docs=n_docs, n_chunks=int(row[0]), total_chars=int(row[1]), n_with_code=n_code,
+            n_docs=n_docs,
+            n_chunks=int(row[0]),
+            total_chars=int(row[1]),
+            n_with_code=n_code,
             embedding_model=str(meta.get("embedding_model", "")),
             embedding_dim=int(meta.get("embedding_dim", "0")),
             indexed_at=str(meta.get("indexed_at", "")),
@@ -413,25 +448,33 @@ class PgVectorStore:
         if not chunk_ids:
             return {}
         rows = self._pairs(
-            self._q("SELECT chunk_id, doc_id, ordinal, title, breadcrumb, source_url, body "
-                    "FROM {chunks} WHERE chunk_id = ANY(%s)"), (chunk_ids,))
+            self._q(
+                "SELECT chunk_id, doc_id, ordinal, title, breadcrumb, source_url, body "
+                "FROM {chunks} WHERE chunk_id = ANY(%s)"
+            ),
+            (chunk_ids,),
+        )
         out: dict[str, ChunkHit] = {}
         for cid, doc_id, ordinal, title, breadcrumb, url, body in rows:
             out[str(cid)] = ChunkHit(
-                chunk_id=str(cid), doc_id=str(doc_id), ordinal=int(ordinal),
-                title=str(title), breadcrumb=str(breadcrumb), source_url=str(url),
+                chunk_id=str(cid),
+                doc_id=str(doc_id),
+                ordinal=int(ordinal),
+                title=str(title),
+                breadcrumb=str(breadcrumb),
+                source_url=str(url),
                 body=str(body),
             )
         return out
 
     def meta_dump(self) -> dict[str, str]:
-        return {str(k): str(v) for k, v in
-                self._pairs(self._q("SELECT key, value FROM {meta}"))}
+        return {str(k): str(v) for k, v in self._pairs(self._q("SELECT key, value FROM {meta}"))}
 
     def doc_summary(self, limit: int = 20) -> list[dict[str, object]]:
         rows = self._pairs(
-            self._q("SELECT rel_path, n_chunks, updated_at FROM {documents} "
-                    "ORDER BY rel_path LIMIT %s"), (limit,))
+            self._q("SELECT rel_path, n_chunks, updated_at FROM {documents} ORDER BY rel_path LIMIT %s"),
+            (limit,),
+        )
         return [{"rel_path": r[0], "n_chunks": r[1], "updated_at": r[2]} for r in rows]
 
     # ------------------------------------------------------------------ 检索
@@ -447,11 +490,14 @@ class PgVectorStore:
         if not expr or limit <= 0:
             return []
         rows = self._pairs(
-            self._q("SELECT chunk_id FROM {chunks} "
-                    "WHERE tsv @@ to_tsquery('english', %s) "
-                    "ORDER BY ts_rank(%s::float4[], tsv, to_tsquery('english', %s)) DESC, "
-                    "chunk_id LIMIT %s"),
-            (expr, list(_TS_RANK_WEIGHTS), expr, limit))
+            self._q(
+                "SELECT chunk_id FROM {chunks} "
+                "WHERE tsv @@ to_tsquery('english', %s) "
+                "ORDER BY ts_rank(%s::float4[], tsv, to_tsquery('english', %s)) DESC, "
+                "chunk_id LIMIT %s"
+            ),
+            (expr, list(_TS_RANK_WEIGHTS), expr, limit),
+        )
         return [(str(r[0]), i) for i, r in enumerate(rows, start=1)]
 
     def dense_search(self, query_vector: Vector, limit: int) -> list[tuple[str, int]]:
@@ -463,8 +509,8 @@ class PgVectorStore:
             return []
         q = self._as_query_vector(query_vector)
         rows = self._pairs(
-            self._q("SELECT chunk_id FROM {chunks} ORDER BY embedding <=> %s LIMIT %s"),
-            (q, limit))
+            self._q("SELECT chunk_id FROM {chunks} ORDER BY embedding <=> %s LIMIT %s"), (q, limit)
+        )
         return [(str(r[0]), i) for i, r in enumerate(rows, start=1)]
 
     def dense_search_exact(self, query_vector: Vector, limit: int) -> list[tuple[str, int]]:
@@ -480,8 +526,8 @@ class PgVectorStore:
             conn.execute("SET LOCAL enable_indexscan = off")
             conn.execute("SET LOCAL enable_bitmapscan = off")
             rows = conn.execute(
-                self._q("SELECT chunk_id FROM {chunks} ORDER BY embedding <=> %s LIMIT %s"),
-                (q, limit)).fetchall()
+                self._q("SELECT chunk_id FROM {chunks} ORDER BY embedding <=> %s LIMIT %s"), (q, limit)
+            ).fetchall()
         return [(str(r[0]), i) for i, r in enumerate(rows, start=1)]
 
     def _as_query_vector(self, query_vector: Vector) -> np.ndarray:
@@ -491,37 +537,53 @@ class PgVectorStore:
         return np.ascontiguousarray(q, dtype=np.float32)
 
     # ------------------------------------------------------------------ 写入
-    def upsert_docs(self, docs: list[DocInput], chunks: list[ChunkInput],
-                    vectors: dict[str, Vector]) -> None:
+    def upsert_docs(self, docs: list[DocInput], chunks: list[ChunkInput], vectors: dict[str, Vector]) -> None:
         if not docs and not chunks:
             return
         missing = [c.chunk_id for c in chunks if c.chunk_id not in vectors]
         if missing:
             raise MissingVectorError(
                 f"{len(missing)} 个块没有向量（例：{missing[:3]}）——"
-                "插入无向量的块会让向量路静默漏召回，这里直接拒绝")
+                "插入无向量的块会让向量路静默漏召回，这里直接拒绝"
+            )
         now = time.strftime("%Y-%m-%dT%H:%M:%S")
         with self._pool.connection() as conn, conn.transaction():
             for d in docs:
                 # 先删整篇（chunks 上有 ON DELETE CASCADE），再插——覆盖语义与 SQLite 侧一致
-                conn.execute(self._q("DELETE FROM {documents} WHERE doc_id = %s"),
-                             (d.doc_id,))
+                conn.execute(self._q("DELETE FROM {documents} WHERE doc_id = %s"), (d.doc_id,))
                 n_chunks = sum(1 for c in chunks if c.doc_id == d.doc_id)
                 conn.execute(
-                    self._q("INSERT INTO {documents}(doc_id, rel_path, title, source_url, "
-                            "content_hash, n_chunks, updated_at) "
-                            "VALUES(%s, %s, %s, %s, %s, %s, %s)"),
-                    (d.doc_id, d.rel_path, d.title, d.source_url, d.content_hash,
-                     n_chunks, now))
+                    self._q(
+                        "INSERT INTO {documents}(doc_id, rel_path, title, source_url, "
+                        "content_hash, n_chunks, updated_at) "
+                        "VALUES(%s, %s, %s, %s, %s, %s, %s)"
+                    ),
+                    (d.doc_id, d.rel_path, d.title, d.source_url, d.content_hash, n_chunks, now),
+                )
             with conn.cursor() as cur:
                 cur.executemany(
-                    self._q("INSERT INTO {chunks}(chunk_id, doc_id, ordinal, title, breadcrumb, "
-                            "source_url, body, body_normalized, content_hash, n_chars, embedding) "
-                            "VALUES(%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)"),
-                    [(c.chunk_id, c.doc_id, c.ordinal, c.title, c.breadcrumb, c.source_url,
-                      c.body, self.normalizer.index_text(c.body), c.content_hash, c.n_chars,
-                      np.ascontiguousarray(np.asarray(vectors[c.chunk_id], dtype=np.float32)))
-                     for c in chunks])
+                    self._q(
+                        "INSERT INTO {chunks}(chunk_id, doc_id, ordinal, title, breadcrumb, "
+                        "source_url, body, body_normalized, content_hash, n_chars, embedding) "
+                        "VALUES(%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)"
+                    ),
+                    [
+                        (
+                            c.chunk_id,
+                            c.doc_id,
+                            c.ordinal,
+                            c.title,
+                            c.breadcrumb,
+                            c.source_url,
+                            c.body,
+                            self.normalizer.index_text(c.body),
+                            c.content_hash,
+                            c.n_chars,
+                            np.ascontiguousarray(np.asarray(vectors[c.chunk_id], dtype=np.float32)),
+                        )
+                        for c in chunks
+                    ],
+                )
         self._dirty = True
 
     def delete_docs(self, rel_paths: set[str]) -> int:
@@ -530,10 +592,12 @@ class PgVectorStore:
         with self._pool.connection() as conn, conn.transaction():
             rows = conn.execute(
                 self._q("SELECT doc_id, n_chunks FROM {documents} WHERE rel_path = ANY(%s)"),
-                (list(rel_paths),)).fetchall()
+                (list(rel_paths),),
+            ).fetchall()
             if rows:
-                conn.execute(self._q("DELETE FROM {documents} WHERE doc_id = ANY(%s)"),
-                             ([r[0] for r in rows],))
+                conn.execute(
+                    self._q("DELETE FROM {documents} WHERE doc_id = ANY(%s)"), ([r[0] for r in rows],)
+                )
         self._dirty = True
         return int(sum(int(r[1]) for r in rows))
 
@@ -545,9 +609,12 @@ class PgVectorStore:
         """
         with self._pool.connection() as conn:
             conn.execute(
-                self._q("INSERT INTO {meta}(key, value) VALUES('indexed_at', %s) "
-                        "ON CONFLICT(key) DO UPDATE SET value = EXCLUDED.value"),
-                (time.strftime("%Y-%m-%dT%H:%M:%S"),))
+                self._q(
+                    "INSERT INTO {meta}(key, value) VALUES('indexed_at', %s) "
+                    "ON CONFLICT(key) DO UPDATE SET value = EXCLUDED.value"
+                ),
+                (time.strftime("%Y-%m-%dT%H:%M:%S"),),
+            )
             if self._dirty:
                 # GIN / HNSW 索引的统计信息在批量写入后会过期，ANALYZE 让规划器选对计划
                 conn.execute(self._q("ANALYZE {chunks}"))
@@ -570,11 +637,14 @@ class PgVectorStore:
         with self._pool.connection() as conn:
             idx = conn.execute(
                 "SELECT 1 FROM pg_indexes WHERE schemaname = %s AND tablename = 'chunks' "
-                "AND indexname = 'idx_chunks_tsv'", (self.schema,)).fetchone()
+                "AND indexname = 'idx_chunks_tsv'",
+                (self.schema,),
+            ).fetchone()
             if idx is None:
                 return "FAIL: 缺少 GIN 索引 idx_chunks_tsv（全文检索会退化为顺序扫描）"
-            n_null = int(conn.execute(
-                self._q("SELECT COUNT(*) FROM {chunks} WHERE tsv IS NULL")).fetchone()[0])
+            n_null = int(
+                conn.execute(self._q("SELECT COUNT(*) FROM {chunks} WHERE tsv IS NULL")).fetchone()[0]
+            )
         if n_null:
             return f"FAIL: {n_null} 行的 tsv 为空"
         return "ok"
@@ -584,7 +654,9 @@ class PgVectorStore:
         with self._pool.connection() as conn:
             idx = conn.execute(
                 "SELECT 1 FROM pg_indexes WHERE schemaname = %s AND tablename = 'chunks' "
-                "AND indexname = 'idx_chunks_embedding'", (self.schema,)).fetchone()
+                "AND indexname = 'idx_chunks_embedding'",
+                (self.schema,),
+            ).fetchone()
         return "ok" if idx is not None else "FAIL: 缺少 HNSW 索引 idx_chunks_embedding"
 
 
@@ -593,9 +665,7 @@ def _import_register_vector() -> Any:
     try:
         from pgvector.psycopg import register_vector
     except ImportError as e:  # pragma: no cover - 取决于环境
-        raise StoreError(
-            "pgvector 后端需要 pgvector 的 Python 包（pip install pgvector）"
-        ) from e
+        raise StoreError("pgvector 后端需要 pgvector 的 Python 包（pip install pgvector）") from e
     return register_vector
 
 

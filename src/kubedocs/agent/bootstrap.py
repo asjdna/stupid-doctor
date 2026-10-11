@@ -12,6 +12,7 @@
 所以先清掉该域的旧注册再重新注册——因为工具是**闭包捕获了具体 service/retriever 实例**
 的，重新装配必须替换掉旧实例，否则会拿到以前那个已经关闭的号源库。
 """
+
 from __future__ import annotations
 
 import dataclasses
@@ -33,8 +34,7 @@ def unregister_domain(domain: str) -> int:
     return len(names)
 
 
-def register_domain_tools(domain: str, *, service: Any = None,
-                          retriever: Any = None) -> list[ToolSpec]:
+def register_domain_tools(domain: str, *, service: Any = None, retriever: Any = None) -> list[ToolSpec]:
     """装配并注册某个域的工具，返回注册结果。**幂等**。
 
     - `clinic`：号源三件套（列科室 / 查号源 / 取号）+ 检索与引用核对

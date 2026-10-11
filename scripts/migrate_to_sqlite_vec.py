@@ -19,6 +19,7 @@
 
 迁移幂等：每次先清空 `chunks_vec` 再重建，重复跑不会产生重复行。
 """
+
 from __future__ import annotations
 
 import argparse
@@ -38,8 +39,9 @@ EXIT_OK = 0
 EXIT_USER = 1
 
 
-def _verify(store: SqliteVecStore, expected: dict[str, np.ndarray],
-            hashes_of: dict[str, str], sample: int) -> tuple[bool, str]:
+def _verify(
+    store: SqliteVecStore, expected: dict[str, np.ndarray], hashes_of: dict[str, str], sample: int
+) -> tuple[bool, str]:
     """抽样核对：搬运结果必须与矩阵**逐位相等**，不是"差不多"。
 
     走的是公开读取路径（`existing_hash_to_vector`）——顺便证明这条路径能用；
@@ -73,22 +75,26 @@ def main(argv: list[str] | None = None) -> int:
     vec_path = settings.vector_path
     if not vec_path.exists():
         print(f"找不到旧向量矩阵：{vec_path}", file=sys.stderr)
-        print("没有可迁移的向量。若索引本来就是 sqlite-vec 建的，直接跑 ingest 即可。",
-              file=sys.stderr)
+        print("没有可迁移的向量。若索引本来就是 sqlite-vec 建的，直接跑 ingest 即可。", file=sys.stderr)
         return EXIT_USER
 
     store = SqliteVecStore(
-        db_path=settings.sqlite_path, vector_path=vec_path,
-        dim=settings.embedding_dim, embedding_model=settings.effective_embedding_model,
-        normalizer=build_normalizer(settings.normalizer), domain=settings.domain,
+        db_path=settings.sqlite_path,
+        vector_path=vec_path,
+        dim=settings.embedding_dim,
+        embedding_model=settings.effective_embedding_model,
+        normalizer=build_normalizer(settings.normalizer),
+        domain=settings.domain,
     )
     try:
         mat = np.load(vec_path)
         rows = store.doc_summary(limit=10**9)
         _ = rows  # 文档清单只是顺带确认库可读
         with store._lock:  # noqa: SLF001 - 迁移脚本与实现同属存储层，用内部连接读映射
-            pairs = [(r["chunk_id"], int(r["vector_row"]), r["content_hash"]) for r in
-                     store._con.execute("SELECT chunk_id, vector_row, content_hash FROM chunks")]
+            pairs = [
+                (r["chunk_id"], int(r["vector_row"]), r["content_hash"])
+                for r in store._con.execute("SELECT chunk_id, vector_row, content_hash FROM chunks")
+            ]
         expected = {cid: np.asarray(mat[vr], dtype=np.float32) for cid, vr, _ in pairs}
         hashes_of = {cid: h for cid, _, h in pairs}
         print(f"索引：{settings.sqlite_path}")

@@ -2,6 +2,7 @@
 
 全部用打桩 LLM：CI 与单测**不调用真实模型、不花一分钱、不依赖密钥**。
 """
+
 from __future__ import annotations
 
 import json
@@ -37,8 +38,13 @@ class StubLLM:
     既浪费钱，又给了模型凭空作答的机会。
     """
 
-    def __init__(self, text: str = "答案 [1]", cost: float = 0.0,
-                 raises: Exception | None = None, cost_priced: bool = True) -> None:
+    def __init__(
+        self,
+        text: str = "答案 [1]",
+        cost: float = 0.0,
+        raises: Exception | None = None,
+        cost_priced: bool = True,
+    ) -> None:
         self.text = text
         self.cost = cost
         self.raises = raises
@@ -49,16 +55,28 @@ class StubLLM:
         self.calls.append((system, user))
         if self.raises is not None:
             raise self.raises
-        return LLMResult(text=self.text, prompt_tokens=100, completion_tokens=20,
-                         cost_usd=self.cost, cost_priced=self.cost_priced)
+        return LLMResult(
+            text=self.text,
+            prompt_tokens=100,
+            completion_tokens=20,
+            cost_usd=self.cost,
+            cost_priced=self.cost_priced,
+        )
 
 
-def _hit(i: int, title: str = "Doc", body: str = "Body text", crumb: str = "Sec",
-         doc: str | None = None) -> ChunkHit:
+def _hit(
+    i: int, title: str = "Doc", body: str = "Body text", crumb: str = "Sec", doc: str | None = None
+) -> ChunkHit:
     d = doc if doc is not None else f"d{i}"
-    return ChunkHit(chunk_id=f"{d}::{i:04d}", doc_id=d, ordinal=i, title=title,
-                    breadcrumb=crumb, source_url=f"https://kubernetes.io/docs/{d}/",
-                    body=body)
+    return ChunkHit(
+        chunk_id=f"{d}::{i:04d}",
+        doc_id=d,
+        ordinal=i,
+        title=title,
+        breadcrumb=crumb,
+        source_url=f"https://kubernetes.io/docs/{d}/",
+        body=body,
+    )
 
 
 @pytest.fixture
@@ -120,8 +138,12 @@ class TestContextDiversity:
     """
 
     def _hits(self) -> list[ChunkHit]:
-        return [_hit(0, "A", doc="a"), _hit(1, "A", doc="a"), _hit(2, "A", doc="a"),
-                _hit(0, "B", body="other", doc="b")]
+        return [
+            _hit(0, "A", doc="a"),
+            _hit(1, "A", doc="a"),
+            _hit(2, "A", doc="a"),
+            _hit(0, "B", body="other", doc="b"),
+        ]
 
     def test_default_caps_two_per_doc(self):
         ctx, cites = build_context(self._hits())
@@ -140,13 +162,11 @@ class TestContextDiversity:
         """限流再狠也必须留下至少一段：宁可冗余，不可空手。"""
         _ctx, cites = build_context([_hit(0, doc="a"), _hit(1, doc="a")], max_per_doc=1)
         assert len(cites) == 1
-        ctx, cites2 = build_context([_hit(0, doc="a"), _hit(1, doc="a")],
-                                    max_per_doc=1, max_chars=1)
+        ctx, cites2 = build_context([_hit(0, doc="a"), _hit(1, doc="a")], max_per_doc=1, max_chars=1)
         assert ctx and len(cites2) == 1
 
     def test_single_doc_still_gets_capped_in_context(self):
-        ctx, cites = build_context(
-            [_hit(i, "A", doc="a") for i in range(5)], max_per_doc=2)
+        ctx, cites = build_context([_hit(i, "A", doc="a") for i in range(5)], max_per_doc=2)
         assert len(cites) == 2
         assert "[3]" not in ctx
 
@@ -196,13 +216,13 @@ class TestDailyBudget:
     def test_zero_limit_means_unlimited(self, tmp_path: Path):
         b = DailyBudget(tmp_path / "spend.json", 0.0)
         b.record(99.0)
-        b.check()          # 不抛
+        b.check()  # 不抛
 
     def test_corrupt_file_does_not_break_service(self, tmp_path: Path):
         p = tmp_path / "spend.json"
         p.write_text("{not json", encoding="utf-8")
         b = DailyBudget(p, 1.0)
-        assert b.spent_today() == 0.0     # 保守当作没花过，而不是让服务挂掉
+        assert b.spent_today() == 0.0  # 保守当作没花过，而不是让服务挂掉
 
     def test_written_file_is_readable_json(self, tmp_path: Path):
         p = tmp_path / "spend.json"
@@ -223,12 +243,12 @@ class TestUnknownCostIsNotFree:
         b.record(0.0, priced=False)
         assert b.spent_today() == pytest.approx(0.25), "未定价的调用被当成了免费"
         assert b.unpriced_calls_today() == 1
-        assert b.record(0.0, priced=False) == pytest.approx(0.5)   # 逐次累计
+        assert b.record(0.0, priced=False) == pytest.approx(0.5)  # 逐次累计
 
     def test_unpriced_calls_reach_the_limit_and_then_refuse(self, tmp_path: Path):
         b = DailyBudget(tmp_path / "spend.json", 0.5, unpriced_usd=0.25)
         b.record(0.0, priced=False)
-        b.check()                                   # 0.25 < 0.5：还放行
+        b.check()  # 0.25 < 0.5：还放行
         b.record(0.0, priced=False)
         with pytest.raises(BudgetExceeded) as e:
             b.check()
@@ -276,8 +296,7 @@ class _FakeLitellm:
 
     drop_params = True
 
-    def __init__(self, resp: object, *, cost: object = None,
-                 cost_raises: Exception | None = None) -> None:
+    def __init__(self, resp: object, *, cost: object = None, cost_raises: Exception | None = None) -> None:
         self._resp = resp
         self._cost = cost
         self._cost_raises = cost_raises
@@ -294,26 +313,26 @@ class _FakeLitellm:
 
 
 def _fake_response() -> object:
-    return SimpleNamespace(model="deepseek/deepseek-chat",
-                           choices=[SimpleNamespace(
-                               message=SimpleNamespace(content="打桩回答 [1]"))],
-                           usage=SimpleNamespace(prompt_tokens=100,
-                                                 completion_tokens=20))
+    return SimpleNamespace(
+        model="deepseek/deepseek-chat",
+        choices=[SimpleNamespace(message=SimpleNamespace(content="打桩回答 [1]"))],
+        usage=SimpleNamespace(prompt_tokens=100, completion_tokens=20),
+    )
 
 
 class TestRealClientFlagsUnknownPrice:
     """`LiteLLMClient` 必须把"算不出价"**如实标出来**，而不是悄悄记 0。"""
 
-    def _client(self, settings: Settings, fake: _FakeLitellm,
-                monkeypatch: pytest.MonkeyPatch) -> LiteLLMClient:
+    def _client(
+        self, settings: Settings, fake: _FakeLitellm, monkeypatch: pytest.MonkeyPatch
+    ) -> LiteLLMClient:
         monkeypatch.setenv("DEEPSEEK_API_KEY", "sk-test")
         client = LiteLLMClient(settings)
-        client._litellm = fake          # 绕开 import litellm（并避免它去拉价格表）
+        client._litellm = fake  # 绕开 import litellm（并避免它去拉价格表）
         return client
 
     def test_price_map_miss_is_flagged_not_zeroed(self, settings, monkeypatch):
-        fake = _FakeLitellm(_fake_response(),
-                            cost_raises=Exception("This model isn't mapped yet"))
+        fake = _FakeLitellm(_fake_response(), cost_raises=Exception("This model isn't mapped yet"))
         result = self._client(settings, fake, monkeypatch).complete("sys", "user")
         assert result.cost_usd == 0.0
         assert result.cost_priced is False, "算不出价必须标成未定价（否则闸门永远拦不住）"
@@ -361,19 +380,22 @@ class TestApiKeyDetection:
 class StubRetriever:
     def __init__(self, hits: list[ChunkHit], degraded: list[str] | None = None) -> None:
         from kubedocs.retrieve.hybrid import RetrievedChunk, SearchResult
+
         self._result = SearchResult(
             query="q",
             results=[RetrievedChunk.from_hit(h) for h in hits],
             diagnostics={"degraded": degraded or []},
         )
 
-    def search(self, query: str, *, top_k: int | None = None,
-               channels: tuple[str, ...] = ("bm25", "dense")) -> object:
+    def search(
+        self, query: str, *, top_k: int | None = None, channels: tuple[str, ...] = ("bm25", "dense")
+    ) -> object:
         return self._result
 
 
-def _answerer(settings: Settings, hits: list[ChunkHit], llm: StubLLM,
-              degraded: list[str] | None = None) -> Answerer:
+def _answerer(
+    settings: Settings, hits: list[ChunkHit], llm: StubLLM, degraded: list[str] | None = None
+) -> Answerer:
     return Answerer(StubRetriever(hits, degraded), llm, settings)  # type: ignore[arg-type]
 
 
@@ -400,7 +422,7 @@ class TestAnswerer:
         ans = _answerer(settings, [], llm).answer("q")
         assert ans.refused is True
         assert "没有找到" in ans.refusal_reason
-        assert llm.calls == []          # 关键断言：一次都没调用
+        assert llm.calls == []  # 关键断言：一次都没调用
 
     def test_missing_key_degrades_but_still_returns_retrieval(self, settings, monkeypatch):
         monkeypatch.delenv("DEEPSEEK_API_KEY", raising=False)
@@ -483,8 +505,9 @@ class TestAnswerer:
         assert "空内容" in ans.refusal_reason
 
     def test_retrieval_degradation_is_surfaced(self, settings):
-        ans = _answerer(settings, [_hit(1)], StubLLM("ok [1]"),
-                        degraded=["向量路不可用，已降级为纯全文检索：boom"]).answer("q")
+        ans = _answerer(
+            settings, [_hit(1)], StubLLM("ok [1]"), degraded=["向量路不可用，已降级为纯全文检索：boom"]
+        ).answer("q")
         assert any("向量路不可用" in d for d in ans.degraded)
 
     def test_render_includes_answer_and_sources(self, settings):

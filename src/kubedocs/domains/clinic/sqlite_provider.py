@@ -29,6 +29,7 @@
 > 保留其全部约束与理由。改动有两处：① 患者表在本域内自带（原项目挂在 users 上）；
 > ② 触发器的"父行必须存在"兜底保留。
 """
+
 from __future__ import annotations
 
 import secrets
@@ -134,8 +135,7 @@ class SqliteAppointmentProvider(AppointmentProvider):
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self.days_ahead = days_ahead
         self._lock = threading.RLock()
-        self._con = sqlite3.connect(str(self.db_path), check_same_thread=False,
-                                    isolation_level=None)
+        self._con = sqlite3.connect(str(self.db_path), check_same_thread=False, isolation_level=None)
         self._con.row_factory = sqlite3.Row
         self._con.execute("PRAGMA journal_mode=WAL")
         self._con.execute("PRAGMA foreign_keys=ON")
@@ -195,8 +195,9 @@ class SqliteAppointmentProvider(AppointmentProvider):
                 self._con.execute("ROLLBACK")
                 raise
             rows = self._con.execute(
-                "SELECT time_slot, remaining FROM schedules WHERE department=? AND date=? "
-                "ORDER BY id", (dep, day)).fetchall()
+                "SELECT time_slot, remaining FROM schedules WHERE department=? AND date=? ORDER BY id",
+                (dep, day),
+            ).fetchall()
         return [{"time": r["time_slot"], "remaining": r["remaining"]} for r in rows]
 
     def upcoming_dates(self, days: int | None = None) -> list[str]:
@@ -212,8 +213,7 @@ class SqliteAppointmentProvider(AppointmentProvider):
         except ValueError as e:
             raise BookingError(f"日期格式不对：{day!r}（应为 YYYY-MM-DD）") from e
 
-    def book(self, department: str, patient_id: str, patient_name: str = "",
-             **kwargs: object) -> dict:
+    def book(self, department: str, patient_id: str, patient_name: str = "", **kwargs: object) -> dict:
         dep = normalize_department(department)
         if not dep:
             raise BookingError("没能识别出要挂哪个科室")
@@ -233,29 +233,50 @@ class SqliteAppointmentProvider(AppointmentProvider):
                     "UPDATE schedules SET remaining = remaining - 1, "
                     "updated_at = datetime('now','localtime') "
                     "WHERE department=? AND date=? AND time_slot=? AND remaining > 0",
-                    (dep, day, slot))
+                    (dep, day, slot),
+                )
                 if cur.rowcount != 1:
                     raise BookingError(f"{dep}{day}{slot}的号已经挂完了，请换一个时段或日期")
                 row = self._con.execute(
-                    "SELECT id FROM schedules WHERE department=? AND date=? AND time_slot=?",
-                    (dep, day, slot)).fetchone()
-                queue_no = int(self._con.execute(
-                    "SELECT COALESCE(MAX(queue_no), 0) + 1 FROM appointments "
-                    "WHERE department=? AND date=?", (dep, day)).fetchone()[0])
+                    "SELECT id FROM schedules WHERE department=? AND date=? AND time_slot=?", (dep, day, slot)
+                ).fetchone()
+                queue_no = int(
+                    self._con.execute(
+                        "SELECT COALESCE(MAX(queue_no), 0) + 1 FROM appointments "
+                        "WHERE department=? AND date=?",
+                        (dep, day),
+                    ).fetchone()[0]
+                )
                 ticket_no = self._new_ticket_no()
                 self._con.execute(
                     "INSERT INTO appointments(patient_id, schedule_id, department, date,"
                     " time_slot, ticket_no, queue_no, status, created_via_ai)"
                     " VALUES(?,?,?,?,?,?,?,'booked',?)",
-                    (patient_id, row["id"], dep, day, slot, ticket_no, queue_no,
-                     1 if kwargs.get("via_ai", True) else 0))
+                    (
+                        patient_id,
+                        row["id"],
+                        dep,
+                        day,
+                        slot,
+                        ticket_no,
+                        queue_no,
+                        1 if kwargs.get("via_ai", True) else 0,
+                    ),
+                )
                 self._con.execute("COMMIT")
             except BaseException:
                 self._con.execute("ROLLBACK")
                 raise
         code, fee = _department_meta(dep)
-        return {"ticket_no": ticket_no, "department": dep, "department_code": code,
-                "date": day, "time": slot, "queue_no": queue_no, "fee": fee}
+        return {
+            "ticket_no": ticket_no,
+            "department": dep,
+            "department_code": code,
+            "date": day,
+            "time": slot,
+            "queue_no": queue_no,
+            "fee": fee,
+        }
 
     @staticmethod
     def _new_ticket_no() -> str:
@@ -268,7 +289,8 @@ class SqliteAppointmentProvider(AppointmentProvider):
             rows = self._con.execute(
                 "SELECT ticket_no, department, date, time_slot, queue_no, status, created_at"
                 " FROM appointments WHERE patient_id=? ORDER BY id DESC LIMIT ?",
-                (patient_id, limit)).fetchall()
+                (patient_id, limit),
+            ).fetchall()
         return [dict(r) for r in rows]
 
     def cancel(self, ticket_no: str, patient_id: str) -> None:
@@ -277,17 +299,21 @@ class SqliteAppointmentProvider(AppointmentProvider):
             self._con.execute("BEGIN IMMEDIATE")
             try:
                 row = self._con.execute(
-                    "SELECT schedule_id, status FROM appointments "
-                    "WHERE ticket_no=? AND patient_id=?", (ticket_no, patient_id)).fetchone()
+                    "SELECT schedule_id, status FROM appointments WHERE ticket_no=? AND patient_id=?",
+                    (ticket_no, patient_id),
+                ).fetchone()
                 if row is None:
                     raise BookingError(f"没找到取号单 {ticket_no}")
                 if row["status"] == "cancelled":
                     raise BookingError("这个号已经取消过了")
                 self._con.execute(
-                    "UPDATE appointments SET status='cancelled' WHERE ticket_no=?", (ticket_no,))
+                    "UPDATE appointments SET status='cancelled' WHERE ticket_no=?", (ticket_no,)
+                )
                 self._con.execute(
                     "UPDATE schedules SET remaining = MIN(remaining + 1, total), "
-                    "updated_at = datetime('now','localtime') WHERE id=?", (row["schedule_id"],))
+                    "updated_at = datetime('now','localtime') WHERE id=?",
+                    (row["schedule_id"],),
+                )
                 self._con.execute("COMMIT")
             except BaseException:
                 self._con.execute("ROLLBACK")

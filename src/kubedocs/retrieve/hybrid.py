@@ -16,6 +16,7 @@
 BM25 并把原因写进 `diagnostics["degraded"]`。原因很重要——一个静默变成纯关键词
 的 RAG 系统，在评测里表现为"分数莫名其妙掉了几个点"，排查成本极高。
 """
+
 from __future__ import annotations
 
 import time
@@ -50,8 +51,13 @@ class RetrievedChunk:
     @classmethod
     def from_hit(cls, hit: ChunkHit) -> RetrievedChunk:
         return cls(
-            chunk_id=hit.chunk_id, doc_id=hit.doc_id, ordinal=hit.ordinal, title=hit.title,
-            breadcrumb=hit.breadcrumb, source_url=hit.source_url, body=hit.body,
+            chunk_id=hit.chunk_id,
+            doc_id=hit.doc_id,
+            ordinal=hit.ordinal,
+            title=hit.title,
+            breadcrumb=hit.breadcrumb,
+            source_url=hit.source_url,
+            body=hit.body,
         )
 
     def explain(self) -> str:
@@ -79,8 +85,9 @@ class SearchResult:
 class HybridRetriever:
     """检索入口。构造一次可复用（嵌入模型与 SQLite 连接都会被持有）。"""
 
-    def __init__(self, store: Store, embedder: Embedder, settings: Settings,
-                 reranker: Reranker | None = None) -> None:
+    def __init__(
+        self, store: Store, embedder: Embedder, settings: Settings, reranker: Reranker | None = None
+    ) -> None:
         self.store = store
         self.embedder = embedder
         self.settings = settings
@@ -99,7 +106,8 @@ class HybridRetriever:
         t0 = time.perf_counter()
         hits = self.store.keyword_search(query, limit)
         return [cid for cid, _ in hits], {
-            "n": len(hits), "ms": round((time.perf_counter() - t0) * 1000, 1),
+            "n": len(hits),
+            "ms": round((time.perf_counter() - t0) * 1000, 1),
         }
 
     def dense_channel(self, query: str, limit: int) -> tuple[list[str], dict[str, object], str | None]:
@@ -108,16 +116,21 @@ class HybridRetriever:
             qv = self.embedder.encode([query], is_query=True)[0]
         except (EmbedderError, RuntimeError, OSError, ValueError) as e:
             # 嵌入不可用 -> 退化到单路，但把原因带出去
-            return [], {"n": 0, "ms": round((time.perf_counter() - t0) * 1000, 1)}, \
-                f"{type(e).__name__}: {e}"
+            return [], {"n": 0, "ms": round((time.perf_counter() - t0) * 1000, 1)}, f"{type(e).__name__}: {e}"
         hits = self.store.dense_search(qv, limit)
-        return [cid for cid, _ in hits], {
-            "n": len(hits), "ms": round((time.perf_counter() - t0) * 1000, 1),
-        }, None
+        return (
+            [cid for cid, _ in hits],
+            {
+                "n": len(hits),
+                "ms": round((time.perf_counter() - t0) * 1000, 1),
+            },
+            None,
+        )
 
     # ------------------------------------------------------------------ 主流程
-    def search(self, query: str, *, top_k: int | None = None,
-               channels: tuple[str, ...] = ("bm25", "dense")) -> SearchResult:
+    def search(
+        self, query: str, *, top_k: int | None = None, channels: tuple[str, ...] = ("bm25", "dense")
+    ) -> SearchResult:
         """跑一次检索。
 
         `channels` 用来做**单路消融**：只跑一路才能证明"融合确实比单路好"。
@@ -131,32 +144,36 @@ class HybridRetriever:
             return SearchResult(query=query, results=[], diagnostics=diag)
 
         t_all = time.perf_counter()
-        kw_ids, kw_diag = (self.keyword_channel(query, self.settings.fts_candidate_k)
-                           if "bm25" in channels else ([], {"n": 0, "ms": 0.0, "skipped": True}))
+        kw_ids, kw_diag = (
+            self.keyword_channel(query, self.settings.fts_candidate_k)
+            if "bm25" in channels
+            else ([], {"n": 0, "ms": 0.0, "skipped": True})
+        )
         if "dense" in channels:
-            dn_ids, dn_diag, dense_err = self.dense_channel(
-                query, self.settings.dense_candidate_k)
+            dn_ids, dn_diag, dense_err = self.dense_channel(query, self.settings.dense_candidate_k)
         else:
             dn_ids, dn_diag, dense_err = [], {"n": 0, "ms": 0.0, "skipped": True}, None
         diag["channels_detail"] = {"bm25": kw_diag, "dense": dn_diag}
         if dense_err:
             degraded.append(f"向量路不可用，已降级为纯全文检索：{dense_err}")
 
-        fused: list[Fused] = rrf_fuse([("bm25", kw_ids), ("dense", dn_ids)],
-                                      k=self.settings.rrf_k)
+        fused: list[Fused] = rrf_fuse([("bm25", kw_ids), ("dense", dn_ids)], k=self.settings.rrf_k)
         diag["n_fused"] = len(fused)
         diag["overlap"] = len(set(kw_ids) & set(dn_ids))
 
         # 精排前先取更多候选，否则精排只能在 RRF 的 top_k 里重排，收益受限
-        pool = fused[: max(top_k, self.settings.rerank_top_k) * 3] if self.settings.rerank_enable \
+        pool = (
+            fused[: max(top_k, self.settings.rerank_top_k) * 3]
+            if self.settings.rerank_enable
             else fused[:top_k]
+        )
 
         hits = self.store.get_chunks([f.key for f in pool])
         results: list[RetrievedChunk] = []
         for f in pool:
             hit = hits.get(f.key)
             if hit is None:
-                continue          # 索引与结果不一致时宁可少给，也不要给空壳
+                continue  # 索引与结果不一致时宁可少给，也不要给空壳
             rc = RetrievedChunk.from_hit(hit)
             rc.score = f.score
             rc.ranks = f.ranks

@@ -11,6 +11,7 @@
 
 全程纯内存、纯标准库，不联网、不调真实模型（`tie_breaker` 全部是本地假回调）。
 """
+
 from collections.abc import Sequence
 
 import pytest
@@ -228,8 +229,8 @@ def test_选题只数当前候选集里的候选():
     """关联表提到但已被淘汰的候选不计入正例数，否则切分会偏向"已经出局的病"。"""
     candidates = {"甲": 1.0, "乙": 1.0}
     symptom_of = {
-        "症状A": ["甲", "丙", "丁"],   # 正例只有 甲 -> |1-1| = 0
-        "症状B": ["甲", "乙", "丙"],   # 正例 甲,乙 -> |2-0| = 2
+        "症状A": ["甲", "丙", "丁"],  # 正例只有 甲 -> |1-1| = 0
+        "症状B": ["甲", "乙", "丙"],  # 正例 甲,乙 -> |2-0| = 2
     }
     assert next_question(candidates, symptom_of) == "症状A"
 
@@ -293,8 +294,8 @@ def test_并列时才调兜底回调并把胜出者抬到第一():
     links = {"发热": ["甲", "乙"]}
     scores = score([_ev("发热", EvidenceSource.VOLUNTEERED)], links, tie_breaker=breaker)
     assert len(calls) == 1
-    assert "发热" in calls[0][0]              # 上下文摘要里带上已有证据
-    assert set(calls[0][1]) == {"甲", "乙"}   # 并列名单恰好是这两个候选
+    assert "发热" in calls[0][0]  # 上下文摘要里带上已有证据
+    assert set(calls[0][1]) == {"甲", "乙"}  # 并列名单恰好是这两个候选
     assert scores["甲"] > scores["乙"]
     assert rank(scores)[0][0] == "甲"
 
@@ -304,7 +305,7 @@ def test_兜底回调选中本就领先者时不改分数():
     links = {"发热": ["甲", "乙"]}
     scores = score([_ev("发热", EvidenceSource.VOLUNTEERED)], links, tie_breaker=lambda context, tied: "乙")
     assert scores == {"甲": 1.0, "乙": 1.0}
-    assert rank(scores)[0][0] == "乙"        # 同分时的第一由 rank 的确定性定序给出
+    assert rank(scores)[0][0] == "乙"  # 同分时的第一由 rank 的确定性定序给出
 
 
 def test_分差不小就不打扰兜底回调():
@@ -341,7 +342,7 @@ def test_打分明细可读且覆盖证据():
     ]
     text = "\n".join(explain({"甲": 1.0, "乙": -0.5}, evidence))
     assert "甲 +1.00" in text
-    assert text.index("甲") < text.index("乙")     # 高分段在前
+    assert text.index("甲") < text.index("乙")  # 高分段在前
     assert "volunteered" in text and "第 1 轮" in text
     assert "不计入候选打分" in text
 
@@ -353,4 +354,4 @@ def test_空输入的所有入口都有确定行为():
     assert next_question({}, {"发热": ["甲"]}) is None
     assert next_question({"甲": 1.0}, {}) is None
     assert suggest_hypothesis({}, {"发热": ["甲"]}) is None
-    assert explain({}, [])                        # 至少一行说明，不返回空列表让调用方去猜
+    assert explain({}, [])  # 至少一行说明，不返回空列表让调用方去猜

@@ -36,6 +36,7 @@ roadmap 上——本机实测 `EXPLAIN QUERY PLAN` 也确认是 `SCAN ... VIRTUA
 4. **不一致就报错，不静默**：块表与向量表行数不一致时，向量路直接抛
    `StoreError` 并给出可执行的修复命令；全文路仍然可用。
 """
+
 from __future__ import annotations
 
 import re
@@ -58,9 +59,11 @@ _BLOB_DTYPE = np.dtype("<f4")
 # 从虚表 DDL 里读回声明维度：`embedding float[384] distance_metric=cosine`
 _DIM_RE = re.compile(r"embedding\s+float\s*\[\s*(\d+)\s*\]")
 
-_MIGRATE_HINT = ("请先迁移旧索引（不重新编码）："
-                 "`python scripts/migrate_to_sqlite_vec.py`，"
-                 "或用 `python -m kubedocs.cli ingest --rebuild` 全量重建")
+_MIGRATE_HINT = (
+    "请先迁移旧索引（不重新编码）："
+    "`python scripts/migrate_to_sqlite_vec.py`，"
+    "或用 `python -m kubedocs.cli ingest --rebuild` 全量重建"
+)
 
 
 def _sql(template: str, **parts: object) -> str:
@@ -83,13 +86,27 @@ def _marks(n: int) -> str:
 class SqliteVecStore(SqliteStore):
     """SQLite（FTS5）+ sqlite-vec 向量索引。`Store` 协议的本地默认实现。"""
 
-    def __init__(self, db_path: str | Path, vector_path: str | Path, *, dim: int,
-                 embedding_model: str = "", normalizer: Normalizer | None = None,
-                 domain: str = "", cache_kib: int = 131072) -> None:
+    def __init__(
+        self,
+        db_path: str | Path,
+        vector_path: str | Path,
+        *,
+        dim: int,
+        embedding_model: str = "",
+        normalizer: Normalizer | None = None,
+        domain: str = "",
+        cache_kib: int = 131072,
+    ) -> None:
         # `vector_path` 只是**旧实现的侧车矩阵位置**，本实现不读也不写它；
         # 仅用于"迁移旧索引"时定位那个文件，以及告诉用户它已经不需要了。
-        super().__init__(db_path, vector_path, dim=dim, embedding_model=embedding_model,
-                         normalizer=normalizer, domain=domain)
+        super().__init__(
+            db_path,
+            vector_path,
+            dim=dim,
+            embedding_model=embedding_model,
+            normalizer=normalizer,
+            domain=domain,
+        )
         # 页缓存必须按向量表大小调大。实测（18861×384，向量表 29MB，同一台机器）：
         #   默认 2MB 缓存   KNN top10 p50 66~147ms   ← 每次查询都在穿透页缓存读盘
         #   128MB 缓存      KNN top10 p50 12.0ms
@@ -140,11 +157,12 @@ class SqliteVecStore(SqliteStore):
             "CREATE VIRTUAL TABLE IF NOT EXISTS {tbl} USING vec0("
             "chunk_id text primary key, "
             "embedding float[{dim}] distance_metric=cosine)",
-            tbl=VEC_TABLE, dim=int(self.dim))
+            tbl=VEC_TABLE,
+            dim=int(self.dim),
+        )
         with self._lock:
             self._con.execute(ddl)
-            row = self._con.execute(
-                "SELECT sql FROM sqlite_master WHERE name = ?", (VEC_TABLE,)).fetchone()
+            row = self._con.execute("SELECT sql FROM sqlite_master WHERE name = ?", (VEC_TABLE,)).fetchone()
         declared = row["sql"] if row is not None else ""
         m = _DIM_RE.search(declared or "")
         if m is None:  # pragma: no cover - 只可能在扩展行为变化时发生
@@ -172,13 +190,11 @@ class SqliteVecStore(SqliteStore):
         """核对向量表与块表行数是否一致（不一致时向量路必须报错而不是少召回）。"""
         with self._lock:
             n_chunks = int(self._con.execute("SELECT COUNT(*) FROM chunks").fetchone()[0])
-            n_vec = int(self._con.execute(
-                _sql("SELECT COUNT(*) FROM {tbl}", tbl=VEC_TABLE)).fetchone()[0])
+            n_vec = int(self._con.execute(_sql("SELECT COUNT(*) FROM {tbl}", tbl=VEC_TABLE)).fetchone()[0])
         self._vec_error: str | None = None
         if n_chunks != n_vec:
-            self._vec_error = (
-                f"向量索引与块表不一致：块 {n_chunks} 行，向量 {n_vec} 行。"
-                + (_MIGRATE_HINT if n_vec == 0 else "请重建索引（ingest --rebuild）")
+            self._vec_error = f"向量索引与块表不一致：块 {n_chunks} 行，向量 {n_vec} 行。" + (
+                _MIGRATE_HINT if n_vec == 0 else "请重建索引（ingest --rebuild）"
             )
 
     def close(self) -> None:
@@ -186,8 +202,9 @@ class SqliteVecStore(SqliteStore):
             self._con.close()
 
     # ------------------------------------------------------------------ 写入
-    def _index_chunk_vectors(self, con: sqlite3.Connection, chunks: list[ChunkInput],
-                             vectors: dict[str, Vector]) -> None:
+    def _index_chunk_vectors(
+        self, con: sqlite3.Connection, chunks: list[ChunkInput], vectors: dict[str, Vector]
+    ) -> None:
         """把本批向量写进 vec0 表——与块行同一事务，不存在中间态。
 
         为什么用 `ndarray.tobytes()` 而不是 `sqlite_vec.serialize_float32()`：
@@ -197,23 +214,23 @@ class SqliteVecStore(SqliteStore):
         """
         if not chunks:
             return
-        rows = [
-            (c.chunk_id, np.asarray(vectors[c.chunk_id], dtype=_BLOB_DTYPE).tobytes())
-            for c in chunks
-        ]
-        con.executemany(_sql(
-            "INSERT INTO {tbl}(chunk_id, embedding) VALUES(?, ?)", tbl=VEC_TABLE), rows)
+        rows = [(c.chunk_id, np.asarray(vectors[c.chunk_id], dtype=_BLOB_DTYPE).tobytes()) for c in chunks]
+        con.executemany(_sql("INSERT INTO {tbl}(chunk_id, embedding) VALUES(?, ?)", tbl=VEC_TABLE), rows)
 
     def _drop_doc_chunks(self, con: sqlite3.Connection, doc_id: str) -> int:
         """删一篇文档的块：**先删向量行再删块行**（顺序反了就找不回 chunk_id 了）。"""
         with self._lock:
-            ids = [r["chunk_id"] for r in
-                   con.execute("SELECT chunk_id FROM chunks WHERE doc_id = ?", (doc_id,))]
+            ids = [
+                r["chunk_id"] for r in con.execute("SELECT chunk_id FROM chunks WHERE doc_id = ?", (doc_id,))
+            ]
         for i in range(0, len(ids), 400):
-            batch = ids[i:i + 400]
-            con.execute(_sql(
-                "DELETE FROM {tbl} WHERE chunk_id IN ({marks})",
-                tbl=VEC_TABLE, marks=_marks(len(batch))), batch)
+            batch = ids[i : i + 400]
+            con.execute(
+                _sql(
+                    "DELETE FROM {tbl} WHERE chunk_id IN ({marks})", tbl=VEC_TABLE, marks=_marks(len(batch))
+                ),
+                batch,
+            )
         return super()._drop_doc_chunks(con, doc_id)
 
     def finalize(self) -> None:
@@ -254,13 +271,17 @@ class SqliteVecStore(SqliteStore):
         items = list(hashes)
         with self._lock:
             for i in range(0, len(items), 400):
-                batch = items[i:i + 400]
+                batch = items[i : i + 400]
                 marks = ",".join("?" * len(batch))
                 by_id = {
-                    r["chunk_id"]: r["content_hash"] for r in self._con.execute(
-                        _sql("SELECT chunk_id, content_hash FROM chunks "
-                             "WHERE content_hash IN ({marks})", marks=marks),
-                        batch)
+                    r["chunk_id"]: r["content_hash"]
+                    for r in self._con.execute(
+                        _sql(
+                            "SELECT chunk_id, content_hash FROM chunks WHERE content_hash IN ({marks})",
+                            marks=marks,
+                        ),
+                        batch,
+                    )
                 }
                 for blob, content_hash in self._fetch_embeddings(by_id):
                     out[content_hash] = self._as_vector(blob)
@@ -271,10 +292,15 @@ class SqliteVecStore(SqliteStore):
         out: list[tuple[bytes, str]] = []
         ids = list(chunk_ids)
         for i in range(0, len(ids), 400):
-            batch = ids[i:i + 400]
-            rows = self._con.execute(_sql(
-                "SELECT chunk_id, embedding FROM {tbl} WHERE chunk_id IN ({marks})",
-                tbl=VEC_TABLE, marks=_marks(len(batch))), batch).fetchall()
+            batch = ids[i : i + 400]
+            rows = self._con.execute(
+                _sql(
+                    "SELECT chunk_id, embedding FROM {tbl} WHERE chunk_id IN ({marks})",
+                    tbl=VEC_TABLE,
+                    marks=_marks(len(batch)),
+                ),
+                batch,
+            ).fetchall()
             for r in rows:
                 out.append((r["embedding"], chunk_ids[r["chunk_id"]]))
         return out
@@ -301,10 +327,13 @@ class SqliteVecStore(SqliteStore):
             # 刻意**不**先 COUNT(*) 再 min(limit, n)：vec0 的 COUNT 本身就是一次全表扫描，
             # 会让每次查询的开销翻倍（实测 p50 从 12ms 涨到 31ms）。
             # 而 k 大于行数时 vec0 只返回现有的行、不报错——把上限交给它更省一次扫描。
-            rows = self._con.execute(_sql(
-                "SELECT chunk_id FROM {tbl} "
-                "WHERE embedding MATCH ? AND k = ? ORDER BY distance", tbl=VEC_TABLE),
-                (blob, limit)).fetchall()
+            rows = self._con.execute(
+                _sql(
+                    "SELECT chunk_id FROM {tbl} WHERE embedding MATCH ? AND k = ? ORDER BY distance",
+                    tbl=VEC_TABLE,
+                ),
+                (blob, limit),
+            ).fetchall()
         return [(r["chunk_id"], i) for i, r in enumerate(rows, start=1)]
 
     # ------------------------------------------------------------------ 运维
@@ -313,9 +342,12 @@ class SqliteVecStore(SqliteStore):
         if self._vec_error:
             return f"FAIL: {self._vec_error}"
         with self._lock:
-            bad = int(self._con.execute(
-                _sql("SELECT COUNT(*) FROM {tbl} WHERE length(embedding) != ?",
-                     tbl=VEC_TABLE), (self.dim * 4,)).fetchone()[0])
+            bad = int(
+                self._con.execute(
+                    _sql("SELECT COUNT(*) FROM {tbl} WHERE length(embedding) != ?", tbl=VEC_TABLE),
+                    (self.dim * 4,),
+                ).fetchone()[0]
+            )
         if bad:
             return f"FAIL: {bad} 行向量的字节长度不等于 {self.dim}×4"
         return "ok"
@@ -330,18 +362,20 @@ class SqliteVecStore(SqliteStore):
         """
         path = Path(self.vector_path)
         if not path.exists():
-            raise StoreError(
-                f"找不到旧向量矩阵 {path}；没有可迁移的向量，请用 ingest --rebuild 重建")
+            raise StoreError(f"找不到旧向量矩阵 {path}；没有可迁移的向量，请用 ingest --rebuild 重建")
         mat = np.load(path)
         with self._lock:
-            rows = [(r["chunk_id"], int(r["vector_row"])) for r in
-                    self._con.execute("SELECT chunk_id, vector_row FROM chunks")]
+            rows = [
+                (r["chunk_id"], int(r["vector_row"]))
+                for r in self._con.execute("SELECT chunk_id, vector_row FROM chunks")
+            ]
         if mat.ndim != 2 or mat.shape[1] != self.dim:
             raise StoreError(f"{path} 形状 {mat.shape} 与 dim={self.dim} 不符")
         if len(rows) != mat.shape[0]:
             raise StoreError(
                 f"块表 {len(rows)} 行与矩阵 {mat.shape[0]} 行不符——索引本身已不一致，"
-                "请用 ingest --rebuild 重建而不是迁移")
+                "请用 ingest --rebuild 重建而不是迁移"
+            )
         payload: list[tuple[str, bytes]] = []
         for chunk_id, vr in rows:
             if vr < 0 or vr >= mat.shape[0]:
@@ -349,9 +383,9 @@ class SqliteVecStore(SqliteStore):
             payload.append((chunk_id, np.asarray(mat[vr], dtype=_BLOB_DTYPE).tobytes()))
         with self._tx() as con:
             con.execute(_sql("DELETE FROM {tbl}", tbl=VEC_TABLE))
-            con.executemany(_sql(
-                "INSERT INTO {tbl}(chunk_id, embedding) VALUES(?, ?)", tbl=VEC_TABLE),
-                payload)
+            con.executemany(
+                _sql("INSERT INTO {tbl}(chunk_id, embedding) VALUES(?, ?)", tbl=VEC_TABLE), payload
+            )
         self._set_meta("vector_backend", BACKEND)
         self._refresh_vec_ready()
         return len(payload)

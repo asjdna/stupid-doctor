@@ -4,6 +4,7 @@
 都由各域包自报。加第三个域 = 新增一个模块 + 在 `load_all()` 里注册，
 不需要改内核的一行代码。
 """
+
 from __future__ import annotations
 
 from kubedocs.domains.base import DomainPack, DomainRegistry

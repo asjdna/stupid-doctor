@@ -7,6 +7,7 @@
 退出码约定（供 CI 与脚本判断，而不是靠解析 stdout）：
     0 成功      1 参数/用户错误      2 评测闸门不通过      3 索引为空等前置条件不满足
 """
+
 from __future__ import annotations
 
 import argparse
@@ -56,8 +57,11 @@ def open_store(settings: Settings, *, require_data: bool = True) -> Store:
 
     store = from_settings(settings)
     if require_data and store.stats().n_chunks == 0:
-        where = (str(settings.sqlite_path) if settings.store != "pgvector"
-                 else f"Postgres schema {settings.domain}（{settings.database_url}）")
+        where = (
+            str(settings.sqlite_path)
+            if settings.store != "pgvector"
+            else f"Postgres schema {settings.domain}（{settings.database_url}）"
+        )
         print(f"索引为空：{where}\n先跑 `python -m kubedocs.cli ingest`", file=sys.stderr)
         raise SystemExit(EXIT_PRECONDITION)
     return store
@@ -88,13 +92,21 @@ def cmd_ingest(args: argparse.Namespace) -> int:
     store = open_store(settings, require_data=False)
     try:
         embedder = build_embedder(settings)
-        print(f"嵌入器：{settings.embedding_provider} / {getattr(embedder, 'name', '?')} "
-              f"({settings.embedding_dim} 维)")
+        print(
+            f"嵌入器：{settings.embedding_provider} / {getattr(embedder, 'name', '?')} "
+            f"({settings.embedding_dim} 维)"
+        )
         print(f"语料：{settings.corpus_path}")
         print(f"索引：{settings.store} @ {_index_label(settings)}")
-        report = ingest(store, embedder, settings, rebuild=args.rebuild,
-                        limit_files=args.limit_files, batch_files=args.batch_files,
-                        progress=lambda m: print(m, flush=True))
+        report = ingest(
+            store,
+            embedder,
+            settings,
+            rebuild=args.rebuild,
+            limit_files=args.limit_files,
+            batch_files=args.batch_files,
+            progress=lambda m: print(m, flush=True),
+        )
         print("-" * 72)
         print(report.summary())
         for note in report.notes:
@@ -116,17 +128,30 @@ def cmd_search(args: argparse.Namespace) -> int:
         retriever = HybridRetriever(store, build_embedder(settings), settings)
         res = retriever.search(args.query, top_k=args.top_k)
         if args.json:
-            print(json.dumps({
-                "query": res.query,
-                "diagnostics": res.diagnostics,
-                "results": [
-                    {"chunk_id": r.chunk_id, "doc_id": r.doc_id, "title": r.title,
-                     "breadcrumb": r.breadcrumb, "source_url": r.source_url,
-                     "score": r.score, "ranks": r.ranks, "rerank_score": r.rerank_score,
-                     "body": r.body}
-                    for r in res.results
-                ],
-            }, ensure_ascii=False, indent=2))
+            print(
+                json.dumps(
+                    {
+                        "query": res.query,
+                        "diagnostics": res.diagnostics,
+                        "results": [
+                            {
+                                "chunk_id": r.chunk_id,
+                                "doc_id": r.doc_id,
+                                "title": r.title,
+                                "breadcrumb": r.breadcrumb,
+                                "source_url": r.source_url,
+                                "score": r.score,
+                                "ranks": r.ranks,
+                                "rerank_score": r.rerank_score,
+                                "body": r.body,
+                            }
+                            for r in res.results
+                        ],
+                    },
+                    ensure_ascii=False,
+                    indent=2,
+                )
+            )
             return EXIT_OK
         if not res.results:
             print("（无结果）")
@@ -135,11 +160,13 @@ def cmd_search(args: argparse.Namespace) -> int:
             print(f"    {r.source_url}")
             print(f"    {_snippet(r.body, 220)}")
         diag = res.diagnostics
-        print(f"\n--- 诊断：融合池 {diag.get('n_fused')}，两路重合 {diag.get('overlap')}，"
-              f"耗时 {diag.get('total_ms')}ms")
+        print(
+            f"\n--- 诊断：融合池 {diag.get('n_fused')}，两路重合 {diag.get('overlap')}，"
+            f"耗时 {diag.get('total_ms')}ms"
+        )
         for name, d in (diag.get("channels_detail") or {}).items():  # type: ignore[attr-defined]
             print(f"    {name}: {d}")
-        for msg in (diag.get("degraded") or []):  # type: ignore[attr-defined]
+        for msg in diag.get("degraded") or []:  # type: ignore[attr-defined]
             print(f"    ⚠ {msg}")
         if args.explain:
             print("\n--- 排序解释")
@@ -168,11 +195,22 @@ def cmd_ask(args: argparse.Namespace) -> int:
             print("\n--- 提供给模型的上下文 ---")
             from kubedocs.generate import build_context
             from kubedocs.store.base import ChunkHit
+
             ctx, _ = build_context(
-                [ChunkHit(chunk_id=r.chunk_id, doc_id=r.doc_id, ordinal=r.ordinal,
-                          title=r.title, breadcrumb=r.breadcrumb, source_url=r.source_url,
-                          body=r.body) for r in ans.retrieval.results],
-                max_chars=settings.max_context_chars)
+                [
+                    ChunkHit(
+                        chunk_id=r.chunk_id,
+                        doc_id=r.doc_id,
+                        ordinal=r.ordinal,
+                        title=r.title,
+                        breadcrumb=r.breadcrumb,
+                        source_url=r.source_url,
+                        body=r.body,
+                    )
+                    for r in ans.retrieval.results
+                ],
+                max_chars=settings.max_context_chars,
+            )
             print(ctx)
         return EXIT_OK
     finally:
@@ -216,7 +254,8 @@ def cmd_stats(args: argparse.Namespace) -> int:
             "corpus_dir": str(settings.corpus_path),
             "db": str(settings.sqlite_path),
             "vectors": str(settings.vector_path),
-            "n_docs": st.n_docs, "n_chunks": st.n_chunks,
+            "n_docs": st.n_docs,
+            "n_chunks": st.n_chunks,
             "mean_chars": round(st.mean_chars, 1),
             "n_with_code": st.n_with_code,
             "embedding_model": st.embedding_model,
@@ -295,17 +334,26 @@ def _add_globals(p: argparse.ArgumentParser, default: object) -> None:
     """
     p.add_argument("--index-dir", default=default, help="索引根目录（默认 data/index）")
     p.add_argument("--corpus-dir", default=default, help="语料目录（默认 data/raw/k8s-docs）")
-    p.add_argument("--domain", default=default,
-                   help="域（默认 k8s_docs；可用 `domains` 子命令列出）")
-    p.add_argument("--store", choices=list(BACKENDS), default=default,
-                   help="存储后端（默认 sqlite-vec；sqlite=旧实现，pgvector=生产，"
-                        "milvus=Milvus Lite 本地文件 + HNSW）")
-    p.add_argument("--provider", choices=["bge", "hashing"], default=default,
-                   help="嵌入器（bge=真实向量，hashing=离线降级）")
-    p.add_argument("--hf-endpoint", default=default,
-                   help="模型下载源（受限网络下指向镜像）")
-    p.add_argument("--hf-offline", action="store_true", default=default,
-                   help="模型已缓存时跳过联网校验（受限网络下必需，否则载入会挂死）")
+    p.add_argument("--domain", default=default, help="域（默认 k8s_docs；可用 `domains` 子命令列出）")
+    p.add_argument(
+        "--store",
+        choices=list(BACKENDS),
+        default=default,
+        help="存储后端（默认 sqlite-vec；sqlite=旧实现，pgvector=生产，milvus=Milvus Lite 本地文件 + HNSW）",
+    )
+    p.add_argument(
+        "--provider",
+        choices=["bge", "hashing"],
+        default=default,
+        help="嵌入器（bge=真实向量，hashing=离线降级）",
+    )
+    p.add_argument("--hf-endpoint", default=default, help="模型下载源（受限网络下指向镜像）")
+    p.add_argument(
+        "--hf-offline",
+        action="store_true",
+        default=default,
+        help="模型已缓存时跳过联网校验（受限网络下必需，否则载入会挂死）",
+    )
     p.add_argument("--log-level", default=default, help="日志级别")
 
 
@@ -318,8 +366,8 @@ def build_parser() -> argparse.ArgumentParser:
             "典型流程：\n"
             "  1) python scripts/fetch_corpus.py          # 拉语料（一次就够）\n"
             "  2) python -m kubedocs.cli ingest           # 建索引\n"
-            "  3) python -m kubedocs.cli search \"...\"     # 检索\n"
-            "  4) python -m kubedocs.cli ask \"...\"        # 带引用回答（需 LLM 密钥）\n"
+            '  3) python -m kubedocs.cli search "..."     # 检索\n'
+            '  4) python -m kubedocs.cli ask "..."        # 带引用回答（需 LLM 密钥）\n'
             "  5) python -m kubedocs.cli eval --gate      # 评测并卡闸门\n\n"
             "全局参数（--index-dir/--provider 等）放在子命令前后都可以。\n"
         ),
@@ -329,12 +377,12 @@ def build_parser() -> argparse.ArgumentParser:
     _add_globals(common, argparse.SUPPRESS)
     sub = p.add_subparsers(dest="cmd", required=True)
 
-    pi = sub.add_parser("ingest", help="把语料切块、编码并写入索引（增量）",
-                        parents=[common])
+    pi = sub.add_parser("ingest", help="把语料切块、编码并写入索引（增量）", parents=[common])
     pi.add_argument("--rebuild", action="store_true", help="先清空索引再全量重建")
     pi.add_argument("--limit-files", type=int, default=None, help="只处理前 N 个文件（冒烟用）")
-    pi.add_argument("--batch-files", type=int, default=60,
-                    help="每批提交的文件数（越小越不容易因中断丢工作，默认 60）")
+    pi.add_argument(
+        "--batch-files", type=int, default=60, help="每批提交的文件数（越小越不容易因中断丢工作，默认 60）"
+    )
     pi.set_defaults(func=cmd_ingest)
 
     ps = sub.add_parser("search", help="混合检索", parents=[common])
@@ -344,8 +392,7 @@ def build_parser() -> argparse.ArgumentParser:
     ps.add_argument("--json", action="store_true")
     ps.set_defaults(func=cmd_search)
 
-    pd = sub.add_parser("domains", help="列出可用域（双域平台：内核只认 DomainPack 协议）",
-                        parents=[common])
+    pd = sub.add_parser("domains", help="列出可用域（双域平台：内核只认 DomainPack 协议）", parents=[common])
     pd.add_argument("--json", action="store_true")
     pd.set_defaults(func=cmd_domains)
 
@@ -359,8 +406,7 @@ def build_parser() -> argparse.ArgumentParser:
     pt.add_argument("--json", action="store_true")
     pt.set_defaults(func=cmd_stats)
 
-    pa = sub.add_parser("ask", help="带引用回答（需要 LLM 密钥；无密钥时只返回检索结果）",
-                        parents=[common])
+    pa = sub.add_parser("ask", help="带引用回答（需要 LLM 密钥；无密钥时只返回检索结果）", parents=[common])
     pa.add_argument("question")
     pa.add_argument("--top-k", type=int, default=None)
     pa.add_argument("--show-context", action="store_true", help="打印实际送给模型的上下文")
@@ -373,8 +419,9 @@ def build_parser() -> argparse.ArgumentParser:
     pe.add_argument("--top-k", type=int, default=10)
     pe.add_argument("--gate", action="store_true", help="与冻结基线比较，不达标则退出码 2")
     pe.add_argument("--write-baseline", action="store_true", help="把本次结果写成新基线")
-    pe.add_argument("--allow-corpus-drift", action="store_true",
-                    help="索引规模变化时仍允许与基线比较（默认拒绝）")
+    pe.add_argument(
+        "--allow-corpus-drift", action="store_true", help="索引规模变化时仍允许与基线比较（默认拒绝）"
+    )
     pe.add_argument("--no-ablation", action="store_true", help="跳过单路对照（更快）")
     pe.add_argument("--json", action="store_true")
     pe.set_defaults(func=cmd_eval)
@@ -407,7 +454,16 @@ def main(argv: list[str] | None = None) -> int:
         print("已中断", file=sys.stderr)
         return 130
     if rc == EXIT_OK:
-        print(f"\n完成，用时 {time.perf_counter() - t0:.1f}s")
+        # `--json` 的契约是"stdout 上只有一份机器可读的 JSON"。这条收尾计时是
+        # **人类可读旁白**，因此与 `harness.run_eval` 的 `emit()` 同一约定：`--json`
+        # 时改道 stderr。
+        # 不这么做的后果是实测过的：`eval --json` 的 stdout 是合法 JSON 之后再补一行
+        # 「完成，用时 32.1s」，于是 `json.loads` / `ConvertFrom-Json` 整体报
+        # `Invalid JSON primitive: 成，用时 32.1s`——机器读不到任何东西。
+        # 这不是 eval 独有的：search / ask / stats / docs 的 `--json` 分支都是
+        # `print(json.dumps(...)); return EXIT_OK`，同样会被这行污染。
+        stream = sys.stderr if getattr(args, "json", False) else sys.stdout
+        print(f"\n完成，用时 {time.perf_counter() - t0:.1f}s", file=stream)
     return rc
 
 

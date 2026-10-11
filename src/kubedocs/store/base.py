@@ -10,6 +10,7 @@
 那等于把"可替换"这件事作废。判断标准是"调用方是否真的需要"，
 而不是"这个操作听起来像不像运维"。
 """
+
 from __future__ import annotations
 
 from dataclasses import dataclass, field
@@ -112,8 +113,7 @@ class Store(Protocol):
     def delete_docs(self, rel_paths: set[str]) -> int:
         """按 rel_path 删除整篇（含其所有块、全文索引行与向量索引项）。返回删除的块数。"""
 
-    def upsert_docs(self, docs: list[DocInput], chunks: list[ChunkInput],
-                    vectors: dict[str, Vector]) -> None:
+    def upsert_docs(self, docs: list[DocInput], chunks: list[ChunkInput], vectors: dict[str, Vector]) -> None:
         """写入/覆盖若干文档及其块。同一 doc 的旧块会被先清掉（覆盖语义）。"""
 
     def finalize(self) -> None:
@@ -151,4 +151,3 @@ class Store(Protocol):
 
     def doc_summary(self, limit: int = 20) -> list[dict[str, object]]:
         """按 rel_path 列出文档及其块数（评测的语料指纹用它，全量时传大 limit）。"""
-

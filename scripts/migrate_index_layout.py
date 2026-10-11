@@ -21,6 +21,7 @@ v2 的唯一结构变化是：全文索引从 `chunks.body` 改为 `chunks.body_
 
 退出码：0 成功 / 1 迁移失败 / 3 前置条件不满足。
 """
+
 from __future__ import annotations
 
 import argparse
@@ -104,8 +105,10 @@ def _upgrade_schema(db: Path, dry_run: bool) -> int:
             return 3
 
         if dry_run:
-            print("  [dry-run] 将执行：ADD COLUMN body_normalized / UPDATE = body / "
-                  "DROP+CREATE chunks_fts / FTS 'rebuild' / 写入 schema_version=2")
+            print(
+                "  [dry-run] 将执行：ADD COLUMN body_normalized / UPDATE = body / "
+                "DROP+CREATE chunks_fts / FTS 'rebuild' / 写入 schema_version=2"
+            )
             return 0
 
         cols = _columns(con, "chunks")
@@ -116,11 +119,16 @@ def _upgrade_schema(db: Path, dry_run: bool) -> int:
         con.execute(_V2_FTS)
         # FTS5 外内容表的官方重建指令：从内容表重新生成倒排索引
         con.execute("INSERT INTO chunks_fts(chunks_fts) VALUES('rebuild')")
-        con.execute("INSERT INTO meta(key, value) VALUES('normalizer', 'identity') "
-                    "ON CONFLICT(key) DO UPDATE SET value=excluded.value")
+        con.execute(
+            "INSERT INTO meta(key, value) VALUES('normalizer', 'identity') "
+            "ON CONFLICT(key) DO UPDATE SET value=excluded.value"
+        )
         con.execute("UPDATE meta SET value=? WHERE key='schema_version'", (str(TARGET_VERSION),))
-        con.execute("INSERT INTO meta(key, value) VALUES('schema_version', ?) "
-                    "ON CONFLICT(key) DO UPDATE SET value=excluded.value", (str(TARGET_VERSION),))
+        con.execute(
+            "INSERT INTO meta(key, value) VALUES('schema_version', ?) "
+            "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+            (str(TARGET_VERSION),),
+        )
         con.commit()
         print(f"  ✓ 已升级到 v{_schema_version(con)}")
         return 0
@@ -136,11 +144,9 @@ def _verify(db: Path) -> int:
             return 3
         n_chunks = con.execute("SELECT COUNT(*) FROM chunks").fetchone()[0]
         n_docs = con.execute("SELECT COUNT(*) FROM documents").fetchone()[0]
-        non_empty = con.execute(
-            "SELECT COUNT(*) FROM chunks WHERE body_normalized <> ''").fetchone()[0]
+        non_empty = con.execute("SELECT COUNT(*) FROM chunks WHERE body_normalized <> ''").fetchone()[0]
         fts_n = con.execute("SELECT COUNT(*) FROM chunks_fts").fetchone()[0]
-        print(f"  documents={n_docs} chunks={n_chunks} body_normalized 非空={non_empty} "
-              f"fts 行数={fts_n}")
+        print(f"  documents={n_docs} chunks={n_chunks} body_normalized 非空={non_empty} fts 行数={fts_n}")
         try:
             con.execute("INSERT INTO chunks_fts(chunks_fts) VALUES('integrity-check')")
             print("  FTS 一致性：ok")

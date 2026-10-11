@@ -27,6 +27,7 @@
 
 迁移幂等：每次先 drop 集合再灌，重复跑不会产生重复行。
 """
+
 from __future__ import annotations
 
 import argparse
@@ -47,8 +48,9 @@ EXIT_OK = 0
 EXIT_USER = 1
 
 
-def _verify(store: MilvusStore, mat: np.ndarray, pairs: list[tuple[str, int, str]],
-            sample: int) -> tuple[bool, str]:
+def _verify(
+    store: MilvusStore, mat: np.ndarray, pairs: list[tuple[str, int, str]], sample: int
+) -> tuple[bool, str]:
     """抽样核对：灌进去的向量必须与矩阵**逐位相等**，不是"差不多"。
 
     走的是公开读取路径（`existing_hash_to_vector`），顺便证明那条路径真的能用；
@@ -57,8 +59,7 @@ def _verify(store: MilvusStore, mat: np.ndarray, pairs: list[tuple[str, int, str
     if not pairs:
         return True, "索引为空，无需校验"
     rng = np.random.default_rng(20261008)
-    picks = [pairs[i] for i in rng.choice(len(pairs), size=min(sample, len(pairs)),
-                                          replace=False)]
+    picks = [pairs[i] for i in rng.choice(len(pairs), size=min(sample, len(pairs)), replace=False)]
     wanted = {h for _, _, h in picks}
     got = store.existing_hash_to_vector(wanted)
     missing = wanted - set(got)
@@ -77,20 +78,25 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--milvus-db", default="", help="Milvus 数据文件（默认 <索引目录>/milvus.db）")
     ap.add_argument("--sample", type=int, default=200, help="灌完后抽样的块数")
     ap.add_argument("--check-only", action="store_true", help="只校验，不写入")
-    ap.add_argument("--detach", action="store_true",
-                    help="把索引从 milvus 上摘下来（清空集合与后端标记），之后换回别的后端需 --rebuild")
+    ap.add_argument(
+        "--detach",
+        action="store_true",
+        help="把索引从 milvus 上摘下来（清空集合与后端标记），之后换回别的后端需 --rebuild",
+    )
     args = ap.parse_args(argv)
 
-    over: dict[str, object] = {"index_dir": args.index_dir, "domain": args.domain,
-                               "store": "milvus"}
+    over: dict[str, object] = {"index_dir": args.index_dir, "domain": args.domain, "store": "milvus"}
     if args.milvus_db:
         over["milvus_db"] = args.milvus_db
     settings = Settings(**over)  # type: ignore[arg-type]
 
     store = MilvusStore(
-        db_path=settings.sqlite_path, vector_path=settings.vector_path,
-        dim=settings.embedding_dim, embedding_model=settings.effective_embedding_model,
-        normalizer=build_normalizer(settings.normalizer), domain=settings.domain,
+        db_path=settings.sqlite_path,
+        vector_path=settings.vector_path,
+        dim=settings.embedding_dim,
+        embedding_model=settings.effective_embedding_model,
+        normalizer=build_normalizer(settings.normalizer),
+        domain=settings.domain,
         milvus_path=settings.milvus_path,
         hnsw_m=settings.milvus_hnsw_m,
         hnsw_ef_construction=settings.milvus_hnsw_ef_construction,
@@ -110,9 +116,10 @@ def main(argv: list[str] | None = None) -> int:
             return EXIT_OK
 
         with store._lock:  # noqa: SLF001 - 迁移脚本与实现同属存储层，用内部连接读映射
-            pairs = [(str(r["chunk_id"]), int(r["vector_row"]), str(r["content_hash"]))
-                     for r in store._con.execute(
-                         "SELECT chunk_id, vector_row, content_hash FROM chunks")]
+            pairs = [
+                (str(r["chunk_id"]), int(r["vector_row"]), str(r["content_hash"]))
+                for r in store._con.execute("SELECT chunk_id, vector_row, content_hash FROM chunks")
+            ]
         print(f"块表：{settings.sqlite_path}")
         print(f"向量源：{settings.vector_path}")
         print(f"向量目标：{settings.milvus_path}")

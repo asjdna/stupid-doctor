@@ -19,6 +19,7 @@
 每批 N 个文件就 `upsert + finalize` 一次。好处是内存有界、进度可见，
 且中途失败时**已完成的部分是有效的**（下次接着跑，不会全部重来）。
 """
+
 from __future__ import annotations
 
 import hashlib
@@ -95,17 +96,27 @@ def _rel_posix(path: Path, root: Path) -> str:
 def _chunks_to_inputs(chunks: Iterable[Chunk], doc_id: str) -> list[ChunkInput]:
     return [
         ChunkInput(
-            chunk_id=c.chunk_id, doc_id=doc_id, ordinal=c.index, title=c.title,
-            breadcrumb=" › ".join(c.breadcrumb), source_url=c.source_url,
-            body=c.text, content_hash=c.content_hash, n_chars=len(c.text),
+            chunk_id=c.chunk_id,
+            doc_id=doc_id,
+            ordinal=c.index,
+            title=c.title,
+            breadcrumb=" › ".join(c.breadcrumb),
+            source_url=c.source_url,
+            body=c.text,
+            content_hash=c.content_hash,
+            n_chars=len(c.text),
         )
         for c in chunks
     ]
 
 
 def collect_plan(
-    store: Store, files: list[Path], root: Path, settings: Settings,
-    *, detect_removals: bool = True,
+    store: Store,
+    files: list[Path],
+    root: Path,
+    settings: Settings,
+    *,
+    detect_removals: bool = True,
 ) -> tuple[list[tuple[Path, str]], list[str]]:
     """第一遍：只读文件哈希，判断哪些文件需要重切、哪些文件已从语料消失。
 
@@ -161,11 +172,11 @@ def ingest(
     files = iter_corpus_files(root, limit_files)
     report.files_scanned = len(files)
     if limit_files is not None:
-        report.notes.append(f"limit_files={limit_files}：只处理前 {len(files)} 个文件，"
-                            "不是完整索引，且本次不做删除同步")
+        report.notes.append(
+            f"limit_files={limit_files}：只处理前 {len(files)} 个文件，不是完整索引，且本次不做删除同步"
+        )
 
-    todo, removed = collect_plan(store, files, root, settings,
-                                 detect_removals=limit_files is None)
+    todo, removed = collect_plan(store, files, root, settings, detect_removals=limit_files is None)
     report.files_changed = len(todo)
     report.files_unchanged = report.files_scanned - len(todo)
     report.files_removed = len(removed)
@@ -175,21 +186,25 @@ def ingest(
         report.chunks_removed += store.delete_docs(set(removed))
 
     for start in range(0, len(todo), batch_files):
-        batch = todo[start:start + batch_files]
+        batch = todo[start : start + batch_files]
         docs: list[DocInput] = []
         chunk_inputs: list[ChunkInput] = []
         for path, digest in batch:
             rel = _rel_posix(path, root)
             doc_id = doc_id_from_path(rel)
             chunks = chunk_document(
-                rel, path.read_text(encoding="utf-8", errors="replace"),
-                max_chars=settings.chunk_max_chars, overlap=settings.chunk_overlap_chars,
-                min_chars=settings.chunk_min_chars, url_prefix=settings.docs_url_prefix,
+                rel,
+                path.read_text(encoding="utf-8", errors="replace"),
+                max_chars=settings.chunk_max_chars,
+                overlap=settings.chunk_overlap_chars,
+                min_chars=settings.chunk_min_chars,
+                url_prefix=settings.docs_url_prefix,
             )
             title = chunks[0].title if chunks else doc_id.rsplit("/", 1)[-1]
             url = chunks[0].source_url if chunks else ""
-            docs.append(DocInput(doc_id=doc_id, rel_path=rel, title=title,
-                                 source_url=url, content_hash=digest))
+            docs.append(
+                DocInput(doc_id=doc_id, rel_path=rel, title=title, source_url=url, content_hash=digest)
+            )
             if not chunks:
                 report.files_empty += 1
             chunk_inputs.extend(_chunks_to_inputs(chunks, doc_id))
@@ -199,8 +214,10 @@ def ingest(
         store.finalize()
         report.batches += 1
         report.chunks_written += len(chunk_inputs)
-        log(f"  批 {report.batches}: 文件 {len(docs)}，块 {len(chunk_inputs)}，"
-            f"累计编码 {report.chunks_embedded}")
+        log(
+            f"  批 {report.batches}: 文件 {len(docs)}，块 {len(chunk_inputs)}，"
+            f"累计编码 {report.chunks_embedded}"
+        )
 
     report.elapsed_s = time.perf_counter() - t0
     return report
@@ -214,7 +231,7 @@ def _vectors_for(
     log: Callable[[str], None],
 ) -> dict[str, Vector]:
     """给这批块准备向量：先复用（库内 + 批内），剩下的才编码。"""
-    by_hash: dict[str, str] = {}          # content_hash -> 批内首个 chunk_id
+    by_hash: dict[str, str] = {}  # content_hash -> 批内首个 chunk_id
     for c in chunk_inputs:
         by_hash.setdefault(c.content_hash, c.chunk_id)
 
@@ -249,8 +266,10 @@ def _vectors_for(
         def _report(done: int, total: int, elapsed: float) -> None:
             rate = done / elapsed if elapsed > 0 else 0.0
             eta_min = (total - done) / rate / 60 if rate > 0 else 0.0
-            log(f"    {done}/{total}  {rate:5.1f} 条/s  已用 {elapsed/60:4.1f} 分  "
-                f"本批预计还需 {eta_min:4.1f} 分")
+            log(
+                f"    {done}/{total}  {rate:5.1f} 条/s  已用 {elapsed / 60:4.1f} 分  "
+                f"本批预计还需 {eta_min:4.1f} 分"
+            )
 
         mat = embed_texts(embedder, texts, progress=_report)
         vec_of_hash = {c.content_hash: mat[i] for i, c in enumerate(firsts)}
@@ -262,8 +281,7 @@ def _vectors_for(
     return out
 
 
-def _sanity_check(vectors: dict[str, Vector], chunks: list[ChunkInput],
-                  embedder: Embedder) -> None:
+def _sanity_check(vectors: dict[str, Vector], chunks: list[ChunkInput], embedder: Embedder) -> None:
     """写入前的最后一道关：不放过"零向量"和"未归一化"两种静默退化。
 
     零向量会与所有查询的余弦相似度为 0，于是这些块在向量路永远排最后——

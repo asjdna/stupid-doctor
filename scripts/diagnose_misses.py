@@ -17,6 +17,7 @@
     python scripts/diagnose_misses.py --all           # 全部条目
     python scripts/diagnose_misses.py --top-k 3
 """
+
 from __future__ import annotations
 
 import argparse
@@ -40,8 +41,9 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--index-dir", default=None)
     p.add_argument("--provider", default=None, choices=[None, "bge", "hashing"])
     p.add_argument("--hf-offline", action="store_true")
-    p.add_argument("--judge-k", type=int, default=10,
-                   help="判定命中的 k，必须与评测的 --top-k 一致，否则口径不同")
+    p.add_argument(
+        "--judge-k", type=int, default=10, help="判定命中的 k，必须与评测的 --top-k 一致，否则口径不同"
+    )
     p.add_argument("--show", type=int, default=3, help="每个未命中显示前几条")
     p.add_argument("--all", action="store_true", help="连命中的也一起打印")
     p.add_argument("--json", action="store_true")
@@ -61,12 +63,15 @@ def main(argv: list[str] | None = None) -> int:
         gold_path = REPO_ROOT / gold_path
     rows = load_gold(gold_path)
 
-    store = SqliteStore(db_path=settings.sqlite_path, vector_path=settings.vector_path,
-                        dim=settings.embedding_dim,
-                        embedding_model=settings.effective_embedding_model)
+    store = SqliteStore(
+        db_path=settings.sqlite_path,
+        vector_path=settings.vector_path,
+        dim=settings.embedding_dim,
+        embedding_model=settings.effective_embedding_model,
+    )
     try:
         retriever = HybridRetriever(store, build_embedder(settings), settings)
-        retriever.search("warmup", top_k=1)          # 排除冷启动
+        retriever.search("warmup", top_k=1)  # 排除冷启动
         misses = 0
         for row in rows:
             # 判定用 judge_k，显示只取前 show 条：判定口径必须与评测一致，
@@ -79,10 +84,20 @@ def main(argv: list[str] | None = None) -> int:
             if not hit:
                 misses += 1
             if args.json:
-                print(json.dumps({"id": row.id, "kind": row.kind, "q": row.q,
-                                  "expected": sorted(row.relevant),
-                                  "ranked": ranked, "hit": hit,
-                                  "judge_k": args.judge_k}, ensure_ascii=False))
+                print(
+                    json.dumps(
+                        {
+                            "id": row.id,
+                            "kind": row.kind,
+                            "q": row.q,
+                            "expected": sorted(row.relevant),
+                            "ranked": ranked,
+                            "hit": hit,
+                            "judge_k": args.judge_k,
+                        },
+                        ensure_ascii=False,
+                    )
+                )
                 continue
             flag = "✓" if hit else "✗"
             rank_note = ""
@@ -91,7 +106,7 @@ def main(argv: list[str] | None = None) -> int:
                 rank_note = f"  (名次 {first})"
             print(f"\n{flag} {row.id} [{row.kind}] {row.q}{rank_note}")
             print(f"    标注目标: {', '.join(sorted(row.relevant))}")
-            for i, r in enumerate(res.results[:args.show], 1):
+            for i, r in enumerate(res.results[: args.show], 1):
                 mark = "  <-标注" if r.doc_id in row.relevant else ""
                 print(f"    {i}. {r.doc_id}{mark}")
                 print(f"       {r.title} › {r.breadcrumb}")

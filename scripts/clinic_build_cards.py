@@ -31,6 +31,7 @@
 
 退出码：0 成功 / 3 源目录不可用（含"没指定源目录"）。
 """
+
 from __future__ import annotations
 
 import argparse
@@ -49,8 +50,14 @@ DEFAULT_SOURCE = os.environ.get("KUBEDOCS_CLINIC_SOURCE", "")
 OUT_DIR = REPO_ROOT / "data" / "clinic"
 
 # 每种卡片需要的中间文件；缺任何一个就说明源目录还没构建完
-REQUIRED = ("symptoms.json", "diseases.json", "disease_to_department.json",
-            "symptom_to_diseases.json", "disease_to_drugs.json", "drugs.json")
+REQUIRED = (
+    "symptoms.json",
+    "diseases.json",
+    "disease_to_department.json",
+    "symptom_to_diseases.json",
+    "disease_to_drugs.json",
+    "drugs.json",
+)
 
 
 def _load(src: Path, name: str) -> object:
@@ -94,12 +101,16 @@ def build_symptom_cards(src: Path) -> tuple[list[dict], int]:
                 norm = normalize_department(dep)
                 if norm and norm not in depts:
                     depts.append(norm)
-        cards.append({
-            "kind": "symptom", "key": name,
-            "text": f"{name}。可能相关的疾病：{'、'.join(diseases) or '暂无'}。"
-                    f"建议就诊科室：{'、'.join(depts) or '未标注'}。",
-            "diseases": diseases, "departments": depts,
-        })
+        cards.append(
+            {
+                "kind": "symptom",
+                "key": name,
+                "text": f"{name}。可能相关的疾病：{'、'.join(diseases) or '暂无'}。"
+                f"建议就诊科室：{'、'.join(depts) or '未标注'}。",
+                "diseases": diseases,
+                "departments": depts,
+            }
+        )
     return cards, skipped
 
 
@@ -109,16 +120,25 @@ def build_disease_cards(src: Path) -> tuple[list[dict], int]:
     drug_of = _load(src, "disease_to_drugs.json")
     cards: list[dict] = []
     for name in dis_names:
-        depts = [d for d in (normalize_department(x) for x in
-                             _str_list(dept_of.get(name, []) if isinstance(dept_of, dict) else []))
-                 if d]
+        depts = [
+            d
+            for d in (
+                normalize_department(x)
+                for x in _str_list(dept_of.get(name, []) if isinstance(dept_of, dict) else [])
+            )
+            if d
+        ]
         drugs = _str_list(drug_of.get(name, []) if isinstance(drug_of, dict) else [])[:10]
-        cards.append({
-            "kind": "disease", "key": name,
-            "text": f"{name}。建议就诊科室：{'、'.join(depts) or '未标注'}。"
-                    f"常用药物：{'、'.join(drugs) or '暂无'}。",
-            "departments": depts, "drugs": drugs,
-        })
+        cards.append(
+            {
+                "kind": "disease",
+                "key": name,
+                "text": f"{name}。建议就诊科室：{'、'.join(depts) or '未标注'}。"
+                f"常用药物：{'、'.join(drugs) or '暂无'}。",
+                "departments": depts,
+                "drugs": drugs,
+            }
+        )
     return cards, skipped
 
 
@@ -129,30 +149,38 @@ def build_drug_cards(src: Path) -> tuple[list[dict], int]:
 
 def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(description="重建 clinic 域知识卡片（上游派生语料）")
-    p.add_argument("--source", default=DEFAULT_SOURCE,
-                   help="含 build_knowledge.py 产物的目录（必填，或用环境变量 "
-                        "KUBEDOCS_CLINIC_SOURCE 指定；本脚本不猜机器上的路径）")
+    p.add_argument(
+        "--source",
+        default=DEFAULT_SOURCE,
+        help="含 build_knowledge.py 产物的目录（必填，或用环境变量 "
+        "KUBEDOCS_CLINIC_SOURCE 指定；本脚本不猜机器上的路径）",
+    )
     p.add_argument("--out", default=str(OUT_DIR))
     p.add_argument("--dry-run", action="store_true")
     args = p.parse_args(argv)
 
     if not str(args.source).strip():
-        print("未指定源目录：本脚本不设默认值（它指向另一个项目的产物，写死路径只对"
-              "一台机器成立）。请用 --source <上游产物目录>，或设环境变量 "
-              "KUBEDOCS_CLINIC_SOURCE。\n"
-              "（clinic 域的规则轨不依赖它，问诊/挂号/紧急仍可运行）", file=sys.stderr)
+        print(
+            "未指定源目录：本脚本不设默认值（它指向另一个项目的产物，写死路径只对"
+            "一台机器成立）。请用 --source <上游产物目录>，或设环境变量 "
+            "KUBEDOCS_CLINIC_SOURCE。\n"
+            "（clinic 域的规则轨不依赖它，问诊/挂号/紧急仍可运行）",
+            file=sys.stderr,
+        )
         return 3
     src = Path(args.source)
     if not src.exists():
-        print(f"源目录不存在：{src}\n"
-              "请先在上游项目里跑 scripts/build_knowledge.py 生成中间产物，"
-              "或用 --source 指向同结构的目录。\n"
-              "（clinic 域的规则轨不依赖它，问诊/挂号/紧急仍可运行）", file=sys.stderr)
+        print(
+            f"源目录不存在：{src}\n"
+            "请先在上游项目里跑 scripts/build_knowledge.py 生成中间产物，"
+            "或用 --source 指向同结构的目录。\n"
+            "（clinic 域的规则轨不依赖它，问诊/挂号/紧急仍可运行）",
+            file=sys.stderr,
+        )
         return 3
     missing = [n for n in REQUIRED if not (src / n).exists()]
     if missing:
-        print(f"源目录缺少 {missing}；它看起来不是 build_knowledge.py 的产物目录",
-              file=sys.stderr)
+        print(f"源目录缺少 {missing}；它看起来不是 build_knowledge.py 的产物目录", file=sys.stderr)
         return 3
 
     sym, skip_s = build_symptom_cards(src)

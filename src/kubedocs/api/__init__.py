@@ -10,6 +10,7 @@
 所以这里用 PEP 562 的模块级 `__getattr__` 做**惰性再导出**：
 `from kubedocs.api import create_app` 照常可用，但代价只在真正用到时才付。
 """
+
 from __future__ import annotations
 
 from typing import Any

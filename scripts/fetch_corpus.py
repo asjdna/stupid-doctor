@@ -8,6 +8,7 @@
 
 用 `tarfile` 的 `r|gz`（流式、不 seek、不吃内存），边下边抽，抽完删 tarball。
 """
+
 from __future__ import annotations
 
 import os
@@ -29,7 +30,7 @@ OUT_DIR = os.path.join(ROOT, "data", "raw", "k8s-docs")
 # tarball 内的路径形如 `kubernetes-website-<sha>/content/en/docs/concepts/foo.md`，
 # 所以**不能**用 startswith("content/en/docs/") 匹配（第一版就栽在这，抽出 0 个文件）。
 INNER_PREFIX = "content/en/docs/"
-MAX_BYTES = 2_600_000_000          # 保险：超过 2.6GB 说明判断有误，中止而不是塞满磁盘
+MAX_BYTES = 2_600_000_000  # 保险：超过 2.6GB 说明判断有误，中止而不是塞满磁盘
 
 
 def _iter_docs(member_name: str) -> str | None:
@@ -38,10 +39,10 @@ def _iter_docs(member_name: str) -> str | None:
     剥掉两层：仓库目录前缀（`kubernetes-website-<sha>/`）与 `content/en/docs/`，
     使语料根 == 官方文档根，source_url 映射才是直通的。
     """
-    _, _, rest = member_name.partition("/")          # 去掉仓库目录那一层
+    _, _, rest = member_name.partition("/")  # 去掉仓库目录那一层
     if not rest.startswith(INNER_PREFIX) or not rest.endswith(".md"):
         return None
-    return rest[len(INNER_PREFIX):]
+    return rest[len(INNER_PREFIX) :]
 
 
 def main() -> int:
@@ -49,29 +50,31 @@ def main() -> int:
     os.makedirs(OUT_DIR, exist_ok=True)
 
     if os.path.exists(TARBALL) and os.path.getsize(TARBALL) > 1_000_000:
-        print(f"[1/3] 复用已下载的 tarball（{os.path.getsize(TARBALL)/1e6:.1f} MB）", flush=True)
+        print(f"[1/3] 复用已下载的 tarball（{os.path.getsize(TARBALL) / 1e6:.1f} MB）", flush=True)
     else:
         print(f"[1/3] 下载 tarball -> {TARBALL}", flush=True)
         t0 = time.perf_counter()
         got = 0
         last_report = t0
-        with httpx.Client(follow_redirects=True, timeout=httpx.Timeout(60.0, read=300.0)) as c, \
-                c.stream("GET", URL) as resp:
+        with (
+            httpx.Client(follow_redirects=True, timeout=httpx.Timeout(60.0, read=300.0)) as c,
+            c.stream("GET", URL) as resp,
+        ):
             resp.raise_for_status()
             with open(TARBALL, "wb") as f:
                 for chunk in resp.iter_bytes(1 << 20):
                     f.write(chunk)
                     got += len(chunk)
                     if got > MAX_BYTES:
-                        print(f"  中止：已超过 {MAX_BYTES/1e9:.1f}GB 上限", flush=True)
+                        print(f"  中止：已超过 {MAX_BYTES / 1e9:.1f}GB 上限", flush=True)
                         return 2
                     now = time.perf_counter()
                     if now - last_report > 20:
                         mb = got / 1e6
-                        print(f"  … {mb:7.1f} MB  ({mb/(now-t0):.2f} MB/s)", flush=True)
+                        print(f"  … {mb:7.1f} MB  ({mb / (now - t0):.2f} MB/s)", flush=True)
                         last_report = now
         dt = time.perf_counter() - t0
-        print(f"  完成：{got/1e6:.1f} MB，用时 {dt/60:.1f} 分钟（{got/1e6/dt:.2f} MB/s）", flush=True)
+        print(f"  完成：{got / 1e6:.1f} MB，用时 {dt / 60:.1f} 分钟（{got / 1e6 / dt:.2f} MB/s）", flush=True)
 
     print(f"[2/3] 流式解包，只抽 {INNER_PREFIX}**.md -> {OUT_DIR}", flush=True)
     n = 0
@@ -96,7 +99,7 @@ def main() -> int:
                 f.write(data)
             n += 1
             total += len(data)
-    print(f"  抽出 {n} 个 markdown，{total/1e6:.1f} MB", flush=True)
+    print(f"  抽出 {n} 个 markdown，{total / 1e6:.1f} MB", flush=True)
     for s in samples:
         print(f"    例：{s}", flush=True)
 
@@ -111,7 +114,7 @@ def main() -> int:
     except OSError as e:
         print(f"  删除失败（非致命）：{e}", flush=True)
     free = shutil.disk_usage(ROOT).free
-    print(f"完成。语料目录：{OUT_DIR}  剩余磁盘 {free/1e9:.0f} GB", flush=True)
+    print(f"完成。语料目录：{OUT_DIR}  剩余磁盘 {free / 1e9:.0f} GB", flush=True)
     return 0
 
 

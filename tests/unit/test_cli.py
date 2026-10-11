@@ -4,6 +4,7 @@
 子命令之间不兼容这类问题，只有从命令行入口跑一遍才会暴露。
 全部走哈希向量，不下载模型、不联网。
 """
+
 from __future__ import annotations
 
 import json
@@ -51,8 +52,19 @@ class TestGlobalArgs:
     def test_globals_after_subcommand(self, tmp_path, capsys):
         """用户几乎必然这么写一次；只挂在主解析器上时这里会报"无法识别的参数"。"""
         corpus = _corpus(tmp_path)
-        rc = main(["ingest", "--batch-files", "10", "--provider", "hashing",
-                   "--index-dir", str(tmp_path / "index"), "--corpus-dir", str(corpus)])
+        rc = main(
+            [
+                "ingest",
+                "--batch-files",
+                "10",
+                "--provider",
+                "hashing",
+                "--index-dir",
+                str(tmp_path / "index"),
+                "--corpus-dir",
+                str(corpus),
+            ]
+        )
         assert rc == EXIT_OK
         # 索引落在 <index_dir>/<domain>/ 下（按域分目录）
         assert (tmp_path / "index" / "k8s_docs" / "kubedocs.db").exists()
@@ -61,12 +73,13 @@ class TestGlobalArgs:
         """子解析器上的同名参数若用普通 default，会把这个值覆盖成 None。"""
         corpus = _corpus(tmp_path)
         index = tmp_path / "index"
-        assert main(["ingest", "--index-dir", str(index), "--provider", "hashing",
-                     "--corpus-dir", str(corpus)]) == EXIT_OK
+        assert (
+            main(["ingest", "--index-dir", str(index), "--provider", "hashing", "--corpus-dir", str(corpus)])
+            == EXIT_OK
+        )
         assert (index / "k8s_docs" / "kubedocs.db").exists()
         # 索引确实建在指定目录 -> 用该目录能查到
-        assert main(["--index-dir", str(index), "--provider", "hashing",
-                     "stats", "--json"]) == EXIT_OK
+        assert main(["--index-dir", str(index), "--provider", "hashing", "stats", "--json"]) == EXIT_OK
 
     def test_missing_subcommand_is_an_error(self):
         with pytest.raises(SystemExit) as e:
@@ -101,28 +114,48 @@ class TestExitCodes:
         corpus = _corpus(tmp_path)
         assert _ingest(tmp_path, corpus) == EXIT_OK
         gold = tmp_path / "gold.jsonl"
-        gold.write_text(json.dumps({
-            "id": "g1", "kind": "concept", "q": "who enforces memory limits",
-            "must_contain": {"concepts/limits": "kubelet enforces memory"},
-        }) + "\n", encoding="utf-8")
-        rc = main(_args(tmp_path, "eval", "--gold", str(gold),
-                        "--baseline", str(tmp_path / "base.json"), "--gate"))
+        gold.write_text(
+            json.dumps(
+                {
+                    "id": "g1",
+                    "kind": "concept",
+                    "q": "who enforces memory limits",
+                    "must_contain": {"concepts/limits": "kubelet enforces memory"},
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        rc = main(
+            _args(tmp_path, "eval", "--gold", str(gold), "--baseline", str(tmp_path / "base.json"), "--gate")
+        )
         assert rc == EXIT_GATE_FAIL
 
     def test_eval_baseline_then_gate_passes(self, tmp_path):
         corpus = _corpus(tmp_path)
         assert _ingest(tmp_path, corpus) == EXIT_OK
         gold = tmp_path / "gold.jsonl"
-        gold.write_text(json.dumps({
-            "id": "g1", "kind": "concept", "q": "who enforces memory limits",
-            "must_contain": {"concepts/limits": "kubelet enforces memory"},
-        }) + "\n", encoding="utf-8")
+        gold.write_text(
+            json.dumps(
+                {
+                    "id": "g1",
+                    "kind": "concept",
+                    "q": "who enforces memory limits",
+                    "must_contain": {"concepts/limits": "kubelet enforces memory"},
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
         base = tmp_path / "base.json"
-        assert main(_args(tmp_path, "eval", "--gold", str(gold), "--baseline", str(base),
-                        "--write-baseline")) == EXIT_OK
+        assert (
+            main(_args(tmp_path, "eval", "--gold", str(gold), "--baseline", str(base), "--write-baseline"))
+            == EXIT_OK
+        )
         assert base.exists()
-        assert main(_args(tmp_path, "eval", "--gold", str(gold), "--baseline", str(base),
-                        "--gate")) == EXIT_OK
+        assert (
+            main(_args(tmp_path, "eval", "--gold", str(gold), "--baseline", str(base), "--gate")) == EXIT_OK
+        )
 
 
 class TestFullPipeline:
@@ -132,21 +165,26 @@ class TestFullPipeline:
         monkeypatch.delenv("DEEPSEEK_API_KEY", raising=False)
         corpus = _corpus(tmp_path)
         assert _ingest(tmp_path, corpus) == EXIT_OK
-        capsys.readouterr()          # 丢掉摄取阶段的输出，下面只解析本条命令的 JSON
+        capsys.readouterr()  # 丢掉摄取阶段的输出，下面只解析本条命令的 JSON
 
         assert main(_args(tmp_path, "stats", "--verify", "--json")) == EXIT_OK
-        payload = json.loads(capsys.readouterr().out.split("完成")[0])
+        captured = capsys.readouterr()
+        # 这里以前写的是 `out.split("完成")[0]`——那是在**迁就缺陷**：`main()` 结尾的
+        # 「完成，用时 Xs」旁白混在 stdout 的 JSON 后面。现在它按约定走 stderr，
+        # 所以断言写成"stdout 能被 json.loads 直接吃掉"，让回归无处可藏。
+        assert "完成，用时" in captured.err
+        payload = json.loads(captured.out)
         assert payload["n_chunks"] > 0
         assert payload["fts_integrity"] == "ok"
         assert payload["embedding_model"] == "hashing-384"
 
         assert main(_args(tmp_path, "search", "memory limits", "--json")) == EXIT_OK
-        results = json.loads(capsys.readouterr().out.split("完成")[0])["results"]
+        results = json.loads(capsys.readouterr().out)["results"]
         assert results and results[0]["source_url"].startswith("https://kubernetes.io/docs/")
 
         # ask：没有密钥 -> 明确拒答 + 仍返回检索来源，而不是 traceback
         assert main(_args(tmp_path, "ask", "how are memory limits enforced?", "--json")) == EXIT_OK
-        answer = json.loads(capsys.readouterr().out.split("完成")[0])
+        answer = json.loads(capsys.readouterr().out)
         assert answer["refused"] is True
         assert answer["citations"], "降级时也要给出检索来源"
         assert "DEEPSEEK_API_KEY" in answer["refusal_reason"]
@@ -159,3 +197,32 @@ class TestFullPipeline:
         out = capsys.readouterr().out
         assert "提供给模型的上下文" in out
         assert "[1] Resource Management" in out
+
+
+class TestJsonStdoutIsPureJson:
+    """回归：`--json` 时 stdout 上只允许有 JSON，`main()` 的收尾旁白也不例外。
+
+    `main()` 结尾无条件 `print("完成，用时 Xs")` 曾把旁白补在任何 JSON 之后，
+    于是 `kubedocs eval --json | jq`（或 PowerShell 的 `ConvertFrom-Json`）整体解析失败
+    ——**所有** `--json` 子命令的机器可读输出都报废，而单测当时是用
+    `out.split("完成")[0]` 绕过它的，正好把这个缺陷挡住了。
+    """
+
+    def test_timing_line_goes_to_stderr_in_json_mode(self, tmp_path, capsys):
+        assert _ingest(tmp_path, _corpus(tmp_path)) == EXIT_OK
+        capsys.readouterr()
+        assert main(_args(tmp_path, "stats", "--json")) == EXIT_OK
+
+        captured = capsys.readouterr()
+        json.loads(captured.out)  # 旁白混进 stdout 就会在这里炸
+        assert "完成，用时" in captured.err
+
+    def test_timing_line_stays_on_stdout_without_json(self, tmp_path, capsys):
+        """非 `--json` 时位置不变：人读的输出仍在 stdout，不制造无谓的破坏性改动。"""
+        assert _ingest(tmp_path, _corpus(tmp_path)) == EXIT_OK
+        capsys.readouterr()
+        assert main(_args(tmp_path, "stats")) == EXIT_OK
+
+        captured = capsys.readouterr()
+        assert "完成，用时" in captured.out
+        assert captured.err == ""

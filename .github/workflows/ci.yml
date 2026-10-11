@@ -46,6 +46,13 @@ jobs:
         run: pytest tests/unit -p no:cacheprovider
       - name: ruff（阻塞）
         run: ruff check .
+      # 只跑 `ruff check .` 会让"格式已经跑偏"在 CI 里完全不可见：本次接入时
+      # 全仓有 110 个文件待重排，而 CI 一路绿灯。`ruff check` 与 `ruff format --check`
+      # 是两道不同的门（前者管规则，后者管排版），必须都在。
+      # 行尾由 pyproject 的 `[tool.ruff.format] line-ending = "lf"` 定死，
+      # 保证 Windows 开发机与 ubuntu runner 判定一致。
+      - name: ruff format --check（阻塞）
+        run: ruff format --check .
       - name: mypy（阻塞）
         run: mypy src scripts
 

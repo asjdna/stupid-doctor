@@ -54,6 +54,7 @@
   循环会把它记进 `turn.unpriced_calls` 与 `notes`，并交给 `budget.record(priced=False)`
   保守计入。**"算不出价"绝不等于"免费"**。
 """
+
 from __future__ import annotations
 
 import inspect
@@ -90,6 +91,7 @@ class SpendGuard(Protocol):
 
     def record(self, usd: float, *, priced: bool = True) -> float:
         """累计一次花费；`priced=False` 表示这次算不出价（实现方须保守处理）。"""
+
 
 HISTORY_ROLES = ("user", "assistant")
 """`history` 里**允许**出现的角色，只有这两种。
@@ -152,8 +154,7 @@ class AgentTurn:
 class ToolCaller(Protocol):
     """LLM 接口。实现方负责绑 LiteLLM 的 tools=/tool_choice=。"""
 
-    def choose(self, messages: list[dict[str, Any]],
-               tools: list[dict[str, Any]]) -> dict[str, Any]:
+    def choose(self, messages: list[dict[str, Any]], tools: list[dict[str, Any]]) -> dict[str, Any]:
         """返回 {"content": str, "tool_calls": [{"name": str, "arguments": dict}]}
 
         可选键 `cost_usd`（float）与 `cost_priced`（bool）：
@@ -174,8 +175,11 @@ class _ParsedCall:
 
     def as_message(self) -> dict[str, Any]:
         """转成 assistant 消息里的 tool_calls 项（OpenAI 形状）。"""
-        return {"id": self.call_id, "type": "function",
-                "function": {"name": self.name, "arguments": _json_text(self.arguments)}}
+        return {
+            "id": self.call_id,
+            "type": "function",
+            "function": {"name": self.name, "arguments": _json_text(self.arguments)},
+        }
 
 
 def _history_messages(history: Sequence[dict[str, Any]] | None) -> list[dict[str, Any]]:
@@ -194,26 +198,33 @@ def _history_messages(history: Sequence[dict[str, Any]] | None) -> list[dict[str
     out: list[dict[str, Any]] = []
     for index, item in enumerate(history):
         if not isinstance(item, dict):
-            raise ValueError(f"history[{index}] 不是对象（{type(item).__name__}）："
-                             "需要 {'role': ..., 'content': ...}")
+            raise ValueError(
+                f"history[{index}] 不是对象（{type(item).__name__}）：需要 {{'role': ..., 'content': ...}}"
+            )
         role = item.get("role")
         if role not in HISTORY_ROLES:
             raise ValueError(
                 f"history[{index}] 的 role={role!r} 不合法：只允许 {list(HISTORY_ROLES)}"
-                "（system 由 system= 参数独占；tool 消息必须与本轮的 assistant.tool_calls 配对）")
+                "（system 由 system= 参数独占；tool 消息必须与本轮的 assistant.tool_calls 配对）"
+            )
         content = item.get("content")
         if not isinstance(content, str):
-            raise ValueError(f"history[{index}] 的 content 必须是字符串，"
-                             f"收到 {type(content).__name__}")
+            raise ValueError(f"history[{index}] 的 content 必须是字符串，收到 {type(content).__name__}")
         out.append({"role": role, "content": content})
     return out
 
 
-def run_tool_loop(question: str, *, tools: Sequence[ToolSpec], llm: ToolCaller,
-                  system: str = "", max_steps: int = 5,
-                  confirm: ConfirmFn | None = None,
-                  history: Sequence[dict[str, Any]] | None = None,
-                  budget: SpendGuard | None = None) -> AgentTurn:
+def run_tool_loop(
+    question: str,
+    *,
+    tools: Sequence[ToolSpec],
+    llm: ToolCaller,
+    system: str = "",
+    max_steps: int = 5,
+    confirm: ConfirmFn | None = None,
+    history: Sequence[dict[str, Any]] | None = None,
+    budget: SpendGuard | None = None,
+) -> AgentTurn:
     """跑一轮"模型选工具 -> 执行 -> 回灌 -> 再选"的循环，直到模型给出最终回答。
 
     `max_steps` 是 **LLM 轮次**的硬上限（不是工具执行次数）：一轮里模型可以要求调多个
@@ -301,14 +312,21 @@ def run_tool_loop(question: str, *, tools: Sequence[ToolSpec], llm: ToolCaller,
 
         # 把模型这一步的要求原样记回历史：不回灌"它自己说过要调什么"，后面的 role="tool"
         # 消息就没有归属，模型看不懂工具结果是从哪来的。
-        messages.append({"role": "assistant", "content": content,
-                         "tool_calls": [c.as_message() for c in calls]})
+        messages.append(
+            {"role": "assistant", "content": content, "tool_calls": [c.as_message() for c in calls]}
+        )
 
         for parsed in calls:
             call = _execute(parsed, registry=registry, confirm=confirm, notes=turn.notes)
             turn.tool_calls.append(call)
-            messages.append({"role": "tool", "tool_call_id": parsed.call_id,
-                             "name": parsed.name or "unknown", "content": _tool_message(call)})
+            messages.append(
+                {
+                    "role": "tool",
+                    "tool_call_id": parsed.call_id,
+                    "name": parsed.name or "unknown",
+                    "content": _tool_message(call),
+                }
+            )
 
             if parsed.name and parsed.name not in registry:
                 unknown_streak = unknown_streak + 1 if parsed.name == unknown_name else 1
@@ -328,8 +346,9 @@ def run_tool_loop(question: str, *, tools: Sequence[ToolSpec], llm: ToolCaller,
     return turn
 
 
-def _execute(parsed: _ParsedCall, *, registry: dict[str, ToolSpec], confirm: ConfirmFn | None,
-             notes: list[str]) -> ToolCall:
+def _execute(
+    parsed: _ParsedCall, *, registry: dict[str, ToolSpec], confirm: ConfirmFn | None, notes: list[str]
+) -> ToolCall:
     """执行一次已解析的调用，**任何失败都变成 `ToolCall.error`**。
 
     这里刻意不抛异常：一次工具失败的语义是"这一步没成功"，不是"整轮失败"。只有把失败文本
@@ -344,15 +363,19 @@ def _execute(parsed: _ParsedCall, *, registry: dict[str, ToolSpec], confirm: Con
         return ToolCall(name=parsed.name, arguments=parsed.arguments, error=str(e))
 
     if spec.handler is None:
-        return ToolCall(name=spec.name, arguments=parsed.arguments,
-                        error=f"工具 {spec.name!r} 只声明了 schema、没有执行体：无法执行")
+        return ToolCall(
+            name=spec.name,
+            arguments=parsed.arguments,
+            error=f"工具 {spec.name!r} 只声明了 schema、没有执行体：无法执行",
+        )
 
     # 先校验参数、再要确认：让用户去确认一个本来就跑不通的调用，是在浪费他的注意力。
     try:
         validated = spec.params.model_validate(parsed.arguments)
     except ValidationError as e:
-        return ToolCall(name=spec.name, arguments=parsed.arguments,
-                        error=f"参数校验未通过（{spec.params.__name__}）：{e}")
+        return ToolCall(
+            name=spec.name, arguments=parsed.arguments, error=f"参数校验未通过（{spec.params.__name__}）：{e}"
+        )
 
     if spec.side_effect:
         denial = _confirm_side_effect(spec, validated, confirm, notes)
@@ -365,8 +388,9 @@ def _execute(parsed: _ParsedCall, *, registry: dict[str, ToolSpec], confirm: Con
         # 可预期的业务失败（号源已满、检索器连不上）：一句人话就够，不要 traceback。
         return ToolCall(name=spec.name, arguments=parsed.arguments, error=f"工具报告失败：{e}")
     except Exception as e:  # noqa: BLE001 - 工具的编程错误同样不该让整轮 traceback
-        return ToolCall(name=spec.name, arguments=parsed.arguments,
-                        error=f"工具抛出未预期异常（{type(e).__name__}: {e}）")
+        return ToolCall(
+            name=spec.name, arguments=parsed.arguments, error=f"工具抛出未预期异常（{type(e).__name__}: {e}）"
+        )
     return ToolCall(name=spec.name, arguments=parsed.arguments, result=result)
 
 
@@ -382,17 +406,21 @@ def _lookup(name: str, registry: dict[str, ToolSpec]) -> ToolSpec:
     return spec
 
 
-def _confirm_side_effect(spec: ToolSpec, validated: BaseModel, confirm: ConfirmFn | None,
-                         notes: list[str]) -> str:
+def _confirm_side_effect(
+    spec: ToolSpec, validated: BaseModel, confirm: ConfirmFn | None, notes: list[str]
+) -> str:
     """副作用工具的执行闸门：**默认拒绝**，只有 `confirm` 明确点头才放行。
 
     返回空串表示放行，否则返回要回灌给模型的拒绝理由。
     """
     if confirm is None:
-        notes.append(f"工具 {spec.name!r} 有副作用但没有提供 confirm 回调：已拒绝执行，"
-                     "把“需要用户确认”回灌给模型")
-        return (f"拒绝执行 {spec.name!r}：它会产生不可逆的副作用，必须先得到用户确认。"
-                "请先向用户说明将要执行什么并征求同意，用户同意后再重新调用。")
+        notes.append(
+            f"工具 {spec.name!r} 有副作用但没有提供 confirm 回调：已拒绝执行，把“需要用户确认”回灌给模型"
+        )
+        return (
+            f"拒绝执行 {spec.name!r}：它会产生不可逆的副作用，必须先得到用户确认。"
+            "请先向用户说明将要执行什么并征求同意，用户同意后再重新调用。"
+        )
 
     # 确认回调看到的是**校验后的完整参数**（含默认值），而不是模型省略了字段的原始 JSON：
     # 用户要确认的，是他真正会执行的那一次调用。
@@ -403,8 +431,7 @@ def _confirm_side_effect(spec: ToolSpec, validated: BaseModel, confirm: ConfirmF
         notes.append(f"confirm 回调对 {spec.name!r} 抛异常（{type(e).__name__}: {e}）：按未确认处理")
         return f"未获得用户确认（确认回调失败：{type(e).__name__}）：{spec.name!r} 未执行"
     if not allowed:
-        return (f"用户拒绝了 {spec.name!r}：不要重复调用它；如需继续，先说明理由或改问用户"
-                "别的信息。")
+        return f"用户拒绝了 {spec.name!r}：不要重复调用它；如需继续，先说明理由或改问用户别的信息。"
     return ""
 
 
@@ -422,8 +449,7 @@ def _invoke(spec: ToolSpec, validated: BaseModel) -> Any:
     if handler is None:  # 只为类型收窄；真正拦住"只声明不实现"的是调用方
         raise ToolError(f"工具 {spec.name!r} 没有执行体")
     signature = inspect.signature(handler)
-    accepts_kwargs = any(p.kind is inspect.Parameter.VAR_KEYWORD
-                         for p in signature.parameters.values())
+    accepts_kwargs = any(p.kind is inspect.Parameter.VAR_KEYWORD for p in signature.parameters.values())
     if accepts_kwargs or not _takes_params_model(signature):
         return handler(**validated.model_dump())
     return handler(validated)
@@ -439,8 +465,7 @@ def _takes_params_model(signature: inspect.Signature) -> bool:
     if len(values) != 1:
         return False
     param = values[0]
-    if param.kind not in (inspect.Parameter.POSITIONAL_ONLY,
-                          inspect.Parameter.POSITIONAL_OR_KEYWORD):
+    if param.kind not in (inspect.Parameter.POSITIONAL_ONLY, inspect.Parameter.POSITIONAL_OR_KEYWORD):
         return False
     if param.name in {"params", "p"}:
         return True
@@ -460,8 +485,9 @@ def _parse_calls(raw: object, *, step: int) -> list[_ParsedCall]:
     parsed: list[_ParsedCall] = []
     for index, item in enumerate(items):
         name, arguments, error = _parse_one(item)
-        parsed.append(_ParsedCall(call_id=f"call_{step}_{index + 1}", name=name,
-                                  arguments=arguments, parse_error=error))
+        parsed.append(
+            _ParsedCall(call_id=f"call_{step}_{index + 1}", name=name, arguments=arguments, parse_error=error)
+        )
     return parsed
 
 
@@ -484,8 +510,14 @@ def _parse_one(item: object) -> tuple[str, dict[str, Any], str]:
         except json.JSONDecodeError as e:
             return name, {}, f"tool_call 的 arguments 不是合法 JSON（{e}）：请重新给出参数"
     if not isinstance(raw_arguments, dict):
-        return name, {}, (f"tool_call 的 arguments 必须是对象，收到 "
-                          f"{type(raw_arguments).__name__}：请按 schema 重新给出参数")
+        return (
+            name,
+            {},
+            (
+                f"tool_call 的 arguments 必须是对象，收到 "
+                f"{type(raw_arguments).__name__}：请按 schema 重新给出参数"
+            ),
+        )
     return name, raw_arguments, ""
 
 

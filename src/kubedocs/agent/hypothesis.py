@@ -44,6 +44,7 @@
 才值得花一次模型调用去仲裁。这样 LLM 是**兜底**而不是主路径：问诊的默认行为可离线、
 可复现、零延迟、零成本，模型只在真正拿不准的地方介入。
 """
+
 from __future__ import annotations
 
 import math
@@ -256,7 +257,9 @@ def explain(scores: Mapping[str, float], evidence: Sequence[SymptomEvidence]) ->
     """
     lines: list[str] = []
     if scores:
-        lines.append("候选得分（高→低）：" + "，".join(f"{name} {value:+.2f}" for name, value in rank(scores)))
+        lines.append(
+            "候选得分（高→低）：" + "，".join(f"{name} {value:+.2f}" for name, value in rank(scores))
+        )
     else:
         lines.append("候选为空：没有可解释的候选得分。")
     if not evidence:

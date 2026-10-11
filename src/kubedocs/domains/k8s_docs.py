@@ -4,6 +4,7 @@
 `ingest` / `HybridRetriever` / 金标集声明成 `DomainPack` 要求的形状。
 薄的代价是没有，好处是：内核看到的只有协议，看不见 Kubernetes。
 """
+
 from __future__ import annotations
 
 from pathlib import Path
@@ -19,22 +20,26 @@ GOLD = Path("data/eval/retrieval_gold.jsonl")
 
 class K8sDocsPack:
     name = "k8s_docs"
-    description = ("Kubernetes 官方文档检索问答：集群概念、kubectl 用法、"
-                   "资源清单字段、运维操作（英文语料）")
+    description = "Kubernetes 官方文档检索问答：集群概念、kubectl 用法、资源清单字段、运维操作（英文语料）"
     # 英文：FTS5 的 porter + unicode61 已经够用，不需要预分词
     normalizer_name = "identity"
 
     def corpus_root(self, settings: Settings) -> Path:
         return settings.corpus_path
 
-    def build_index(self, store: Store, embedder: Embedder, settings: Settings, *,
-                    rebuild: bool = False, limit_files: int | None = None,
-                    progress: object = None) -> IngestReport:
-        return ingest(store, embedder, settings, rebuild=rebuild, limit_files=limit_files,
-                      progress=progress)  # type: ignore[arg-type]
+    def build_index(
+        self,
+        store: Store,
+        embedder: Embedder,
+        settings: Settings,
+        *,
+        rebuild: bool = False,
+        limit_files: int | None = None,
+        progress: object = None,
+    ) -> IngestReport:
+        return ingest(store, embedder, settings, rebuild=rebuild, limit_files=limit_files, progress=progress)  # type: ignore[arg-type]
 
-    def retriever(self, store: Store, embedder: Embedder,
-                  settings: Settings) -> HybridRetriever:
+    def retriever(self, store: Store, embedder: Embedder, settings: Settings) -> HybridRetriever:
         return HybridRetriever(store, embedder, settings)
 
     def tools(self) -> list[object]:

@@ -56,6 +56,7 @@
 - **有界**：会话表是 LRU（`MAX_THREADS` 个会话 × 每会话 8 条消息），
   淘汰最久未用者——理由与边界见 `api/threads.py`。
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -180,8 +181,11 @@ class _DomainRuntime:
             self.store = None
 
 
-def _build_retriever(settings: Settings, store: Store, embedder: Embedder,
-                     ) -> HybridRetriever:
+def _build_retriever(
+    settings: Settings,
+    store: Store,
+    embedder: Embedder,
+) -> HybridRetriever:
     """按域构造检索器：优先用域包自己的 `retriever()`，域包未注册时退回默认实现。
 
     域包是"域与内核之间唯一的边界"，检索器配置属于域（不同域可以换精排、
@@ -241,8 +245,10 @@ def _index_note(runtime: _DomainRuntime, n_hits: int) -> str:
     if runtime.index_error:
         return f"索引不可用，无法检索：{runtime.index_error}"
     if runtime.n_chunks() == 0:
-        return ("索引为空（0 块）：先跑 `python -m kubedocs.cli ingest` 建索引；"
-                "空索引不是服务故障，所以这里返回 200 而不是 500")
+        return (
+            "索引为空（0 块）：先跑 `python -m kubedocs.cli ingest` 建索引；"
+            "空索引不是服务故障，所以这里返回 200 而不是 500"
+        )
     return "没有任何块命中：换一种说法再试，或确认语料里确实包含这个话题"
 
 
@@ -332,8 +338,7 @@ def _tool_events(state: ClinicState) -> list[tuple[str, dict[str, Any]]]:
     events: list[tuple[str, dict[str, Any]]] = []
     red = state.get("red_line")
     if red:
-        events.append(("check_red_line", {"word": red.get("word", ""),
-                                          "status": red.get("status", "")}))
+        events.append(("check_red_line", {"word": red.get("word", ""), "status": red.get("status", "")}))
     ticket = state.get("ticket")
     if ticket:
         events.append(("book_appointment", {"ticket": ticket}))
@@ -343,8 +348,7 @@ def _tool_events(state: ClinicState) -> list[tuple[str, dict[str, Any]]]:
 class _ChatOutcome:
     """一轮 `/chat` 的结果：要发的 tool 事件 + 最终文本 + 是否又停在追问上。"""
 
-    def __init__(self, state: ClinicState, *, resuming: bool,
-                 pending: str | None = None) -> None:
+    def __init__(self, state: ClinicState, *, resuming: bool, pending: str | None = None) -> None:
         self.state = state
         self.resuming = resuming
         # 这一轮结束后**仍然挂着**的追问问题（内核在等用户回答）；None 表示流程已结束
@@ -371,12 +375,13 @@ class _ChatOutcome:
         ——维护动作看起来一切正常，模型却永远只看到当轮。
         """
         self = cls.__new__(cls)
-        self.state = {}                       # 工具循环无图状态，留空字典占位
+        self.state = {}  # 工具循环无图状态，留空字典占位
         self.resuming = False
         self.pending = None
         # 事件形状与 SSE 的 `{"tool": name, **payload}` 对齐
-        self.tools = [(str(tc.get("tool", "")), {
-            k: v for k, v in tc.items() if k != "tool"}) for tc in turn.tool_calls]
+        self.tools = [
+            (str(tc.get("tool", "")), {k: v for k, v in tc.items() if k != "tool"}) for tc in turn.tool_calls
+        ]
         self.text = turn.text
         self.citations = list(getattr(turn, "citations", []) or [])
         self.status = "emergency" if turn.emergency else "done"
@@ -416,9 +421,11 @@ def _converse_with_tools(app: FastAPI, request: ChatRequest, thread_id: str) -> 
     past = store.history(thread_id, request.patient_id)
     turn = rt.turn(request.message, history=past)
     # 保留最近 8 条（4 轮）由 ThreadStore 自己按 max_messages 执行（与修复前的 [-8:] 同口径）
-    store.append(thread_id, request.patient_id,
-                 [{"role": "user", "content": request.message},
-                  {"role": "assistant", "content": turn.text}])
+    store.append(
+        thread_id,
+        request.patient_id,
+        [{"role": "user", "content": request.message}, {"role": "assistant", "content": turn.text}],
+    )
     return _ChatOutcome.from_clinic_turn(turn)
 
 
@@ -451,12 +458,10 @@ def _run_turn(app: FastAPI, request: ChatRequest, thread_id: str) -> _ChatOutcom
     else:
         state = agent.start(request.message, thread_id=thread_id, patient_id=request.patient_id)
     # 跑完再看一次：这一轮可能又停在一个新追问上（这才是"追问有界"的真实体现）
-    return _ChatOutcome(state, resuming=resuming,
-                        pending=agent.pending_question(thread_id=thread_id))
+    return _ChatOutcome(state, resuming=resuming, pending=agent.pending_question(thread_id=thread_id))
 
 
-async def _chat_events(app: FastAPI, request: ChatRequest,
-                       thread_id: str) -> AsyncIterator[ServerSentEvent]:
+async def _chat_events(app: FastAPI, request: ChatRequest, thread_id: str) -> AsyncIterator[ServerSentEvent]:
     """`/chat` 的事件序列（见模块文档里的格式说明）。"""
     # 首个事件就把会话 id 交出去：调用方不必先知道 id 才能续聊
     yield _sse("thread", {"thread_id": thread_id, "domain": "clinic"})
@@ -477,16 +482,19 @@ async def _chat_events(app: FastAPI, request: ChatRequest,
     if not text:
         # 兜底的兜底：图里既没有答案也没有追问时，宁可给一句人话，也不要让前端拿到空串
         text = "这一轮没有产生可回复的内容；请换一种说法，或说明具体症状。"
-    yield _sse("message", {
-        "thread_id": thread_id,
-        "text": text,
-        "citations": outcome.citations,
-        "awaiting_user": bool(pending),
-        "status": "asking" if pending else outcome.status,
-        "resumed": outcome.resuming,
-        # 0 是常态；>0 表示有调用的价算不出来（已按保守上限记账，**不是免费**）
-        "unpriced_llm_calls": outcome.unpriced_calls,
-    })
+    yield _sse(
+        "message",
+        {
+            "thread_id": thread_id,
+            "text": text,
+            "citations": outcome.citations,
+            "awaiting_user": bool(pending),
+            "status": "asking" if pending else outcome.status,
+            "resumed": outcome.resuming,
+            # 0 是常态；>0 表示有调用的价算不出来（已按保守上限记账，**不是免费**）
+            "unpriced_llm_calls": outcome.unpriced_calls,
+        },
+    )
     yield _sse("done", {"thread_id": thread_id, "ok": True})
 
 
@@ -595,8 +603,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     def healthz(request: Request) -> HealthResponse:
         """存活探针：**索引为空 / 索引不可用都不算失败**（理由见模块文档）。"""
         runtime = _runtime(request)
-        return HealthResponse(ok=True, domain=runtime.settings.domain,
-                              n_chunks=runtime.n_chunks())
+        return HealthResponse(ok=True, domain=runtime.settings.domain, n_chunks=runtime.n_chunks())
 
     @app.get("/domains")
     def domains() -> list[dict[str, Any]]:
@@ -620,15 +627,19 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         retriever = runtime.retriever()
         if retriever is None:
             return SearchResponse(
-                query=body.q, hits=[],
+                query=body.q,
+                hits=[],
                 diagnostics={"degraded": [f"索引不可用：{runtime.index_error}"]},
                 note=_index_note(runtime, 0),
             )
         result = retriever.search(body.q, top_k=body.top_k)
         hits = [Hit.from_chunk(chunk) for chunk in result.results]
-        return SearchResponse(query=result.query, hits=hits,
-                              diagnostics=result.diagnostics,
-                              note=_index_note(runtime, len(hits)))
+        return SearchResponse(
+            query=result.query,
+            hits=hits,
+            diagnostics=result.diagnostics,
+            note=_index_note(runtime, len(hits)),
+        )
 
     @app.post("/ask")
     def ask(request: Request, body: AskRequest) -> AskResponse:
@@ -641,8 +652,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         runtime = _runtime(request, body.domain)
         answerer = runtime.answerer()
         if answerer is None:
-            return AskResponse(answer="", citations=[], n_hits=0,
-                               degraded=f"索引不可用，仅返回检索结果：{runtime.index_error}")
+            return AskResponse(
+                answer="",
+                citations=[],
+                n_hits=0,
+                degraded=f"索引不可用，仅返回检索结果：{runtime.index_error}",
+            )
         return _ask_response(answerer.answer(body.q, top_k=body.top_k), runtime)
 
     # ---------------------------------------------------------------- 对话（SSE）
@@ -663,8 +678,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         try:
             store.claim(thread_id, body.patient_id)
         except ThreadOwnershipError as e:
-            logger.warning("拒绝跨属主续聊：thread_id=%s patient_id=%s",
-                           thread_id, body.patient_id)
+            logger.warning("拒绝跨属主续聊：thread_id=%s patient_id=%s", thread_id, body.patient_id)
             raise HTTPException(status_code=409, detail=str(e)) from e
         return EventSourceResponse(_chat_events(request.app, body, thread_id))
 

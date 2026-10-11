@@ -23,6 +23,7 @@
 把 `topologySpreadConstraints` 缩写成"拓扑约束"。对技术文档问答来说，
 **改写标识符等于答错**。
 """
+
 from __future__ import annotations
 
 import json
@@ -110,12 +111,19 @@ class Answer:
             "refused": self.refused,
             "refusal_reason": self.refusal_reason,
             "model": self.model,
-            "usage": {"prompt_tokens": self.prompt_tokens,
-                      "completion_tokens": self.completion_tokens,
-                      "cost_usd": round(self.cost_usd, 6)},
+            "usage": {
+                "prompt_tokens": self.prompt_tokens,
+                "completion_tokens": self.completion_tokens,
+                "cost_usd": round(self.cost_usd, 6),
+            },
             "citations": [
-                {"index": c.index, "chunk_id": c.chunk_id, "title": c.title,
-                 "breadcrumb": c.breadcrumb, "source_url": c.source_url}
+                {
+                    "index": c.index,
+                    "chunk_id": c.chunk_id,
+                    "title": c.title,
+                    "breadcrumb": c.breadcrumb,
+                    "source_url": c.source_url,
+                }
                 for c in self.citations
             ],
             "degraded": self.degraded,
@@ -132,9 +140,13 @@ def context_text(body: str) -> str:
     return _CONTEXT_HEADER_RE.sub("", body, count=1).strip()
 
 
-def build_context(hits: Sequence[ChunkHit], *, max_chars: int = 8000,
-                  per_chunk_chars: int = 1200, max_per_doc: int = 2,
-                  ) -> tuple[str, list[Citation]]:
+def build_context(
+    hits: Sequence[ChunkHit],
+    *,
+    max_chars: int = 8000,
+    per_chunk_chars: int = 1200,
+    max_per_doc: int = 2,
+) -> tuple[str, list[Citation]]:
     """把检索结果编号成上下文，返回 (上下文文本, 实际收录的引用)。
 
     两个刻意的约束：
@@ -164,8 +176,15 @@ def build_context(hits: Sequence[ChunkHit], *, max_chars: int = 8000,
         if used + len(block) > max_chars and citations:
             break
         blocks.append(block)
-        citations.append(Citation(index=idx, chunk_id=hit.chunk_id, title=hit.title,
-                                  breadcrumb=hit.breadcrumb, source_url=hit.source_url))
+        citations.append(
+            Citation(
+                index=idx,
+                chunk_id=hit.chunk_id,
+                title=hit.title,
+                breadcrumb=hit.breadcrumb,
+                source_url=hit.source_url,
+            )
+        )
         per_doc[hit.doc_id] = per_doc.get(hit.doc_id, 0) + 1
         used += len(block)
     return "\n\n".join(blocks), citations
@@ -274,8 +293,9 @@ class DailyBudget:
     - **金额精度**：文件里按 6 位小数累积，单次舍入误差可忽略。
     """
 
-    def __init__(self, path: Path, limit_usd: float,
-                 unpriced_usd: float = UNPRICED_CALL_FALLBACK_USD) -> None:
+    def __init__(
+        self, path: Path, limit_usd: float, unpriced_usd: float = UNPRICED_CALL_FALLBACK_USD
+    ) -> None:
         self.path = path
         self.limit = limit_usd
         self.unpriced_usd = unpriced_usd
@@ -315,8 +335,11 @@ class DailyBudget:
         spent = self.spent_today()
         if spent >= self.limit or spent + estimated_usd > self.limit:
             unpriced = self.unpriced_calls_today()
-            tail = (f"；今天另有 {unpriced} 次调用算不出价，已按每次 "
-                    f"${self.unpriced_usd:.2f} 的上限保守计入" if unpriced else "")
+            tail = (
+                f"；今天另有 {unpriced} 次调用算不出价，已按每次 ${self.unpriced_usd:.2f} 的上限保守计入"
+                if unpriced
+                else ""
+            )
             raise BudgetExceeded(
                 f"今日 LLM 花费 ${spent:.4f} 已达上限 ${self.limit:.2f}"
                 f"（本次预估还需 ${estimated_usd:.4f}）{tail}"
@@ -341,11 +364,13 @@ class DailyBudget:
                 payload[key] = count
                 logger.warning(
                     "LLM 调用无法定价（litellm 价格表里没有这个模型？）：已按每次 $%.2f "
-                    "的上限计入当日预算，今天第 %d 次", self.unpriced_usd, count)
+                    "的上限计入当日预算，今天第 %d 次",
+                    self.unpriced_usd,
+                    count,
+                )
             payload[today] = new_total = round(data.get(today, 0.0) + charge, 6)
             self.path.parent.mkdir(parents=True, exist_ok=True)
-            self.path.write_text(json.dumps(payload, ensure_ascii=False, indent=2),
-                                 encoding="utf-8")
+            self.path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
             return new_total
 
     @staticmethod
@@ -379,8 +404,12 @@ class LLMClient(Protocol):
 def required_api_key_env(model: str) -> str:
     """从 LiteLLM 的 `provider/model` 名字推出该读哪个环境变量。"""
     provider = model.split("/", 1)[0].lower() if "/" in model else "openai"
-    special = {"vertex_ai": "GOOGLE_APPLICATION_CREDENTIALS", "bedrock": "AWS_ACCESS_KEY_ID",
-               "azure": "AZURE_API_KEY", "gemini": "GEMINI_API_KEY"}
+    special = {
+        "vertex_ai": "GOOGLE_APPLICATION_CREDENTIALS",
+        "bedrock": "AWS_ACCESS_KEY_ID",
+        "azure": "AZURE_API_KEY",
+        "gemini": "GEMINI_API_KEY",
+    }
     return special.get(provider, f"{provider.upper()}_API_KEY")
 
 
@@ -404,6 +433,7 @@ class LiteLLMClient:
     def litellm(self) -> object:
         if self._litellm is None:
             import litellm
+
             # 供应商抖动时自己重试会更糟：交给 LiteLLM 统一处理
             litellm.drop_params = True
             self._litellm = litellm
@@ -418,8 +448,7 @@ class LiteLLMClient:
         litellm = self.litellm
         kwargs: dict[str, object] = {
             "model": self.model,
-            "messages": [{"role": "system", "content": system},
-                         {"role": "user", "content": user}],
+            "messages": [{"role": "system", "content": system}, {"role": "user", "content": user}],
             "temperature": self.settings.llm_temperature,
             "max_tokens": self.settings.llm_max_tokens,
             "timeout": self.settings.llm_timeout,
@@ -454,20 +483,27 @@ class LiteLLMClient:
 class Answerer:
     """检索 + 生成 + 引用核对 + 预算控制。"""
 
-    def __init__(self, retriever: HybridRetriever, llm: LLMClient, settings: Settings,
-                 budget: DailyBudget | None = None) -> None:
+    def __init__(
+        self,
+        retriever: HybridRetriever,
+        llm: LLMClient,
+        settings: Settings,
+        budget: DailyBudget | None = None,
+    ) -> None:
         self.retriever = retriever
         self.llm = llm
         self.settings = settings
-        self.budget = budget or DailyBudget(settings.index_path / "llm_spend.json",
-                                            settings.llm_daily_budget_usd,
-                                            unpriced_usd=settings.llm_unpriced_call_usd)
+        self.budget = budget or DailyBudget(
+            settings.index_path / "llm_spend.json",
+            settings.llm_daily_budget_usd,
+            unpriced_usd=settings.llm_unpriced_call_usd,
+        )
 
     def answer(self, question: str, *, top_k: int | None = None) -> Answer:
         res = self.retriever.search(question, top_k=top_k)
         hits = list(res.results)
         ans = Answer(question=question, model=self.settings.llm_model, retrieval=res)
-        for msg in (res.diagnostics.get("degraded") or []):  # type: ignore[attr-defined]
+        for msg in res.diagnostics.get("degraded") or []:  # type: ignore[attr-defined]
             ans.degraded.append(str(msg))
 
         if not hits:
@@ -478,17 +514,26 @@ class Answerer:
             return ans
 
         context, citations = build_context(
-            [ChunkHit(chunk_id=h.chunk_id, doc_id=h.doc_id, ordinal=h.ordinal, title=h.title,
-                      breadcrumb=h.breadcrumb, source_url=h.source_url, body=h.body)
-             for h in hits],
+            [
+                ChunkHit(
+                    chunk_id=h.chunk_id,
+                    doc_id=h.doc_id,
+                    ordinal=h.ordinal,
+                    title=h.title,
+                    breadcrumb=h.breadcrumb,
+                    source_url=h.source_url,
+                    body=h.body,
+                )
+                for h in hits
+            ],
             max_chars=self.settings.max_context_chars,
             max_per_doc=self.settings.max_chunks_per_doc,
         )
         ans.citations = citations
 
-        user = (f"【文档片段】\n{context}\n\n"
-                f"【问题】\n{question}\n\n"
-                f"请依据上面的片段作答，并带上 [编号] 引用。")
+        user = (
+            f"【文档片段】\n{context}\n\n【问题】\n{question}\n\n请依据上面的片段作答，并带上 [编号] 引用。"
+        )
         try:
             self.budget.check()
         except BudgetExceeded as e:
@@ -524,7 +569,8 @@ class Answerer:
         if not result.cost_priced:
             ans.degraded.append(
                 "这次调用**算不出价**（litellm 价格表里没有这个模型）：已按保守上限计入"
-                "当日预算，请勿把它当成免费调用")
+                "当日预算，请勿把它当成免费调用"
+            )
         if not ans.text:
             ans.refused = True
             ans.refusal_reason = "模型返回空内容"

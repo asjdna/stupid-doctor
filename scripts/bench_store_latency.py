@@ -22,6 +22,7 @@
     python scripts/bench_store_latency.py --backends all       # 加上 pgvector（需已灌数据）
     python scripts/bench_store_latency.py --provider hashing   # 不加载真实模型（仅冒烟）
 """
+
 from __future__ import annotations
 
 import argparse
@@ -60,15 +61,20 @@ class BenchResult:
     def to_json(self) -> dict[str, object]:
         """落盘用：不含逐查询明细（那个只有跨后端对照时才用，体积大且无独立价值）。"""
         return {
-            "backend": self.backend, "n_chunks": self.n_chunks, "open_ms": self.open_ms,
-            "n_queries": self.n_queries, "n_samples": self.n_samples,
-            "dense_ms": self.dense_ms, "keyword_ms": self.keyword_ms,
+            "backend": self.backend,
+            "n_chunks": self.n_chunks,
+            "open_ms": self.open_ms,
+            "n_queries": self.n_queries,
+            "n_samples": self.n_samples,
+            "dense_ms": self.dense_ms,
+            "keyword_ms": self.keyword_ms,
             "agreement": self.agreement,
         }
 
 
-def bench_backend(name: str, store: Store, queries: list[str],
-                  qvecs: np.ndarray, top_k: int, repeats: int) -> BenchResult:
+def bench_backend(
+    name: str, store: Store, queries: list[str], qvecs: np.ndarray, top_k: int, repeats: int
+) -> BenchResult:
     """分别测两路，**不做交错**。
 
     为什么分开：实测交错跑时向量路的 p50 会从 13ms 涨到 21ms（同一份数据、
@@ -123,9 +129,13 @@ def _agreement(base: list[list[str]], other: list[list[str]], top_k: int) -> dic
     total = len(base)
     identical = sum(1 for a, b in zip(base, other, strict=True) if a == b)
     same_set = sum(1 for a, b in zip(base, other, strict=True) if set(a) == set(b))
-    overlap = statistics.fmean(
-        len(set(a) & set(b)) / max(min(len(a), len(b)), 1)
-        for a, b in zip(base, other, strict=True)) if total else 0.0
+    overlap = (
+        statistics.fmean(
+            len(set(a) & set(b)) / max(min(len(a), len(b)), 1) for a, b in zip(base, other, strict=True)
+        )
+        if total
+        else 0.0
+    )
     return {
         "n_queries": str(total),
         "identical_topk": f"{identical}/{total}",
@@ -141,15 +151,17 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--gold", default="data/eval/retrieval_gold.jsonl")
     ap.add_argument("--provider", default="bge", choices=["bge", "hashing"])
     ap.add_argument("--top-k", type=int, default=10)
-    ap.add_argument("--repeats", type=int, default=3,
-                    help="每个查询重复轮数（样本数 = 轮数 × 查询数）")
-    ap.add_argument("--backends", nargs="+", default=["sqlite", "sqlite-vec"],
-                    help="要测的后端；也可以写 all（含 pgvector）")
+    ap.add_argument("--repeats", type=int, default=3, help="每个查询重复轮数（样本数 = 轮数 × 查询数）")
+    ap.add_argument(
+        "--backends",
+        nargs="+",
+        default=["sqlite", "sqlite-vec"],
+        help="要测的后端；也可以写 all（含 pgvector）",
+    )
     ap.add_argument("--json-out", default="data/eval/store_bench/latency.json")
     args = ap.parse_args(argv)
 
-    backends = ["sqlite", "sqlite-vec", "pgvector"] if "all" in args.backends \
-        else list(args.backends)
+    backends = ["sqlite", "sqlite-vec", "pgvector"] if "all" in args.backends else list(args.backends)
 
     root = Path(__file__).resolve().parents[1]
     gold = Path(args.gold)
@@ -157,8 +169,7 @@ def main(argv: list[str] | None = None) -> int:
     queries = [r.q for r in load_gold(gold)]
     print(f"金标查询：{len(queries)} 条（来自 {gold}）")
 
-    settings = Settings(index_dir=args.index_dir, domain=args.domain,
-                        embedding_provider=args.provider)
+    settings = Settings(index_dir=args.index_dir, domain=args.domain, embedding_provider=args.provider)
     embedder = build_embedder(settings)
     t0 = time.perf_counter()
     qvecs = embedder.encode(queries, is_query=True)
@@ -169,8 +180,17 @@ def main(argv: list[str] | None = None) -> int:
     stores: dict[str, Store] = {}
     try:
         for name in backends:
-            cfg = Settings(index_dir=args.index_dir, domain=args.domain,
-                           embedding_provider=args.provider, store=name)  # type: ignore[arg-type]
+            # ⚠️ `# type: ignore` 必须与 mypy 报错的那一行同**物理行**：这里 `name`
+            # 来自命令行（这里就是后端名），静态上不是 `store` 字段的 Literal 之一，
+            # 所以 arg-type 落在 `store=name` 上。`ruff format` 会拆参数，注释挂在
+            # 闭括号那行就失效了（实测：格式化后 mypy 从 0 issues 变成 2 errors）。
+            # 因此把参数逐行展开，把 ignore 钉在出错的那个参数上。
+            cfg = Settings(
+                index_dir=args.index_dir,
+                domain=args.domain,
+                embedding_provider=args.provider,
+                store=name,  # type: ignore[arg-type]
+            )
             t0 = time.perf_counter()
             try:
                 store = from_settings(cfg)
@@ -180,8 +200,9 @@ def main(argv: list[str] | None = None) -> int:
             open_ms = (time.perf_counter() - t0) * 1000
             st = store.stats()
             if st.n_chunks == 0 or st.embedding_dim != qvecs.shape[1]:
-                print(f"[{name}] 跳过：块 {st.n_chunks}，维度 {st.embedding_dim}"
-                      f"（查询向量 {qvecs.shape[1]}）")
+                print(
+                    f"[{name}] 跳过：块 {st.n_chunks}，维度 {st.embedding_dim}（查询向量 {qvecs.shape[1]}）"
+                )
                 store.close()
                 continue
             print(f"[{name}] {st.n_chunks} 块，打开耗时 {open_ms:.0f}ms，开始计时…")
@@ -195,13 +216,17 @@ def main(argv: list[str] | None = None) -> int:
             print("没有任何后端跑出结果", file=sys.stderr)
             return 1
 
-        print(f"\n{'后端':<12}{'块数':>8}{'dense p50':>11}{'dense p95':>11}"
-              f"{'kw p50':>9}{'kw p95':>9}{'样本':>8}")
+        print(
+            f"\n{'后端':<12}{'块数':>8}{'dense p50':>11}{'dense p95':>11}"
+            f"{'kw p50':>9}{'kw p95':>9}{'样本':>8}"
+        )
         print("-" * 68)
         for r in results:
-            print(f"{r.backend:<12}{r.n_chunks:>8}{r.dense_ms['p50']:>11.2f}"
-                  f"{r.dense_ms['p95']:>11.2f}{r.keyword_ms['p50']:>9.2f}"
-                  f"{r.keyword_ms['p95']:>9.2f}{r.n_samples:>8}")
+            print(
+                f"{r.backend:<12}{r.n_chunks:>8}{r.dense_ms['p50']:>11.2f}"
+                f"{r.dense_ms['p95']:>11.2f}{r.keyword_ms['p50']:>9.2f}"
+                f"{r.keyword_ms['p95']:>9.2f}{r.n_samples:>8}"
+            )
 
         base = results[0]
         print(f"\n跨后端 top-{args.top_k} 一致性（基准 = {base.backend}）")
@@ -209,17 +234,24 @@ def main(argv: list[str] | None = None) -> int:
             dn = _agreement(base.dense_top, r.dense_top, args.top_k)
             kw = _agreement(base.keyword_top, r.keyword_top, args.top_k)
             r.agreement = {"vs": base.backend, "dense": dn, "keyword": kw}
-            print(f"  {r.backend:<12} 向量路 名次相同 {dn['identical_topk']:>8}，"
-                  f"集合相同 {dn['same_hit_set']:>8}（平均重合 {dn['mean_set_overlap']}）")
-            print(f"  {'':<12} 全文路 名次相同 {kw['identical_topk']:>8}，"
-                  f"集合相同 {kw['same_hit_set']:>8}（平均重合 {kw['mean_set_overlap']}）")
+            print(
+                f"  {r.backend:<12} 向量路 名次相同 {dn['identical_topk']:>8}，"
+                f"集合相同 {dn['same_hit_set']:>8}（平均重合 {dn['mean_set_overlap']}）"
+            )
+            print(
+                f"  {'':<12} 全文路 名次相同 {kw['identical_topk']:>8}，"
+                f"集合相同 {kw['same_hit_set']:>8}（平均重合 {kw['mean_set_overlap']}）"
+            )
 
         out = Path(args.json_out)
         out = out if out.is_absolute() else root / out
         out.parent.mkdir(parents=True, exist_ok=True)
         payload = {
-            "top_k": args.top_k, "repeats": args.repeats, "provider": args.provider,
-            "n_queries": len(queries), "computed_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
+            "top_k": args.top_k,
+            "repeats": args.repeats,
+            "provider": args.provider,
+            "n_queries": len(queries),
+            "computed_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
             "results": [r.to_json() for r in results],
         }
         out.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")

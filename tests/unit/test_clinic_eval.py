@@ -7,6 +7,7 @@
 `clinic_baseline.json` 里 `triage.accuracy = 0.0`（hit 0 / total 5）也照样通过。
 "质量闸门不看质量指标"正是这组用例要钉死的形态。
 """
+
 from __future__ import annotations
 
 import pytest
@@ -27,9 +28,13 @@ GOLD = repo_root() / "data" / "eval" / "clinic_gold.jsonl"
 
 def _clean_report(**overrides: object) -> ClinicReport:
     """红线干净 + 分诊达标的报告；`overrides` 用来逐项构造"该红"的场景。"""
-    base: dict[str, object] = {"redline_tp": 5, "redline_tn": 5,
-                               "triage_total": 5, "triage_hit": 3,
-                               "triage_evaluated": True}
+    base: dict[str, object] = {
+        "redline_tp": 5,
+        "redline_tn": 5,
+        "triage_total": 5,
+        "triage_hit": 3,
+        "triage_evaluated": True,
+    }
     base.update(overrides)
     return ClinicReport(**base)  # type: ignore[arg-type]
 
@@ -46,8 +51,14 @@ class TestGoldSet:
     def test_gold_set_covers_all_four_non_trigger_categories(self, cases):
         """家属/既往/否认/假设四类都必须有用例——这是三维门控的验收面。"""
         kinds = {c.kind for c in cases}
-        for k in ("redline_other", "redline_past", "redline_negated",
-                  "redline_hypothetical", "redline_trigger", "safe_normal"):
+        for k in (
+            "redline_other",
+            "redline_past",
+            "redline_negated",
+            "redline_hypothetical",
+            "redline_trigger",
+            "safe_normal",
+        ):
             assert k in kinds, f"金标集缺少 {k} 类用例"
 
     def test_gold_set_has_no_duplicate_ids(self, cases):
@@ -66,8 +77,9 @@ class TestRedlineMetrics:
 
     def test_gate_fails_when_a_redline_is_missed(self):
         """**闸门必须能失败**：构造一个漏报，断言它真的会红。"""
-        cases = [ClinicCase(id="x1", kind="redline_trigger",
-                            text="这句里没有任何红线词", expect_red_line=True)]
+        cases = [
+            ClinicCase(id="x1", kind="redline_trigger", text="这句里没有任何红线词", expect_red_line=True)
+        ]
         report = evaluate_redline(cases)
         fails = gate_failures(report)
         assert fails and "红线漏报" in fails[0]
@@ -110,8 +122,8 @@ class TestTriageIsInTheGate:
 
     def test_triage_passing_the_threshold_passes_the_gate(self):
         """达标（含恰好等于门限）⇒ 通过。"""
-        assert gate_failures(_clean_report(triage_hit=3)) == []          # 3/5 = 0.60
-        assert gate_failures(_clean_report(triage_hit=5)) == []          # 5/5 = 1.00
+        assert gate_failures(_clean_report(triage_hit=3)) == []  # 3/5 = 0.60
+        assert gate_failures(_clean_report(triage_hit=5)) == []  # 5/5 = 1.00
 
     def test_triage_just_below_the_threshold_fails(self):
         """2/5 = 0.40 < 0.60 ⇒ 红。门限不是"必须 > 0"那条松线。"""
@@ -120,8 +132,7 @@ class TestTriageIsInTheGate:
 
     def test_missed_triage_cases_are_listed(self):
         """失败原因里要带上未命中的用例，否则"0 分"没法排查。"""
-        report = _clean_report(triage_hit=0,
-                               triage_missed=["t01 期望 呼吸内科，实际 []"])
+        report = _clean_report(triage_hit=0, triage_missed=["t01 期望 呼吸内科，实际 []"])
         fails = gate_failures(report)
         assert any("t01" in f for f in fails), fails
 
@@ -137,27 +148,24 @@ class TestTriageIsInTheGate:
 class TestTriageMetricIsNotFaked:
     def test_unevaluated_when_no_links(self):
         """缺语料时返回"未评测"，而不是把答不出来算成 0%——后者会误导。"""
-        cases = [ClinicCase(id="t", kind="triage_department", text="咳嗽",
-                            expect_department="呼吸内科")]
+        cases = [ClinicCase(id="t", kind="triage_department", text="咳嗽", expect_department="呼吸内科")]
         total, hit, evaluated, _ = evaluate_triage(cases, candidate_fn=None)
         assert (total, hit, evaluated) == (0, 0, False)
 
     def test_unevaluated_when_no_triage_cases(self):
         _t, _h, evaluated, _ = evaluate_triage(
-            [ClinicCase(id="x", kind="safe_normal", text="咳嗽")],
-            candidate_fn={"a": 1.0})
+            [ClinicCase(id="x", kind="safe_normal", text="咳嗽")], candidate_fn={"a": 1.0}
+        )
         assert evaluated is False
 
     def test_accuracy_is_none_when_not_evaluated(self):
         report = ClinicReport(triage_total=5, triage_hit=0, triage_evaluated=False)
         assert report.triage_accuracy is None
-        assert report.to_json()["triage"]["accuracy"] is None      # type: ignore[index]
+        assert report.to_json()["triage"]["accuracy"] is None  # type: ignore[index]
 
     def test_evaluated_triage_reports_a_real_number(self):
-        cases = [ClinicCase(id="t", kind="triage_department", text="咳嗽",
-                            expect_department="呼吸内科")]
-        total, hit, evaluated, _ = evaluate_triage(
-            cases, candidate_fn={"呼吸内科": 2.0, "消化内科": 1.0})
+        cases = [ClinicCase(id="t", kind="triage_department", text="咳嗽", expect_department="呼吸内科")]
+        total, hit, evaluated, _ = evaluate_triage(cases, candidate_fn={"呼吸内科": 2.0, "消化内科": 1.0})
         assert (total, hit, evaluated) == (1, 1, True)
 
 
@@ -165,5 +173,4 @@ class TestReportShape:
     def test_json_export_has_the_three_sections(self, cases):
         payload = evaluate_redline(cases).to_json()
         assert set(payload) >= {"n_cases", "redline", "booking", "triage"}
-        assert {"recall", "false_positive_rate", "missed", "false_alarms"} <= set(
-            payload["redline"])      # type: ignore[arg-type]
+        assert {"recall", "false_positive_rate", "missed", "false_alarms"} <= set(payload["redline"])  # type: ignore[arg-type]

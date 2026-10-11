@@ -85,6 +85,13 @@ ignore = [
 [tool.ruff.lint.isort]
 known-first-party = ["kubedocs"]
 
+[tool.ruff.format]
+# 显式锁定 LF。开发机是 Windows（`core.autocrlf=true`）、CI 是 Linux：
+# 不定死行尾，`ruff format --check` 的判定就依赖环境——本地"已格式化"、
+# CI"待重排"（或反之），门禁会变成一个环境函数而不是代码质量的函数。
+# 与 `.gitattributes` 的 `* text=auto eol=lf` 同向。
+line-ending = "lf"
+
 [tool.mypy]
 python_version = "3.10"
 warn_unused_ignores = true

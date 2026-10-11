@@ -11,6 +11,7 @@
 快速、离线、可重复地测;它只擅长字面重合,任何语义改写(同义、换语序)都会退化。
 所以它绝不出现在评测结论里——评测必须跑 BgeEmbedder。
 """
+
 from __future__ import annotations
 
 import os
@@ -51,8 +52,7 @@ class HashingEmbedder:
         self.name = f"hashing-{dim}"
 
     def _tokens(self, text: str) -> list[str]:
-        words = [w for w in "".join(
-            ch.lower() if ch.isalnum() else " " for ch in text).split() if w]
+        words = [w for w in "".join(ch.lower() if ch.isalnum() else " " for ch in text).split() if w]
         # 加二元词元，保留一点词序信息（单测里"pod 限制"与"限制 pod"应当可区分）
         bigrams = [f"{a}_{b}" for a, b in zip(words, words[1:], strict=False)]
         return words + bigrams
@@ -81,9 +81,16 @@ class BgeEmbedder:
     等路径都不必付出几秒的加载代价。
     """
 
-    def __init__(self, model_name: str = "BAAI/bge-small-en-v1.5", *,
-                 batch_size: int = 64, dim: int = 384, query_instruction: str = "",
-                 hf_endpoint: str = "", hf_offline: bool = False) -> None:
+    def __init__(
+        self,
+        model_name: str = "BAAI/bge-small-en-v1.5",
+        *,
+        batch_size: int = 64,
+        dim: int = 384,
+        query_instruction: str = "",
+        hf_endpoint: str = "",
+        hf_offline: bool = False,
+    ) -> None:
         self.name = model_name
         self.dim = dim
         self.batch_size = max(1, batch_size)
@@ -114,16 +121,20 @@ class BgeEmbedder:
                 self.dim = int(got)
         return self._model
 
-    def encode(self, texts: Sequence[str], *, is_query: bool = False,
-               show_progress: bool = False) -> np.ndarray:
+    def encode(
+        self, texts: Sequence[str], *, is_query: bool = False, show_progress: bool = False
+    ) -> np.ndarray:
         if not texts:
             return np.zeros((0, self.dim), dtype=np.float32)
         payload = list(texts)
         if is_query and self.query_instruction:
             payload = [f"{self.query_instruction}{t}" for t in payload]
         vecs = self.model.encode(  # type: ignore[attr-defined]
-            payload, batch_size=self.batch_size, normalize_embeddings=True,
-            convert_to_numpy=True, show_progress_bar=show_progress,
+            payload,
+            batch_size=self.batch_size,
+            normalize_embeddings=True,
+            convert_to_numpy=True,
+            show_progress_bar=show_progress,
         )
         out = np.asarray(vecs, dtype=np.float32)
         if out.ndim != 2 or out.shape[1] != self.dim:
@@ -162,9 +173,14 @@ def build_embedder(settings: Settings) -> Embedder:
     raise EmbedderError(f"不支持的 embedding_provider={provider!r}（可选 bge / hashing / api）")
 
 
-def embed_texts(embedder: Embedder, texts: Sequence[str], *, is_query: bool = False,
-                batch_size: int = 256,
-                progress: Callable[[int, int, float], None] | None = None) -> Vector:
+def embed_texts(
+    embedder: Embedder,
+    texts: Sequence[str],
+    *,
+    is_query: bool = False,
+    batch_size: int = 256,
+    progress: Callable[[int, int, float], None] | None = None,
+) -> Vector:
     """分批编码并拼成矩阵。
 
     分批的意义不只是显存/内存：进度可见 + 单批失败可定位（一次 2 万条崩了
@@ -174,7 +190,7 @@ def embed_texts(embedder: Embedder, texts: Sequence[str], *, is_query: bool = Fa
     chunks: list[np.ndarray] = []
     t0 = time.perf_counter()
     for i in range(0, len(texts), batch_size):
-        batch = list(texts[i:i + batch_size])
+        batch = list(texts[i : i + batch_size])
         # 显式分支而不是 **kwargs：Embedder 协议只承诺 encode(texts, is_query=...)，
         # show_progress 是 BgeEmbedder 特有的，混进协议会污染抽象。
         if isinstance(embedder, BgeEmbedder):

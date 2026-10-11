@@ -11,6 +11,7 @@
 2. **非法取值**：必须在**启动时**报错（`Settings` 的字面量校验），
    而不是等到第一次检索才炸，更不是自动纠正成默认值。
 """
+
 from __future__ import annotations
 
 from pathlib import Path
@@ -34,8 +35,10 @@ def milvus_available() -> tuple[bool, str]:
 
 def _settings(tmp_path: Path, **over: object) -> Settings:
     base: dict[str, object] = {
-        "index_dir": str(tmp_path / "index"), "domain": "k8s_docs",
-        "embedding_provider": "hashing", "embedding_dim": 32,
+        "index_dir": str(tmp_path / "index"),
+        "domain": "k8s_docs",
+        "embedding_provider": "hashing",
+        "embedding_dim": 32,
         "embedding_model": "hashing-test",
     }
     base.update(over)
@@ -80,8 +83,8 @@ class TestFactory:
         s = from_settings(_settings(tmp_path, store="sqlite"))
         try:
             assert isinstance(s, SqliteStore)
-            assert not isinstance(s, SqliteVecStore)      # 两个后端不能是同一个类
-            assert isinstance(s, Store)                   # 运行期也满足协议
+            assert not isinstance(s, SqliteVecStore)  # 两个后端不能是同一个类
+            assert isinstance(s, Store)  # 运行期也满足协议
         finally:
             s.close()
 
@@ -94,15 +97,18 @@ class TestFactory:
         finally:
             s.close()
 
-    @pytest.mark.parametrize(("backend", "module"), [
-        ("sqlite", "kubedocs.store.sqlite_store"),
-        ("sqlite-vec", "kubedocs.store.sqlite_vec_store"),
-        ("pgvector", "kubedocs.store.pgvector_store"),
-        ("milvus", "kubedocs.store.milvus_store"),
-    ])
+    @pytest.mark.parametrize(
+        ("backend", "module"),
+        [
+            ("sqlite", "kubedocs.store.sqlite_store"),
+            ("sqlite-vec", "kubedocs.store.sqlite_vec_store"),
+            ("pgvector", "kubedocs.store.pgvector_store"),
+            ("milvus", "kubedocs.store.milvus_store"),
+        ],
+    )
     def test_dispatch_targets_exactly_one_implementation(
-            self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
-            backend: str, module: str):
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, backend: str, module: str
+    ):
         """分派到正确模块，且**不会**顺带构造别的实现（没有回退链）。
 
         用哨兵替掉四个模块各自的 `from_settings`：如果工厂在自己失败后回退，
@@ -114,12 +120,15 @@ class TestFactory:
             def _fake(_settings: Settings) -> object:
                 calls.append(name)
                 return object()
+
             return _fake
 
-        for name, mod in (("sqlite", "kubedocs.store.sqlite_store"),
-                          ("sqlite-vec", "kubedocs.store.sqlite_vec_store"),
-                          ("pgvector", "kubedocs.store.pgvector_store"),
-                          ("milvus", "kubedocs.store.milvus_store")):
+        for name, mod in (
+            ("sqlite", "kubedocs.store.sqlite_store"),
+            ("sqlite-vec", "kubedocs.store.sqlite_vec_store"),
+            ("pgvector", "kubedocs.store.pgvector_store"),
+            ("milvus", "kubedocs.store.milvus_store"),
+        ):
             monkeypatch.setattr(f"{mod}.from_settings", make(name))
 
         from_settings(_settings(tmp_path, store=backend))
@@ -141,6 +150,7 @@ class TestFactory:
 
     def test_unknown_backend_raises_instead_of_falling_back(self, tmp_path: Path):
         """绕过 Settings 直接调工厂（例如下游代码自己拼了个配置对象）也要报错。"""
+
         class _Fake:
             store = "faiss"
             index_dir = str(tmp_path / "index")

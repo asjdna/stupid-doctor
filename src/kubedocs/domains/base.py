@@ -51,14 +51,19 @@ class DomainPack(Protocol):
     def corpus_root(self, settings: Settings) -> Path:
         """该域的语料根目录。"""
 
-    def build_index(self, store: Store, embedder: Embedder,
-                    settings: Settings, *, rebuild: bool = False,
-                    limit_files: int | None = None,
-                    progress: object = None) -> IngestReport:
+    def build_index(
+        self,
+        store: Store,
+        embedder: Embedder,
+        settings: Settings,
+        *,
+        rebuild: bool = False,
+        limit_files: int | None = None,
+        progress: object = None,
+    ) -> IngestReport:
         """把该域语料灌入索引。返回摄取报告（内核据此打印统计）。"""
 
-    def retriever(self, store: Store, embedder: Embedder,
-                  settings: Settings) -> HybridRetriever:
+    def retriever(self, store: Store, embedder: Embedder, settings: Settings) -> HybridRetriever:
         """构造该域的检索器。域不同，检索器内部配置可以不同。"""
 
     def tools(self) -> list[object]:
@@ -99,9 +104,12 @@ class DomainRegistry:
     @classmethod
     def describe(cls) -> list[dict[str, object]]:
         return [
-            {"name": p.name, "description": p.description,
-             "normalizer": p.normalizer_name,
-             "eval_sets": [str(x) for x in p.eval_sets()]}
+            {
+                "name": p.name,
+                "description": p.description,
+                "normalizer": p.normalizer_name,
+                "eval_sets": [str(x) for x in p.eval_sets()],
+            }
             for p in (cls._packs[n] for n in cls.names())
         ]
 

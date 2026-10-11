@@ -12,6 +12,7 @@
 
 用法：python scripts/mutation_check.py
 """
+
 from __future__ import annotations
 
 import pathlib
@@ -173,9 +174,16 @@ def main() -> int:
         _write(path, original.replace(old, new, 1))
         try:
             # 命令是本文件里写死的（解释器路径 + 固定参数），不存在外部输入参与构造；
-            # S603/S607 在这个场景下是误报，逐条说明而不是全局忽略
-            proc = subprocess.run([PY, "-m", "pytest", node, "-p", "no:cacheprovider"],  # noqa: S603
-                                  cwd=str(ROOT), capture_output=True, text=True)
+            # S603/S607 在这个场景下是误报，逐条说明而不是全局忽略。
+            # ⚠️ noqa 必须挂在 `subprocess.run(` 这一行：S603 的诊断**落在调用起始行**，
+            # 而 `ruff format` 会把参数拆到后续行——把 noqa 留在参数行上等于没抑制
+            # （实测：格式化后 `ruff check .` 反而变红，2026 年那次全量格式化就是）。
+            proc = subprocess.run(  # noqa: S603
+                [PY, "-m", "pytest", node, "-p", "no:cacheprovider"],
+                cwd=str(ROOT),
+                capture_output=True,
+                text=True,
+            )
             red = proc.returncode != 0
             last = [ln for ln in proc.stdout.strip().splitlines() if ln.strip()][-1:]
             print(f"[{'OK' if red else '没变红!'}] {name} -> exit {proc.returncode}  {last}")

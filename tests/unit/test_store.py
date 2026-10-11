@@ -1,4 +1,5 @@
 """存储层测试：FTS5 外内容表删除顺序、rowid 回收后的向量对齐、MATCH 注入面。"""
+
 from __future__ import annotations
 
 import numpy as np
@@ -22,13 +23,21 @@ def _vec(*xs: float, dim: int = 32) -> np.ndarray:
 
 def _doc(doc_id: str, n: int, text_prefix: str = "body") -> tuple[DocInput, list[ChunkInput]]:
     rel = f"{doc_id}.md"
-    d = DocInput(doc_id=doc_id, rel_path=rel, title=doc_id, source_url=f"u/{doc_id}/",
-                 content_hash=f"h-{doc_id}")
+    d = DocInput(
+        doc_id=doc_id, rel_path=rel, title=doc_id, source_url=f"u/{doc_id}/", content_hash=f"h-{doc_id}"
+    )
     chunks = [
-        ChunkInput(chunk_id=f"{doc_id}::{i:04d}", doc_id=doc_id, ordinal=i, title=doc_id,
-                   breadcrumb="sec", source_url=f"u/{doc_id}/",
-                   body=f"{text_prefix} {i} {doc_id}", content_hash=f"h-{doc_id}-{i}",
-                   n_chars=20)
+        ChunkInput(
+            chunk_id=f"{doc_id}::{i:04d}",
+            doc_id=doc_id,
+            ordinal=i,
+            title=doc_id,
+            breadcrumb="sec",
+            source_url=f"u/{doc_id}/",
+            body=f"{text_prefix} {i} {doc_id}",
+            content_hash=f"h-{doc_id}-{i}",
+            n_chars=20,
+        )
         for i in range(n)
     ]
     return d, chunks
@@ -66,7 +75,7 @@ class TestBuildMatchExpr:
 
     def test_quote_injection_is_neutralised(self):
         expr = build_match_expr('pod" OR "x')
-        assert expr.count('"') % 2 == 0      # 引号必须成对，否则 FTS5 语法错
+        assert expr.count('"') % 2 == 0  # 引号必须成对，否则 FTS5 语法错
         assert "pod" in expr
 
 
@@ -76,7 +85,7 @@ def test_upsert_and_keyword_search(store: SqliteStore):
     hits = store.keyword_search("kubelet", 10)
     # 两个块都含该词，都该被召回（同一文档的多块命中是正常的）
     assert [cid for cid, _ in hits] == ["a::0000", "a::0001"]
-    assert [rank for _, rank in hits] == [1, 2]      # 名次从 1 起且连续
+    assert [rank for _, rank in hits] == [1, 2]  # 名次从 1 起且连续
     assert store.keyword_search("nonexistentterm", 10) == []
 
 
@@ -84,7 +93,7 @@ def test_dense_search_ranks_by_cosine(store: SqliteStore):
     _upsert(store, "a", 1, axis=0)
     _upsert(store, "b", 1, axis=1)
     hits = store.dense_search(_vec(1.0), 5)
-    assert hits[0][0] == "b::0000"       # b 的向量是 e1，与查询完全一致
+    assert hits[0][0] == "b::0000"  # b 的向量是 e1，与查询完全一致
     assert hits[1][0] == "a::0000"
 
 
@@ -129,9 +138,9 @@ class TestRowidRecycling:
     def test_vector_row_stays_aligned_after_rowid_reuse(self, store: SqliteStore):
         _upsert(store, "a", 2, axis=0)
         _upsert(store, "b", 2, axis=1)
-        store.delete_docs({"b.md"})          # b 的 rowid 是最大的，会被回收
+        store.delete_docs({"b.md"})  # b 的 rowid 是最大的，会被回收
         store.finalize()
-        _upsert(store, "c", 2, axis=2)       # 新块很可能拿到 b 空出的 rowid
+        _upsert(store, "c", 2, axis=2)  # 新块很可能拿到 b 空出的 rowid
         store.finalize()
 
         # 若对齐错了，这里会拿到别的块的向量（余弦为 0），名次就乱了
@@ -148,15 +157,15 @@ class TestRowidRecycling:
 
     def test_reopen_keeps_index_usable(self, tmp_path):
         path = tmp_path / "re.db"
-        s = SqliteStore(db_path=path, vector_path=tmp_path / "re.npy", dim=32,
-                        embedding_model="hashing-test")
+        s = SqliteStore(db_path=path, vector_path=tmp_path / "re.npy", dim=32, embedding_model="hashing-test")
         d, chunks = _doc("a", 2)
         s.upsert_docs([d], chunks, {c.chunk_id: _vec(0.0, 1.0) for c in chunks})
         s.finalize()
         s.close()
 
-        s2 = SqliteStore(db_path=path, vector_path=tmp_path / "re.npy", dim=32,
-                         embedding_model="hashing-test")
+        s2 = SqliteStore(
+            db_path=path, vector_path=tmp_path / "re.npy", dim=32, embedding_model="hashing-test"
+        )
         try:
             assert s2.stats().n_chunks == 2
             assert s2.dense_search(_vec(0.0, 1.0), 1)[0][0] == "a::0000"
@@ -168,18 +177,22 @@ class TestRowidRecycling:
 # --------------------------------------------------------------------- 元信息守卫
 class TestMetaGuards:
     def test_dim_mismatch_refused(self, tmp_path):
-        SqliteStore(db_path=tmp_path / "m.db", vector_path=tmp_path / "m.npy", dim=32,
-                    embedding_model="m").close()
+        SqliteStore(
+            db_path=tmp_path / "m.db", vector_path=tmp_path / "m.npy", dim=32, embedding_model="m"
+        ).close()
         with pytest.raises(StoreError, match="维度"):
-            SqliteStore(db_path=tmp_path / "m.db", vector_path=tmp_path / "m.npy",
-                        dim=64, embedding_model="m")
+            SqliteStore(
+                db_path=tmp_path / "m.db", vector_path=tmp_path / "m.npy", dim=64, embedding_model="m"
+            )
 
     def test_model_mismatch_refused(self, tmp_path):
-        SqliteStore(db_path=tmp_path / "n.db", vector_path=tmp_path / "n.npy", dim=32,
-                    embedding_model="model-a").close()
+        SqliteStore(
+            db_path=tmp_path / "n.db", vector_path=tmp_path / "n.npy", dim=32, embedding_model="model-a"
+        ).close()
         with pytest.raises(StoreError, match="嵌入模型"):
-            SqliteStore(db_path=tmp_path / "n.db", vector_path=tmp_path / "n.npy",
-                        dim=32, embedding_model="model-b")
+            SqliteStore(
+                db_path=tmp_path / "n.db", vector_path=tmp_path / "n.npy", dim=32, embedding_model="model-b"
+            )
 
     def test_missing_vector_is_refused_not_zero_filled(self, store: SqliteStore):
         d, chunks = _doc("a", 1)
@@ -207,11 +220,28 @@ def test_doc_texts_concatenates_by_doc(store: SqliteStore):
 def test_stats_counts_code_chunks(store: SqliteStore):
     d = DocInput(doc_id="a", rel_path="a.md", title="a", source_url="u", content_hash="h")
     chunks = [
-        ChunkInput(chunk_id="a::0000", doc_id="a", ordinal=0, title="a", breadcrumb="s",
-                   source_url="u", body="```\nkubectl get pods\n```", content_hash="h0",
-                   n_chars=20),
-        ChunkInput(chunk_id="a::0001", doc_id="a", ordinal=1, title="a", breadcrumb="s",
-                   source_url="u", body="plain text", content_hash="h1", n_chars=10),
+        ChunkInput(
+            chunk_id="a::0000",
+            doc_id="a",
+            ordinal=0,
+            title="a",
+            breadcrumb="s",
+            source_url="u",
+            body="```\nkubectl get pods\n```",
+            content_hash="h0",
+            n_chars=20,
+        ),
+        ChunkInput(
+            chunk_id="a::0001",
+            doc_id="a",
+            ordinal=1,
+            title="a",
+            breadcrumb="s",
+            source_url="u",
+            body="plain text",
+            content_hash="h1",
+            n_chars=10,
+        ),
     ]
     store.upsert_docs([d], chunks, {"a::0000": _vec(1.0), "a::0001": _vec(0.0, 1.0)})
     store.finalize()

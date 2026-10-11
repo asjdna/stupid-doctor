@@ -6,6 +6,7 @@
 还会因为模型版本变化导致结果抖动。真实模型的检索质量由 `cli eval` 在
 真实语料上评测（那才是它的位置），单测只验证**管道正确性**。
 """
+
 from __future__ import annotations
 
 import sys
@@ -23,8 +24,12 @@ DIM = 32
 
 # 供应商密钥环境变量：测试必须在任何情况下都拿不到它们
 _PROVIDER_KEY_VARS = (
-    "DEEPSEEK_API_KEY", "OPENAI_API_KEY", "ANTHROPIC_API_KEY", "GEMINI_API_KEY",
-    "AZURE_API_KEY", "KUBEDOCS_LLM_API_KEY",
+    "DEEPSEEK_API_KEY",
+    "OPENAI_API_KEY",
+    "ANTHROPIC_API_KEY",
+    "GEMINI_API_KEY",
+    "AZURE_API_KEY",
+    "KUBEDOCS_LLM_API_KEY",
 )
 
 
@@ -68,8 +73,9 @@ def embedder() -> HashingEmbedder:
 
 @pytest.fixture
 def store(tmp_path: Path) -> SqliteStore:
-    s = SqliteStore(db_path=tmp_path / "t.db", vector_path=tmp_path / "t.npy",
-                    dim=DIM, embedding_model="hashing-test")
+    s = SqliteStore(
+        db_path=tmp_path / "t.db", vector_path=tmp_path / "t.npy", dim=DIM, embedding_model="hashing-test"
+    )
     yield s
     s.close()
 

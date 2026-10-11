@@ -25,6 +25,7 @@ orchestrator 在"控制流由谁决定"这一点上并无本质区别。本模�
 否则工具循环会拒绝执行并把"需要用户确认"回灌给模型。
 `when_not` 也写了"用户没明确要求时绝对不要调"——两道防线。
 """
+
 from __future__ import annotations
 
 from collections.abc import Sequence
@@ -84,8 +85,11 @@ def build_system_prompt(tools: Sequence[ToolSpec]) -> str:
     names = sorted(t.name for t in tools)
     # 空清单那行**故意不以 “- ” 开头**：`- ` 前缀是“这是一个工具名”的约定，
     # 让占位文案也用这个前缀，会把“没有工具”读成“有一个叫（当前没有任何工具可用）的工具”。
-    block = ("\n".join([TOOL_LIST_HEADER, *(f"- {name}" for name in names)]) if names
-             else f"{TOOL_LIST_HEADER}\n（当前没有任何工具可用：不要声称自己查过任何资料）")
+    block = (
+        "\n".join([TOOL_LIST_HEADER, *(f"- {name}" for name in names)])
+        if names
+        else f"{TOOL_LIST_HEADER}\n（当前没有任何工具可用：不要声称自己查过任何资料）"
+    )
     # 用 replace 而不是 str.format：提示词里将来出现花括号（例如 JSON 示例）时不会炸。
     return SYSTEM_TEMPLATE.replace("{tool_list}", block)
 
@@ -115,8 +119,7 @@ class ClinicReactRuntime:
     每轮新建会丢掉号源库存（那会变成"挂完号又有了"的荒谬现象）。
     """
 
-    def __init__(self, settings: Settings, service: Any,
-                 retriever: Any | None = None) -> None:
+    def __init__(self, settings: Settings, service: Any, retriever: Any | None = None) -> None:
         self.settings = settings
         self.service = service
         self.retriever = retriever
@@ -127,9 +130,11 @@ class ClinicReactRuntime:
         # 曾经每轮新建的是 caller（成本随之丢弃），见 SECURITY.md 的 S-2。
         from kubedocs.generate import DailyBudget
 
-        self.budget = DailyBudget(settings.index_path / "llm_spend.json",
-                                  settings.llm_daily_budget_usd,
-                                  unpriced_usd=settings.llm_unpriced_call_usd)
+        self.budget = DailyBudget(
+            settings.index_path / "llm_spend.json",
+            settings.llm_daily_budget_usd,
+            unpriced_usd=settings.llm_unpriced_call_usd,
+        )
         # 注册工具是"接线"动作：不做它，run_tool_loop 拿到的 tools 会是空的
         register_domain_tools("clinic", service=service, retriever=retriever)
 
@@ -158,16 +163,30 @@ class ClinicReactRuntime:
         if hit is not None:
             # 红线命中：确定性返回，LLM 无权参与
             text = emergency_menu(hit.word)
-            return ClinicTurn(text=text, tool_calls=[
-                {"tool": "check_red_line", "word": hit.word, "status": hit.status,
-                 "experiencer": hit.experiencer, "temporality": hit.temporality}],
-                emergency=True, notes=["红线命中（确定性规则，LLM 不可绕过）"])
+            return ClinicTurn(
+                text=text,
+                tool_calls=[
+                    {
+                        "tool": "check_red_line",
+                        "word": hit.word,
+                        "status": hit.status,
+                        "experiencer": hit.experiencer,
+                        "temporality": hit.temporality,
+                    }
+                ],
+                emergency=True,
+                notes=["红线命中（确定性规则，LLM 不可绕过）"],
+            )
 
         if not self.has_llm():
             return ClinicTurn(
-                text=("当前没有配置大模型密钥，无法进行对话式问诊。"
-                      "如需挂号请直接说明科室；紧急情况请立即拨打 120。"),
-                tool_calls=[], notes=["未配置 LLM 密钥"])
+                text=(
+                    "当前没有配置大模型密钥，无法进行对话式问诊。"
+                    "如需挂号请直接说明科室；紧急情况请立即拨打 120。"
+                ),
+                tool_calls=[],
+                notes=["未配置 LLM 密钥"],
+            )
 
         from kubedocs.agent.llm_tool_caller import LiteLLMToolCaller
 
@@ -182,18 +201,32 @@ class ClinicReactRuntime:
         # 用户这一轮明确要求挂号 = 对他的取号确认；否则拒绝执行有副作用的工具
         user_asked_to_book = wants_booking(message)
         turn: AgentTurn = run_tool_loop(
-            message, tools=self.tools, llm=caller, system=prompt, max_steps=5,
-            history=history, budget=self.budget,
+            message,
+            tools=self.tools,
+            llm=caller,
+            system=prompt,
+            max_steps=5,
+            history=history,
+            budget=self.budget,
             confirm=(lambda _call: True) if user_asked_to_book else None,
         )
         return ClinicTurn(
             text=turn.answer or "（模型没有给出内容，请再说一次或换个说法）",
-            tool_calls=[{"tool": tc.name, "arguments": tc.arguments,
-                         "error": tc.error or None,
-                         "result": None if tc.error else tc.result}
-                        for tc in turn.tool_calls],
-            steps=turn.steps, llm_calls=turn.llm_calls, notes=list(turn.notes),
-            cost_usd=turn.cost_usd, unpriced_calls=turn.unpriced_calls)
+            tool_calls=[
+                {
+                    "tool": tc.name,
+                    "arguments": tc.arguments,
+                    "error": tc.error or None,
+                    "result": None if tc.error else tc.result,
+                }
+                for tc in turn.tool_calls
+            ],
+            steps=turn.steps,
+            llm_calls=turn.llm_calls,
+            notes=list(turn.notes),
+            cost_usd=turn.cost_usd,
+            unpriced_calls=turn.unpriced_calls,
+        )
 
 
 def emergency_text_for(message: str) -> str | None:

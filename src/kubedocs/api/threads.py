@@ -34,6 +34,7 @@
 读写一律持 `threading.Lock`。尤其"先看属主再改历史"必须是**一次**临界区，
 否则两个请求可以各自看到"还没有这个线程"然后各绑一个属主。
 """
+
 from __future__ import annotations
 
 import threading
@@ -85,8 +86,9 @@ class _Thread:
 class ThreadStore:
     """有界 + 带属主的会话表。键是客户端给的 `thread_id`。"""
 
-    def __init__(self, *, max_threads: int = MAX_THREADS,
-                 max_messages: int = MAX_MESSAGES_PER_THREAD) -> None:
+    def __init__(
+        self, *, max_threads: int = MAX_THREADS, max_messages: int = MAX_MESSAGES_PER_THREAD
+    ) -> None:
         if max_threads < 1:
             raise ValueError(f"max_threads 必须 >= 1（收到 {max_threads}）")
         if max_messages < 1:
@@ -128,8 +130,7 @@ class ThreadStore:
             self._threads.move_to_end(thread_id)
             return list(thread.messages)
 
-    def append(self, thread_id: str, owner: str,
-               entries: Sequence[dict[str, Any]]) -> list[dict[str, Any]]:
+    def append(self, thread_id: str, owner: str, entries: Sequence[dict[str, Any]]) -> list[dict[str, Any]]:
         """追加消息并保留最近 `max_messages` 条，返回保留后的历史。
 
         线程不存在时**按该属主新建**（`claim` 已经在端点里做过一次属主判定，
@@ -142,7 +143,7 @@ class ThreadStore:
                 self._threads[thread_id] = thread
             elif thread.owner != owner:
                 raise ThreadOwnershipError(thread_id)
-            thread.messages = (thread.messages + list(entries))[-self.max_messages:]
+            thread.messages = (thread.messages + list(entries))[-self.max_messages :]
             self._threads.move_to_end(thread_id)
             self._evict_locked()
             return list(thread.messages)

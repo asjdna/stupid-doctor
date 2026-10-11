@@ -8,6 +8,7 @@
 所以本文件的第一条断言就是：注册之后，`ToolRegistry.for_domain("clinic")` 里
 必须能看到它们。
 """
+
 from __future__ import annotations
 
 import pytest
@@ -117,7 +118,8 @@ class TestToolSemantics:
     def test_book_tool_actually_books(self, service):
         register_domain_tools("clinic", service=service)
         ticket = ToolRegistry.get("book_appointment").handler(
-            department="心内科", date="", time_slot="上午", patient_id="u1")
+            department="心内科", date="", time_slot="上午", patient_id="u1"
+        )
         assert ticket.get("ticket_no")
         assert service.my_appointments("u1")
 

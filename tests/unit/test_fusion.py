@@ -5,6 +5,7 @@
 2. **单路为空时不得稀释另一路**——这是实现里最容易写错、也最难在评测里发现的地方；
 3. 同分时排序确定性（否则评测与闸门会随进程抖动）。
 """
+
 import pytest
 
 from kubedocs.retrieve.fusion import Fused, explanation, rrf_fuse, truncate_dedup
@@ -14,7 +15,7 @@ def test_两路共同命中排第一():
     bm25 = ["a", "b", "c"]
     dense = ["c", "d", "a"]
     out = rrf_fuse([("bm25", bm25), ("dense", dense)])
-    assert out[0].key == "a", [f.key for f in out]      # a 在两路都在前二
+    assert out[0].key == "a", [f.key for f in out]  # a 在两路都在前二
     assert {f.key for f in out} == {"a", "b", "c", "d"}
 
 
@@ -75,7 +76,7 @@ def test_记录各路名次用于解释():
 
 
 def test_忽略_None_键():
-    out = rrf_fuse([("bm25", ["a", None, "b"])])   # type: ignore[list-item]
+    out = rrf_fuse([("bm25", ["a", None, "b"])])  # type: ignore[list-item]
     assert {f.key for f in out} == {"a", "b"}
 
 

@@ -1,4 +1,5 @@
 """配置测试：路径锚定、有效嵌入模型标识、校验器。"""
+
 from __future__ import annotations
 
 import os
@@ -30,7 +31,7 @@ class TestPathAnchoring:
         b = Settings(index_dir=str(tmp_path), domain="clinic")
         assert a.index_path == tmp_path / "k8s_docs"
         assert b.index_path == tmp_path / "clinic"
-        assert a.sqlite_path != b.sqlite_path      # 两个域不能共用一个库文件
+        assert a.sqlite_path != b.sqlite_path  # 两个域不能共用一个库文件
         assert a.index_path.parent == b.index_path.parent
 
     def test_absolute_paths_are_respected(self, tmp_path: Path):
@@ -52,8 +53,9 @@ class TestEffectiveEmbeddingModel:
     """
 
     def test_hashing_reports_its_own_identity(self):
-        s = Settings(embedding_provider="hashing", embedding_dim=384,
-                     embedding_model="BAAI/bge-small-en-v1.5")
+        s = Settings(
+            embedding_provider="hashing", embedding_dim=384, embedding_model="BAAI/bge-small-en-v1.5"
+        )
         assert s.effective_embedding_model == "hashing-384"
         assert s.effective_embedding_model != s.embedding_model
 
@@ -86,11 +88,6 @@ class TestValidators:
 def test_llm_fallback_list_parsing():
     assert Settings(llm_fallbacks="a/b, c/d ,").llm_fallback_list == ["a/b", "c/d"]
     assert Settings(llm_fallbacks="").llm_fallback_list == []
-
-
-def test_is_prod_flag():
-    assert Settings(env="prod").is_prod is True
-    assert Settings(env="local").is_prod is False
 
 
 class TestLoadEnvFile:

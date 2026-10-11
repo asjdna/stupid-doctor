@@ -14,6 +14,7 @@
 3. `--gate --json` 的退出码与不带 `--json` **逐位相同**，且 stdout 是**纯 JSON**
    （旁白走 stderr）——与 `evaluation/harness.run_eval` 的 `emit()` 同一约定。
 """
+
 from __future__ import annotations
 
 import importlib.util
@@ -53,12 +54,12 @@ def gold(tmp_path: Path) -> Path:
     path.write_text(
         '{"id": "s1", "kind": "safe_normal", "text": "今天天气不错", "expect_red_line": false}\n'
         '{"id": "t1", "kind": "triage_department", "text": "我咳嗽", "expect_department": "呼吸内科"}\n',
-        encoding="utf-8")
+        encoding="utf-8",
+    )
     return path
 
 
-def _stub_triage(script: ModuleType, monkeypatch: pytest.MonkeyPatch, *,
-                 top: str) -> None:
+def _stub_triage(script: ModuleType, monkeypatch: pytest.MonkeyPatch, *, top: str) -> None:
     """把 `_triage_candidates` 换成一个"永远给出 `top` 科室"的假实现。"""
 
     def fake(*, json_mode: bool = False) -> Any:
@@ -72,17 +73,15 @@ def _stub_triage(script: ModuleType, monkeypatch: pytest.MonkeyPatch, *,
     monkeypatch.setattr(script, "_triage_candidates", fake)
 
 
-def _run(script: ModuleType, gold: Path, tmp_path: Path,
-         *extra: str) -> int:
+def _run(script: ModuleType, gold: Path, tmp_path: Path, *extra: str) -> int:
     baseline = tmp_path / "does-not-exist-baseline.json"
     return int(script.main(["--gold", str(gold), "--baseline", str(baseline), *extra]))
 
 
 class TestTriageDrivesTheExitCode:
-    def test_zero_triage_accuracy_fails_the_gate(self, script, gold, tmp_path,
-                                                 monkeypatch, capsys):
+    def test_zero_triage_accuracy_fails_the_gate(self, script, gold, tmp_path, monkeypatch, capsys):
         """分诊一条都不中 ⇒ 退出码 2（缺陷回归：修复前是 0）。"""
-        _stub_triage(script, monkeypatch, top="骨科")          # 期望科室命中不了
+        _stub_triage(script, monkeypatch, top="骨科")  # 期望科室命中不了
         code = _run(script, gold, tmp_path, "--gate")
 
         assert code == 2
@@ -100,7 +99,8 @@ class TestTriageDrivesTheExitCode:
         assert "闸门：通过" in capsys.readouterr().out
 
     def test_without_gate_the_exit_code_is_zero_even_when_triage_is_zero(
-            self, script, gold, tmp_path, monkeypatch):
+        self, script, gold, tmp_path, monkeypatch
+    ):
         """不带 `--gate` 时退出码仍是 0：闸门只在被要求时才卡。"""
         _stub_triage(script, monkeypatch, top="骨科")
         assert _run(script, gold, tmp_path) == 0
@@ -114,19 +114,19 @@ class TestJsonDoesNotBypassTheGate:
         assert _run(script, gold, tmp_path, "--gate", "--json") == 0
 
     def test_stdout_is_pure_json_and_gate_noise_goes_to_stderr(
-            self, script, gold, tmp_path, monkeypatch, capsys):
+        self, script, gold, tmp_path, monkeypatch, capsys
+    ):
         """`--json` 只改输出格式：stdout 必须能被 `json.loads` 直接吃掉。"""
         _stub_triage(script, monkeypatch, top="骨科")
         code = _run(script, gold, tmp_path, "--gate", "--json")
 
         captured = capsys.readouterr()
         assert code == 2
-        payload = json.loads(captured.out)                 # 旁白混进来就会在这里炸
+        payload = json.loads(captured.out)  # 旁白混进来就会在这里炸
         assert payload["triage"]["accuracy"] == 0.0
         assert "闸门：不通过" in captured.err
 
-    def test_without_json_the_gate_output_stays_on_stdout(
-            self, script, gold, tmp_path, monkeypatch, capsys):
+    def test_without_json_the_gate_output_stays_on_stdout(self, script, gold, tmp_path, monkeypatch, capsys):
         """非 `--json` 时输出位置**逐字不变**（仍在 stdout），不制造无谓的破坏性改动。"""
         _stub_triage(script, monkeypatch, top="骨科")
         _run(script, gold, tmp_path, "--gate")

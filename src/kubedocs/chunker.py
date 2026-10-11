@@ -21,6 +21,7 @@ K8s 文档是 Hugo markdown，直接按 1000 字符切会踩三个坑（都会�
 - `content_hash` —— 文本的指纹，供摄取管线判断"是否真的变了"。
 两者分开，才能做到「幂等重入 + 增量更新」，而不是每次全量重写。
 """
+
 from __future__ import annotations
 
 import hashlib
@@ -64,11 +65,11 @@ def strip_html(body: str) -> str:
             in_fence = not in_fence
             out.append(line)
             continue
-        if in_fence:                       # 代码内部原样保留
+        if in_fence:  # 代码内部原样保留
             out.append(line)
             continue
         s = line
-        if "<" in s:                       # 快路径：没有尖括号就不必跑标签替换
+        if "<" in s:  # 快路径：没有尖括号就不必跑标签替换
             s = _DROP_BLOCK_RE.sub("", s)
             s = _BR_RE.sub("\n", s)
             s = _CELL_SPLIT_RE.sub(" | ", s)
@@ -92,7 +93,7 @@ def _safe_overlap_tail(block: str, overlap: int) -> str:
     for sep in ("\n", " "):
         idx = tail.find(sep)
         if idx != -1 and idx < len(tail) - 1:
-            return tail[idx + 1:]
+            return tail[idx + 1 :]
     return ""
 
 
@@ -101,12 +102,12 @@ class Chunk:
     """一个可检索块。metadata 全部保留，供引用与调试。"""
 
     chunk_id: str
-    doc_path: str            # 相对语料根的路径，如 concepts/architecture/cgroups.md
-    index: int               # 该文档内的块序号
+    doc_path: str  # 相对语料根的路径，如 concepts/architecture/cgroups.md
+    index: int  # 该文档内的块序号
     text: str
-    breadcrumb: list[str] = field(default_factory=list)   # 标题路径，如 ["Cgroups", "限制"]
-    title: str = ""          # 文档标题（front matter > 首个 h1 > 文件名）
-    source_url: str = ""     # 可点击的官方文档地址
+    breadcrumb: list[str] = field(default_factory=list)  # 标题路径，如 ["Cgroups", "限制"]
+    title: str = ""  # 文档标题（front matter > 首个 h1 > 文件名）
+    source_url: str = ""  # 可点击的官方文档地址
     content_hash: str = ""
 
     @property
@@ -126,7 +127,7 @@ def parse_front_matter(text: str) -> tuple[dict, str]:
             continue
         key, _, value = line.partition(":")
         meta[key.strip()] = value.strip().strip("'\"")
-    return meta, text[m.end():]
+    return meta, text[m.end() :]
 
 
 def clean_body(body: str) -> str:
@@ -155,7 +156,7 @@ def _iter_lines_outside_fence(body: str) -> Iterator[tuple[str, bool]]:
     in_fence = False
     for line in body.splitlines():
         if _CODE_FENCE_RE.match(line):
-            yield line, in_fence          # 围栏行本身按当前状态归属
+            yield line, in_fence  # 围栏行本身按当前状态归属
             in_fence = not in_fence
             continue
         yield line, in_fence
@@ -192,7 +193,7 @@ def split_sections(body: str) -> list[tuple[list[str], str]]:
         while breadcrumb and breadcrumb[-1][0] >= level:
             breadcrumb.pop()
         breadcrumb.append((level, title))
-        buf.append(line)          # 标题行进正文，保证可检索、引用可读
+        buf.append(line)  # 标题行进正文，保证可检索、引用可读
     flush()
     return sections
 
@@ -215,7 +216,7 @@ def _atomic_units(text: str) -> list[str]:
     for para in re.split(r"\n\s*\n", text):
         if in_fence:
             code_buf.append(para)
-            if _fence_toggle(para):                  # 围栏在此段闭合
+            if _fence_toggle(para):  # 围栏在此段闭合
                 in_fence = False
                 units.append("\n\n".join(code_buf))
                 code_buf = []
@@ -225,7 +226,7 @@ def _atomic_units(text: str) -> list[str]:
             code_buf = [para]
             continue
         units.append(para)
-    if code_buf:                                     # 围栏未闭合（文档写坏了）→ 原样保留
+    if code_buf:  # 围栏未闭合（文档写坏了）→ 原样保留
         units.append("\n\n".join(code_buf))
     return [u for u in units if u.strip()]
 
@@ -359,8 +360,7 @@ def chunk_document(
                 breadcrumb=breadcrumb,
                 title=title,
                 source_url=url,
-                content_hash=hashlib.blake2b(final_text.encode("utf-8"),
-                                             digest_size=8).hexdigest(),
+                content_hash=hashlib.blake2b(final_text.encode("utf-8"), digest_size=8).hexdigest(),
             )
         )
     return out

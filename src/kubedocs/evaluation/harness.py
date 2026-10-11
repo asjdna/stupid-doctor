@@ -13,6 +13,7 @@
    没有可比性，静默比较是自欺。
 4. **基线漂移容忍**：hit@k / mrr@k 相对基线下降超过阈值即失败（退出码 2）。
 """
+
 from __future__ import annotations
 
 import hashlib
@@ -36,7 +37,7 @@ BASELINE_SCHEMA = 1
 # 太松则失去意义。2 个百分点对 40+ 条标注集是"约 1 条查询"的量级。
 GATE_TOL_HIT = 0.02
 GATE_TOL_MRR = 0.02
-CORPUS_DRIFT_TOL = 0.02          # 索引块数变化超过 2% 视为换了语料
+CORPUS_DRIFT_TOL = 0.02  # 索引块数变化超过 2% 视为换了语料
 
 KINDS = ("identifier", "paraphrase", "concept")
 MODES: dict[str, tuple[str, ...]] = {
@@ -77,8 +78,7 @@ class ModeResult:
     def to_json(self) -> dict[str, object]:
         return {
             "overall": {k: round(v, 4) for k, v in self.overall.items()},
-            "by_kind": {k: {kk: round(vv, 4) for kk, vv in v.items()}
-                        for k, v in self.by_kind.items()},
+            "by_kind": {k: {kk: round(vv, 4) for kk, vv in v.items()} for k, v in self.by_kind.items()},
             "latency_ms": {
                 "p50": round(percentile(self.latencies, 0.50), 1),
                 "p95": round(percentile(self.latencies, 0.95), 1),
@@ -107,10 +107,18 @@ def load_gold(path: Path) -> list[GoldRow]:
                 raise ValueError(f"{path}:{lineno} 不是合法 JSON：{e}") from e
             must = obj.get("must_contain") or {}
             if not must:
-                raise ValueError(f"{path}:{lineno} 缺少 must_contain（标注必须说明"
-                                 "答案在哪篇文档的哪个关键词附近）")
-            rows.append(GoldRow(id=obj["id"], q=obj["q"], kind=obj.get("kind", "concept"),
-                                must_contain=must, note=obj.get("note", "")))
+                raise ValueError(
+                    f"{path}:{lineno} 缺少 must_contain（标注必须说明答案在哪篇文档的哪个关键词附近）"
+                )
+            rows.append(
+                GoldRow(
+                    id=obj["id"],
+                    q=obj["q"],
+                    kind=obj.get("kind", "concept"),
+                    must_contain=must,
+                    note=obj.get("note", ""),
+                )
+            )
     if not rows:
         raise ValueError(f"{path} 里没有任何标注行")
     ids = [r.id for r in rows]
@@ -122,8 +130,9 @@ def load_gold(path: Path) -> list[GoldRow]:
 
 def gold_sha256(rows: list[GoldRow]) -> str:
     blob = json.dumps(
-        [{"id": r.id, "q": r.q, "kind": r.kind, "must_contain": r.must_contain}
-         for r in rows], ensure_ascii=False, sort_keys=True,
+        [{"id": r.id, "q": r.q, "kind": r.kind, "must_contain": r.must_contain} for r in rows],
+        ensure_ascii=False,
+        sort_keys=True,
     ).encode("utf-8")
     return hashlib.sha256(blob).hexdigest()[:16]
 
@@ -145,13 +154,13 @@ def validate_gold(rows: list[GoldRow], store: Store) -> list[GoldProblem]:
             if doc not in known:
                 continue
             if term.lower() not in texts.get(doc, ""):
-                problems.append(GoldProblem(
-                    r.id, f"关键词 {term!r} 在 {doc} 的正文中找不到——标注可能写错了"))
+                problems.append(GoldProblem(r.id, f"关键词 {term!r} 在 {doc} 的正文中找不到——标注可能写错了"))
     return problems
 
 
-def run_mode(mode: str, rows: list[GoldRow], retriever: HybridRetriever, k: int,
-             settings: Settings) -> ModeResult:
+def run_mode(
+    mode: str, rows: list[GoldRow], retriever: HybridRetriever, k: int, settings: Settings
+) -> ModeResult:
     channels = MODES[mode]
     out = ModeResult(mode=mode)
     per_kind: dict[str, list[dict[str, float]]] = {kind: [] for kind in KINDS}
@@ -170,12 +179,11 @@ def run_mode(mode: str, rows: list[GoldRow], retriever: HybridRetriever, k: int,
         for r in res.results:
             expected = source_url_for(f"{r.doc_id}.md", settings.docs_url_prefix)
             if not r.source_url or not r.source_url.startswith(settings.docs_url_prefix):
-                out.citation_violations.append(f"{row.id}:{r.chunk_id} URL 不可点击 "
-                                               f"({r.source_url!r})")
+                out.citation_violations.append(f"{row.id}:{r.chunk_id} URL 不可点击 ({r.source_url!r})")
             elif r.source_url != expected:
                 out.citation_violations.append(
-                    f"{row.id}:{r.chunk_id} URL 与 doc_id 重算结果不一致 "
-                    f"({r.source_url} != {expected})")
+                    f"{row.id}:{r.chunk_id} URL 与 doc_id 重算结果不一致 ({r.source_url} != {expected})"
+                )
             if not r.body.strip():
                 out.citation_violations.append(f"{row.id}:{r.chunk_id} 正文为空")
     out.overall = aggregate(all_rows)
@@ -198,18 +206,22 @@ def check_gate(base: dict, current: dict, *, allow_drift: bool) -> list[str]:
         fails.append(f"基线 schema={base.get('schema')} 与当前 {BASELINE_SCHEMA} 不符，请重建基线")
         return fails
     if base.get("gold_sha256") != current["gold_sha256"]:
-        fails.append("标注集已变更（gold_sha256 不同）——跨标注集的分数不可比，"
-                     "请确认后用 --write-baseline 重建基线")
+        fails.append(
+            "标注集已变更（gold_sha256 不同）——跨标注集的分数不可比，请确认后用 --write-baseline 重建基线"
+        )
         return fails
     if base.get("embedding_model") != current["embedding_model"]:
-        fails.append(f"嵌入模型变了（{base.get('embedding_model')} -> "
-                     f"{current['embedding_model']}），向量空间不可比")
+        fails.append(
+            f"嵌入模型变了（{base.get('embedding_model')} -> {current['embedding_model']}），向量空间不可比"
+        )
         return fails
     b_chunks = int(base.get("n_chunks", 0))
     c_chunks = int(current["n_chunks"])
     if b_chunks and abs(c_chunks - b_chunks) / b_chunks > CORPUS_DRIFT_TOL:
-        msg = (f"索引规模变化 {(c_chunks - b_chunks) / b_chunks:+.1%}"
-               f"（{b_chunks} -> {c_chunks}），语料变了，指标不可比")
+        msg = (
+            f"索引规模变化 {(c_chunks - b_chunks) / b_chunks:+.1%}"
+            f"（{b_chunks} -> {c_chunks}），语料变了，指标不可比"
+        )
         if not allow_drift:
             fails.append(msg + "；确认无误后加 --allow-corpus-drift")
             return fails
@@ -220,19 +232,18 @@ def check_gate(base: dict, current: dict, *, allow_drift: bool) -> list[str]:
     b_hit = float(base.get("metrics", {}).get("hit", 0.0))
     c_hit = float(current["metrics"]["hit"])
     if c_hit < b_hit - GATE_TOL_HIT:
-        fails.append(f"hit@{current['top_k']} 从 {b_hit:.4f} 掉到 {c_hit:.4f}"
-                     f"（容差 {GATE_TOL_HIT}）")
+        fails.append(f"hit@{current['top_k']} 从 {b_hit:.4f} 掉到 {c_hit:.4f}（容差 {GATE_TOL_HIT}）")
     b_mrr = float(base.get("metrics", {}).get("mrr", 0.0))
     c_mrr = float(current["metrics"]["mrr"])
     if c_mrr < b_mrr - GATE_TOL_MRR:
-        fails.append(f"mrr@{current['top_k']} 从 {b_mrr:.4f} 掉到 {c_mrr:.4f}"
-                     f"（容差 {GATE_TOL_MRR}）")
+        fails.append(f"mrr@{current['top_k']} 从 {b_mrr:.4f} 掉到 {c_mrr:.4f}（容差 {GATE_TOL_MRR}）")
     return fails
 
 
 def _print_table(results: dict[str, ModeResult], k: int, n_by_kind: dict[str, int]) -> None:
-    print(f"\n{'模式':<12} {'hit@'+str(k):>8} {'recall':>8} {'mrr':>8} {'ndcg':>8} "
-          f"{'p50ms':>7} {'p95ms':>7}")
+    print(
+        f"\n{'模式':<12} {'hit@' + str(k):>8} {'recall':>8} {'mrr':>8} {'ndcg':>8} {'p50ms':>7} {'p95ms':>7}"
+    )
     print("-" * 68)
     for mode in MODES:
         r = results.get(mode)
@@ -241,8 +252,10 @@ def _print_table(results: dict[str, ModeResult], k: int, n_by_kind: dict[str, in
         o = r.overall
         p50 = percentile(r.latencies, 0.50)
         p95 = percentile(r.latencies, 0.95)
-        print(f"{mode:<12} {o.get('hit', 0):>8.4f} {o.get('recall', 0):>8.4f} "
-              f"{o.get('mrr', 0):>8.4f} {o.get('ndcg', 0):>8.4f} {p50:>7.1f} {p95:>7.1f}")
+        print(
+            f"{mode:<12} {o.get('hit', 0):>8.4f} {o.get('recall', 0):>8.4f} "
+            f"{o.get('mrr', 0):>8.4f} {o.get('ndcg', 0):>8.4f} {p50:>7.1f} {p95:>7.1f}"
+        )
     hv = results.get("hybrid")
     if hv:
         print("\n按问题类型（模式=hybrid）：")
@@ -251,8 +264,10 @@ def _print_table(results: dict[str, ModeResult], k: int, n_by_kind: dict[str, in
             if kind not in hv.by_kind:
                 continue
             m = hv.by_kind[kind]
-            print(f"{kind:<12} {n_by_kind.get(kind, 0):>5} {m.get('hit', 0):>8.4f} "
-                  f"{m.get('mrr', 0):>8.4f} {m.get('ndcg', 0):>8.4f}")
+            print(
+                f"{kind:<12} {n_by_kind.get(kind, 0):>5} {m.get('hit', 0):>8.4f} "
+                f"{m.get('mrr', 0):>8.4f} {m.get('ndcg', 0):>8.4f}"
+            )
 
 
 def run_eval(args: Namespace, settings: Settings, store: Store) -> int:
@@ -288,8 +303,7 @@ def run_eval(args: Namespace, settings: Settings, store: Store) -> int:
     emit(f"  类型分布：{n_by_kind}")
 
     st = store.stats()
-    emit(f"索引：{st.n_chunks} 块 / {st.n_docs} 文档，"
-         f"{st.embedding_model}（{st.embedding_dim} 维）")
+    emit(f"索引：{st.n_chunks} 块 / {st.n_docs} 文档，{st.embedding_model}（{st.embedding_dim} 维）")
 
     retriever = HybridRetriever(store, build_embedder(settings), settings)
 
@@ -334,19 +348,11 @@ def run_eval(args: Namespace, settings: Settings, store: Store) -> int:
     #
     # 现在的契约：**`--json` 只影响输出格式，不影响是否跑闸门、也不影响退出码。**
     # 退出码只由 `--write-baseline` / `--gate` 决定，JSON 一律最后才打印。
-    if not args.json:
-        _print_table(results, k, n_by_kind)
-        if hv.citation_violations:
-            print(f"\n引用完整性：{len(hv.citation_violations)} 条违规")
-            for v in hv.citation_violations[:5]:
-                print(f"  ✗ {v}")
-        else:
-            print("\n引用完整性：通过（每条结果都有可点击且可重算的官方 URL）")
-        if hv.misses:
-            print(f"\n未命中 {len(hv.misses)} 条：")
-            for m in hv.misses[:12]:
-                print(f"  ✗ {m}")
-
+    # 表格与未命中列表**只打印一份**。曾经这里有两份逐行相同的代码：第一份用
+    # 内建 `print()`、第二份用 `emit()`，于是不带 `--json` 时整张表连同"未命中"
+    # 列表被打两遍（带 `--json` 时两份都不执行，所以这个缺陷只在人读路径上可见，
+    # 靠 `--json` 跑 CI 发现不了）。保留的这份统一走 `emit()`：人类可读输出全部
+    # 经由同一个出口，`--json` 时它改道 stderr，stdout 只剩纯 JSON。
     if not args.json:
         _print_table(results, k, n_by_kind)
         if hv.citation_violations:

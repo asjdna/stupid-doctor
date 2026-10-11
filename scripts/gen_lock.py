@@ -45,6 +45,7 @@ optional 组的处理（**不假装它装过**）
   所以 Windows 上生成的锁文件与 Linux CI 上生成的**不会逐字相同**。这一点必须知道：
   在 Windows 生成、拿到 Linux 装，得到的是"少了 uvloop"的环境。
 """
+
 from __future__ import annotations
 
 import argparse
@@ -131,9 +132,7 @@ def _parse(text: str) -> Requirement:
     try:
         return Requirement(text)
     except InvalidRequirement as exc:
-        raise SystemExit(
-            f"[gen_lock] pyproject 里的依赖写法无法解析：{text!r}（{exc}）"
-        ) from exc
+        raise SystemExit(f"[gen_lock] pyproject 里的依赖写法无法解析：{text!r}（{exc}）") from exc
 
 
 def _applies(req: Requirement, extras: set[str]) -> bool:
@@ -149,8 +148,9 @@ def _applies(req: Requirement, extras: set[str]) -> bool:
     return any(req.marker.evaluate({"extra": extra}) for extra in extras)
 
 
-def _roots(project: dict[str, Any], *,
-           groups: list[str] | None = None) -> tuple[list[Requirement], list[str], dict[str, list[str]]]:
+def _roots(
+    project: dict[str, Any], *, groups: list[str] | None = None
+) -> tuple[list[Requirement], list[str], dict[str, list[str]]]:
     """把 pyproject 声明的依赖解析成根 requirement。
 
     返回 `(根列表, 被跳过的组名, {组名: 缺哪些包})`。跳过只发生在"该组的直接依赖
@@ -220,13 +220,15 @@ def _closure(roots: list[Requirement]) -> dict[str, str]:
         except md.PackageNotFoundError as exc:
             raise SystemExit(
                 f"[gen_lock] 依赖闭包里的 {name!r} 没有装（来自 {origin!r}）。\n"
-                f"           先 `python -m pip install -e \".[dev]\"` 再重跑本脚本。"
+                f'           先 `python -m pip install -e ".[dev]"` 再重跑本脚本。'
             ) from exc
         pins[name] = dist.version
 
         root_req = rooted.get(name)
-        if root_req is not None and root_req.specifier and not root_req.specifier.contains(
-            dist.version, prereleases=True
+        if (
+            root_req is not None
+            and root_req.specifier
+            and not root_req.specifier.contains(dist.version, prereleases=True)
         ):
             # 声明的下界都没满足 → 这个环境不是"实测通过"的那套，别拿它生成锁文件。
             raise SystemExit(
@@ -250,23 +252,29 @@ def _groups_note(skipped: list[str], missing: dict[str, list[str]]) -> str:
     """生成 header 里"覆盖了哪些 optional 组"那几行（**不隐瞒没装的组**）。"""
     if not skipped:
         return GROUPS_NOTE_NONE
-    lines = ["# 覆盖的 optional 组：已装齐的那些组 + 运行时依赖；**下列组被跳过**"
-             "（本环境未安装）：\n"]
+    lines = ["# 覆盖的 optional 组：已装齐的那些组 + 运行时依赖；**下列组被跳过**（本环境未安装）：\n"]
     for group in skipped:
-        lines.append(f"#   · {group}：缺 {', '.join(missing[group])}"
-                     "（本脚本不凭空写没装过的包——装齐后重跑即可纳入）\n")
+        lines.append(
+            f"#   · {group}：缺 {', '.join(missing[group])}（本脚本不凭空写没装过的包——装齐后重跑即可纳入）\n"
+        )
     return "".join(lines)
 
 
-def render(pins: dict[str, str], *, skipped: list[str] | None = None,
-           missing: dict[str, list[str]] | None = None,
-           py_major_minor: str | None = None) -> str:
+def render(
+    pins: dict[str, str],
+    *,
+    skipped: list[str] | None = None,
+    missing: dict[str, list[str]] | None = None,
+    py_major_minor: str | None = None,
+) -> str:
     """把闭包渲染成锁文件全文（LF 结尾，末尾一个换行）。"""
     version = py_major_minor or f"{sys.version_info.major}.{sys.version_info.minor}"
     tag = f"{platform.system()} {platform.machine()}"
-    header = (HEADER.replace("{py_major_minor}", version)
-                    .replace("{platform_tag}", tag)
-                    .replace("{groups_note}", _groups_note(skipped or [], missing or {})))
+    header = (
+        HEADER.replace("{py_major_minor}", version)
+        .replace("{platform_tag}", tag)
+        .replace("{groups_note}", _groups_note(skipped or [], missing or {}))
+    )
     lines = [header, ""]
     lines.extend(f"{name}=={pins[name]}" for name in sorted(pins))
     return "\n".join(lines) + "\n"
@@ -315,10 +323,12 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="生成 requirements.lock.txt（依赖闭包冻结）")
     parser.add_argument("-o", "--output", type=pathlib.Path, default=DEFAULT_OUTPUT)
     parser.add_argument("--pyproject", type=pathlib.Path, default=DEFAULT_PYPROJECT)
-    parser.add_argument("--groups", default="",
-                        help="只取这些 optional 组（逗号分隔）；默认取 pyproject 里全部")
-    parser.add_argument("--strict", action="store_true",
-                        help="有 optional 组没装时直接失败（默认是跳过并在 header 里注明）")
+    parser.add_argument(
+        "--groups", default="", help="只取这些 optional 组（逗号分隔）；默认取 pyproject 里全部"
+    )
+    parser.add_argument(
+        "--strict", action="store_true", help="有 optional 组没装时直接失败（默认是跳过并在 header 里注明）"
+    )
     parser.add_argument(
         "--check",
         action="store_true",
@@ -330,8 +340,7 @@ def main(argv: list[str] | None = None) -> int:
     roots, skipped, missing = _roots(_read_pyproject(args.pyproject), groups=groups)
     if skipped and args.strict:
         raise SystemExit(
-            f"[gen_lock] --strict：optional 组 {', '.join(skipped)} 未安装齐全，"
-            f"拒绝生成不完整的锁文件"
+            f"[gen_lock] --strict：optional 组 {', '.join(skipped)} 未安装齐全，拒绝生成不完整的锁文件"
         )
     _warn_skipped(skipped, missing)
 

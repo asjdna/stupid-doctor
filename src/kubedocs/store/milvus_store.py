@@ -62,6 +62,7 @@
    **API 服务开着的时候，CLI 的 ingest/eval 打不开同一份 milvus 索引**——
    这一点比 SQLite 的 WAL（单写多读）更严格，是本后端最实在的运维代价。
 """
+
 from __future__ import annotations
 
 import contextlib
@@ -99,7 +100,7 @@ _MIGRATE_HINT = (
 
 _DEP_HINT = (
     "milvus 后端需要 `pymilvus` + `milvus-lite`（本地文件模式，无需 Docker/服务端）："
-    "`pip install \"pymilvus>=2.5\" \"milvus-lite>=2.4\"`；"
+    '`pip install "pymilvus>=2.5" "milvus-lite>=2.4"`；'
     "也可以改用 KUBEDOCS_STORE=sqlite-vec / sqlite / pgvector"
 )
 
@@ -162,19 +163,36 @@ def probe(path: str | Path) -> tuple[bool, str]:
 class MilvusStore(SqliteStore):
     """SQLite（FTS5 全文）+ Milvus Lite（HNSW 向量）的可选实现。"""
 
-    def __init__(self, db_path: str | Path, vector_path: str | Path, *, dim: int,
-                 embedding_model: str = "", normalizer: Normalizer | None = None,
-                 domain: str = "", milvus_path: str | Path | None = None,
-                 hnsw_m: int = 16, hnsw_ef_construction: int = 200,
-                 hnsw_ef_search: int = 128, metric: str = "COSINE",
-                 allow_backend_takeover: bool = False) -> None:
+    def __init__(
+        self,
+        db_path: str | Path,
+        vector_path: str | Path,
+        *,
+        dim: int,
+        embedding_model: str = "",
+        normalizer: Normalizer | None = None,
+        domain: str = "",
+        milvus_path: str | Path | None = None,
+        hnsw_m: int = 16,
+        hnsw_ef_construction: int = 200,
+        hnsw_ef_search: int = 128,
+        metric: str = "COSINE",
+        allow_backend_takeover: bool = False,
+    ) -> None:
         # 块行与全文路完全交给基类（同一个 SCHEMA、同一段 FTS5 代码、同一套元信息闸门）。
         # `vector_path` 在这里只是"旧实现的侧车矩阵位置"：本实现不读也不写它，
         # 只在 `dense_search_exact()` 与迁移脚本里用它拿一份精确答案。
-        super().__init__(db_path, vector_path, dim=dim, embedding_model=embedding_model,
-                         normalizer=normalizer, domain=domain)
-        self.milvus_path = (Path(milvus_path) if milvus_path is not None
-                            else Path(db_path).with_name("milvus.db"))
+        super().__init__(
+            db_path,
+            vector_path,
+            dim=dim,
+            embedding_model=embedding_model,
+            normalizer=normalizer,
+            domain=domain,
+        )
+        self.milvus_path = (
+            Path(milvus_path) if milvus_path is not None else Path(db_path).with_name("milvus.db")
+        )
         self.hnsw_m = int(hnsw_m)
         self.hnsw_ef_construction = int(hnsw_ef_construction)
         self.hnsw_ef_search = int(hnsw_ef_search)
@@ -239,9 +257,7 @@ class MilvusStore(SqliteStore):
                 self._create_collection()
             except self._MilvusException as e:
                 if not self._client.has_collection(COLLECTION):
-                    raise StoreError(
-                        f"创建 Milvus 集合 {COLLECTION} 失败：{type(e).__name__}: {e}"
-                    ) from e
+                    raise StoreError(f"创建 Milvus 集合 {COLLECTION} 失败：{type(e).__name__}: {e}") from e
         declared = self._declared_dim()
         if declared is not None and declared != self.dim:
             raise StoreError(
@@ -253,13 +269,15 @@ class MilvusStore(SqliteStore):
     def _create_collection(self) -> None:
         DataType = self._DataType
         schema = self._client.create_schema(auto_id=False, enable_dynamic_field=False)
-        schema.add_field("chunk_id", DataType.VARCHAR, is_primary=True,
-                         max_length=_MAX_ID_BYTES)
+        schema.add_field("chunk_id", DataType.VARCHAR, is_primary=True, max_length=_MAX_ID_BYTES)
         schema.add_field("embedding", DataType.FLOAT_VECTOR, dim=self.dim)
         index = self._client.prepare_index_params()
-        index.add_index(field_name="embedding", index_type="HNSW", metric_type=self.metric,
-                        params={"M": self.hnsw_m,
-                                "efConstruction": self.hnsw_ef_construction})
+        index.add_index(
+            field_name="embedding",
+            index_type="HNSW",
+            metric_type=self.metric,
+            params={"M": self.hnsw_m, "efConstruction": self.hnsw_ef_construction},
+        )
         self._client.create_collection(COLLECTION, schema=schema, index_params=index)
 
     def _declared_dim(self) -> int | None:
@@ -336,9 +354,8 @@ class MilvusStore(SqliteStore):
         n_vec = self._row_count()
         self._vec_error: str | None = None
         if n_chunks != n_vec:
-            self._vec_error = (
-                f"Milvus 向量索引与块表不一致：块 {n_chunks} 行，向量 {n_vec} 行。"
-                + (_MIGRATE_HINT if n_vec == 0 else "请重建或重灌向量索引")
+            self._vec_error = f"Milvus 向量索引与块表不一致：块 {n_chunks} 行，向量 {n_vec} 行。" + (
+                _MIGRATE_HINT if n_vec == 0 else "请重建或重灌向量索引"
             )
 
     def _row_count(self) -> int:
@@ -364,8 +381,7 @@ class MilvusStore(SqliteStore):
         return self
 
     # ------------------------------------------------------------------ 写入
-    def _index_chunk_vectors(self, con: Any, chunks: list[ChunkInput],
-                             vectors: dict[str, Vector]) -> None:
+    def _index_chunk_vectors(self, con: Any, chunks: list[ChunkInput], vectors: dict[str, Vector]) -> None:
         """把本批向量写进 Milvus——**在 SQLite 事务提交之前**。
 
         这个顺序是有意的：Milvus 写失败 → 抛 `StoreError` → `_tx` 回滚 SQLite，
@@ -374,19 +390,20 @@ class MilvusStore(SqliteStore):
         """
         if not chunks:
             return
-        rows = [{"chunk_id": c.chunk_id,
-                 "embedding": np.asarray(vectors[c.chunk_id], dtype=np.float32)}
-                for c in chunks]
+        rows = [
+            {"chunk_id": c.chunk_id, "embedding": np.asarray(vectors[c.chunk_id], dtype=np.float32)}
+            for c in chunks
+        ]
         self._exact = None
         for i in range(0, len(rows), _BATCH):
-            batch = rows[i:i + _BATCH]
+            batch = rows[i : i + _BATCH]
             try:
                 self._client.upsert(COLLECTION, batch)
             except self._MilvusException as e:
                 raise StoreError(
                     f"写入 Milvus 向量失败（{len(batch)} 行，例：{batch[0]['chunk_id']}）："
                     f"{type(e).__name__}: {e}；本次 SQLite 事务已回滚，"
-                    "不会留下\"块写了、向量没写\"的中间态"
+                    '不会留下"块写了、向量没写"的中间态'
                 ) from e
 
     def _drop_doc_chunks(self, con: Any, doc_id: str) -> int:
@@ -396,8 +413,9 @@ class MilvusStore(SqliteStore):
         显式处理，并有专门的测试守着它。
         """
         with self._lock:
-            ids = [r["chunk_id"] for r in
-                   con.execute("SELECT chunk_id FROM chunks WHERE doc_id = ?", (doc_id,))]
+            ids = [
+                r["chunk_id"] for r in con.execute("SELECT chunk_id FROM chunks WHERE doc_id = ?", (doc_id,))
+            ]
         self._delete_vectors(ids)
         return super()._drop_doc_chunks(con, doc_id)
 
@@ -407,7 +425,7 @@ class MilvusStore(SqliteStore):
             return
         self._exact = None
         for i in range(0, len(ids), _BATCH):
-            batch = ids[i:i + _BATCH]
+            batch = ids[i : i + _BATCH]
             try:
                 self._client.delete(COLLECTION, ids=batch)
             except self._MilvusException as e:
@@ -430,8 +448,9 @@ class MilvusStore(SqliteStore):
             self._dirty = False
         self._refresh_vec_ready()
         if self._vec_error:
-            raise StoreError(self._vec_error + "（本次写入的块行已经落库，"
-                             "但向量侧没跟上，说明两个引擎的写入没有同时成功）")
+            raise StoreError(
+                self._vec_error + "（本次写入的块行已经落库，但向量侧没跟上，说明两个引擎的写入没有同时成功）"
+            )
 
     def rebuild_from_scratch(self) -> None:
         """清空全部数据：SQLite 的表、FTS5 索引，以及 Milvus 集合（drop 后重建）。"""
@@ -468,13 +487,14 @@ class MilvusStore(SqliteStore):
         wanted = list(hashes)
         out: dict[str, Vector] = {}
         for i in range(0, len(wanted), 400):
-            batch = wanted[i:i + 400]
+            batch = wanted[i : i + 400]
             marks = ",".join("?" * len(batch))
             with self._lock:
                 # marks 只由 '?' 组成，值一律走参数绑定，不存在拼接注入
                 rows = self._con.execute(
                     f"SELECT chunk_id, content_hash FROM chunks WHERE content_hash IN ({marks})",  # noqa: S608
-                    batch).fetchall()
+                    batch,
+                ).fetchall()
             if not rows:
                 continue
             hash_of = {str(r["chunk_id"]): str(r["content_hash"]) for r in rows}
@@ -485,14 +505,11 @@ class MilvusStore(SqliteStore):
         """按主键批量取向量。取不到的块（向量侧缺行）直接跳过——行数闸门会先报错。"""
         got: dict[str, Vector] = {}
         for i in range(0, len(chunk_ids), _BATCH):
-            batch = chunk_ids[i:i + _BATCH]
+            batch = chunk_ids[i : i + _BATCH]
             try:
-                rows = self._client.get(COLLECTION, ids=batch,
-                                        output_fields=["chunk_id", "embedding"])
+                rows = self._client.get(COLLECTION, ids=batch, output_fields=["chunk_id", "embedding"])
             except self._MilvusException as e:
-                raise StoreError(
-                    f"从 Milvus 读取向量失败：{type(e).__name__}: {e}；{_MIGRATE_HINT}"
-                ) from e
+                raise StoreError(f"从 Milvus 读取向量失败：{type(e).__name__}: {e}；{_MIGRATE_HINT}") from e
             for row in rows:
                 cid = str(row["chunk_id"])
                 if cid in hash_of:
@@ -533,14 +550,16 @@ class MilvusStore(SqliteStore):
         q = self._as_query_vector(query_vector)
         try:
             res = self._client.search(
-                COLLECTION, data=[q], limit=limit, anns_field="embedding",
-                search_params={"metric_type": self.metric,
-                               "params": {"ef": int(self.hnsw_ef_search)}},
-                output_fields=["chunk_id"])
+                COLLECTION,
+                data=[q],
+                limit=limit,
+                anns_field="embedding",
+                search_params={"metric_type": self.metric, "params": {"ef": int(self.hnsw_ef_search)}},
+                output_fields=["chunk_id"],
+            )
         except self._MilvusException as e:
             raise StoreError(
-                f"Milvus 向量检索失败：{type(e).__name__}: {e}；"
-                f"检查数据文件（{self.milvus_path}）是否可用"
+                f"Milvus 向量检索失败：{type(e).__name__}: {e}；检查数据文件（{self.milvus_path}）是否可用"
             ) from e
         hits = res[0] if res else []
         return [(str(h["chunk_id"]), i) for i, h in enumerate(hits, start=1)]
@@ -577,16 +596,15 @@ class MilvusStore(SqliteStore):
         mat = np.zeros((n, self.dim), dtype=np.float32)
         # 向量已归一化（摄取层保证），所以精确余弦序 == 内积序，这里直接算内积
         try:
-            rows = self._client.query(COLLECTION, filter="", limit=n + 1,
-                                      output_fields=["chunk_id", "embedding"])
+            rows = self._client.query(
+                COLLECTION, filter="", limit=n + 1, output_fields=["chunk_id", "embedding"]
+            )
         except self._MilvusException as e:
-            raise StoreError(
-                f"拉取全量向量用于精确对照失败：{type(e).__name__}: {e}"
-            ) from e
+            raise StoreError(f"拉取全量向量用于精确对照失败：{type(e).__name__}: {e}") from e
         for row in rows:
             ids.append(str(row["chunk_id"]))
             mat[len(ids) - 1] = np.asarray(row["embedding"], dtype=np.float32)
-        mat = mat[:len(ids)]
+        mat = mat[: len(ids)]
         self._exact = (ids, mat)
         return self._exact
 
@@ -611,8 +629,10 @@ class MilvusStore(SqliteStore):
             )
         mat = np.load(path)
         with self._lock:
-            rows = [(str(r["chunk_id"]), int(r["vector_row"])) for r in
-                    self._con.execute("SELECT chunk_id, vector_row FROM chunks")]
+            rows = [
+                (str(r["chunk_id"]), int(r["vector_row"]))
+                for r in self._con.execute("SELECT chunk_id, vector_row FROM chunks")
+            ]
         if mat.ndim != 2 or mat.shape[1] != self.dim:
             raise StoreError(f"{path} 形状 {mat.shape} 与 dim={self.dim} 不符")
         if len(rows) != mat.shape[0]:
@@ -624,8 +644,7 @@ class MilvusStore(SqliteStore):
         for chunk_id, vr in rows:
             if vr < 0 or vr >= mat.shape[0]:
                 raise StoreError(f"块 {chunk_id} 的 vector_row={vr} 越界（矩阵 {mat.shape}）")
-            payload.append({"chunk_id": chunk_id,
-                            "embedding": np.asarray(mat[vr], dtype=np.float32)})
+            payload.append({"chunk_id": chunk_id, "embedding": np.asarray(mat[vr], dtype=np.float32)})
         try:
             self._client.drop_collection(COLLECTION)
         except self._MilvusException as e:  # pragma: no cover - 引擎异常路径
@@ -633,11 +652,9 @@ class MilvusStore(SqliteStore):
         self._create_collection()
         for i in range(0, len(payload), _BATCH):
             try:
-                self._client.upsert(COLLECTION, payload[i:i + _BATCH])
+                self._client.upsert(COLLECTION, payload[i : i + _BATCH])
             except self._MilvusException as e:
-                raise StoreError(
-                    f"灌入 Milvus 失败（第 {i} 行起）：{type(e).__name__}: {e}"
-                ) from e
+                raise StoreError(f"灌入 Milvus 失败（第 {i} 行起）：{type(e).__name__}: {e}") from e
         self._exact = None
         self._set_meta("vector_backend", BACKEND)
         self._set_meta("milvus_hnsw_m", str(self.hnsw_m))
@@ -668,7 +685,8 @@ class MilvusStore(SqliteStore):
             self._con.execute(
                 "DELETE FROM meta WHERE key IN "
                 "('vector_backend', 'milvus_hnsw_m', 'milvus_hnsw_ef_construction', "
-                "'milvus_metric')")
+                "'milvus_metric')"
+            )
         self._exact = None
         self._refresh_vec_ready()
 
@@ -686,16 +704,17 @@ class MilvusStore(SqliteStore):
         try:
             milvus_ids = set(self._all_ids())
             with self._lock:
-                sqlite_ids = {str(r["chunk_id"])
-                              for r in self._con.execute("SELECT chunk_id FROM chunks")}
+                sqlite_ids = {str(r["chunk_id"]) for r in self._con.execute("SELECT chunk_id FROM chunks")}
         except StoreError as e:
             return f"FAIL: {e}"
         if milvus_ids != sqlite_ids:
             missing = sorted(sqlite_ids - milvus_ids)[:3]
             extra = sorted(milvus_ids - sqlite_ids)[:3]
-            return (f"FAIL: 主键集合不一致——块表 {len(sqlite_ids)} 个、向量 {len(milvus_ids)} 个；"
-                    f"向量侧缺 {len(sqlite_ids - milvus_ids)} 个（例：{missing}），"
-                    f"多 {len(milvus_ids - sqlite_ids)} 个（例：{extra}）")
+            return (
+                f"FAIL: 主键集合不一致——块表 {len(sqlite_ids)} 个、向量 {len(milvus_ids)} 个；"
+                f"向量侧缺 {len(sqlite_ids - milvus_ids)} 个（例：{missing}），"
+                f"多 {len(milvus_ids - sqlite_ids)} 个（例：{extra}）"
+            )
         if self._vec_error:
             return f"FAIL: {self._vec_error}"
         return "ok"
@@ -706,8 +725,7 @@ class MilvusStore(SqliteStore):
         if n == 0:
             return []
         try:
-            rows = self._client.query(COLLECTION, filter="", limit=n + 1,
-                                      output_fields=["chunk_id"])
+            rows = self._client.query(COLLECTION, filter="", limit=n + 1, output_fields=["chunk_id"])
         except self._MilvusException as e:
             raise StoreError(f"读取 Milvus 主键失败：{type(e).__name__}: {e}") from e
         return [str(r["chunk_id"]) for r in rows]

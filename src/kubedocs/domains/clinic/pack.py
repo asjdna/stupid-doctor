@@ -17,6 +17,7 @@
 系统建议的"只有集成层知道——它拿着上一轮的 `pending_suggestion`。所以来源归因在
 `extract_evidence` 里完成，再把带来源的证据交给打分器。
 """
+
 from __future__ import annotations
 
 from collections.abc import Callable, Mapping, Sequence
@@ -47,8 +48,7 @@ def wants_booking(text: str) -> bool:
     return any(w in text for w in BOOK_WORDS)
 
 
-def extract_evidence(text: str, turn: int, *,
-                     suggested: Sequence[str] = ()) -> list[SymptomEvidence]:
+def extract_evidence(text: str, turn: int, *, suggested: Sequence[str] = ()) -> list[SymptomEvidence]:
     """从用户这句话里抽症状证据，并判定**来源**。
 
     来源决定权重（见 `hypothesis.WEIGHTS`）：系统建议后确认的降权，
@@ -60,14 +60,16 @@ def extract_evidence(text: str, turn: int, *,
     for canonical, matched in match_symptom_in_text(text):
         hinted = matched in suggested or canonical in suggested
         if is_negated(text, matched):
-            source = (EvidenceSource.NEGATED_AFTER_SUGGESTION if hinted
-                      else EvidenceSource.NEGATED)
+            source = EvidenceSource.NEGATED_AFTER_SUGGESTION if hinted else EvidenceSource.NEGATED
             present = False
         else:
             source = EvidenceSource.CONFIRMED if hinted else EvidenceSource.VOLUNTEERED
             present = True
-        out.append(SymptomEvidence(symptom=canonical, present=present, source=source,
-                                   turn=turn, weight=weight_of(source)))
+        out.append(
+            SymptomEvidence(
+                symptom=canonical, present=present, source=source, turn=turn, weight=weight_of(source)
+            )
+        )
     return out
 
 
@@ -113,13 +115,15 @@ class ClinicWiring:
     notes: list[str] = field(default_factory=list)
 
 
-def build_clinic_deps(provider: AppointmentProvider, *,
-                      links: Mapping[str, Sequence[str]] | None = None,
-                      answerer: Callable[[str, Any], dict[str, Any]] | None = None,
-                      max_turns: int = DEFAULT_MAX_TURNS,
-                      margin: float = 1.0,
-                      tie_breaker: Callable[[str, Sequence[str]], str] | None = None,
-                      ) -> ClinicWiring:
+def build_clinic_deps(
+    provider: AppointmentProvider,
+    *,
+    links: Mapping[str, Sequence[str]] | None = None,
+    answerer: Callable[[str, Any], dict[str, Any]] | None = None,
+    max_turns: int = DEFAULT_MAX_TURNS,
+    margin: float = 1.0,
+    tie_breaker: Callable[[str, Sequence[str]], str] | None = None,
+) -> ClinicWiring:
     """把域资产与 agent 模块装配成 `ClinicDeps`。
 
     `answerer` 缺省时回答走 self-ask（需要检索器与 LLM，由 P3 注入）；
@@ -131,8 +135,7 @@ def build_clinic_deps(provider: AppointmentProvider, *,
     symptom_of = invert_links(link_map)
     notes: list[str] = []
     if not link_map:
-        notes.append("没有症状-候选关联表（语料缺失）：候选打分与追问选择会退化，"
-                     "但红线/挂号不受影响")
+        notes.append("没有症状-候选关联表（语料缺失）：候选打分与追问选择会退化，但红线/挂号不受影响")
 
     def _observe(text: str, state: Any) -> list[SymptomEvidence]:
         suggested = tuple(state.get("pending_suggestion", {}).get("symptoms", ()) or ())
@@ -149,23 +152,28 @@ def build_clinic_deps(provider: AppointmentProvider, *,
         known = tuple(state.get("evidence", ()) or ())
         # 先试"押注领先候选"的试探性假设，再退回信息增益最大的一般提问。
         # 两条路径内部都做了红线过滤（红线症状一律不主动建议）。
-        return (hypothesis.suggest_hypothesis(scores, symptom_of, asked=asked)
-                or hypothesis.next_question(scores, symptom_of, asked=asked, known=known))
+        return hypothesis.suggest_hypothesis(scores, symptom_of, asked=asked) or hypothesis.next_question(
+            scores, symptom_of, asked=asked, known=known
+        )
 
     def _answer(question: str, state: Any) -> dict[str, Any]:
         if answerer is not None:
             return answerer(question, state)
         ranked = hypothesis.rank(dict(state.get("candidates", {})), top=3)
         if not ranked:
-            return {"text": "目前还不足以给出方向建议。如果有明显不适，建议直接就医；"
-                            "出现胸痛、呼吸困难、意识不清等请立即拨打 120。",
-                    "citations": []}
-        best = hypothesis.explain(dict(state.get("candidates", {})),
-                                  list(state.get("evidence", ()) or ()))
+            return {
+                "text": "目前还不足以给出方向建议。如果有明显不适，建议直接就医；"
+                "出现胸痛、呼吸困难、意识不清等请立即拨打 120。",
+                "citations": [],
+            }
+        best = hypothesis.explain(dict(state.get("candidates", {})), list(state.get("evidence", ()) or ()))
         top = "、".join(f"{name}（{score:.1f}）" for name, score in ranked)
-        return {"text": f"根据您描述的情况，可能相关的方向：{top}。"
-                        f"以上仅为导诊参考，不能替代医生诊断；如症状加重请及时就医。",
-                "citations": [], "score_detail": best}
+        return {
+            "text": f"根据您描述的情况，可能相关的方向：{top}。"
+            f"以上仅为导诊参考，不能替代医生诊断；如症状加重请及时就医。",
+            "citations": [],
+            "score_detail": best,
+        }
 
     def _book(state: Any) -> dict[str, Any]:
         """从候选里挑一个**真的可挂号科室**去挂号。
@@ -179,22 +187,27 @@ def build_clinic_deps(provider: AppointmentProvider, *,
         known = {d["name"] for d in service.departments()}
         department = next((name for name, _ in ranked if name in known), "")
         try:
-            return service.book(department or (ranked[0][0] if ranked else ""),
-                                str(state.get("patient_id", "anon")))
+            return service.book(
+                department or (ranked[0][0] if ranked else ""), str(state.get("patient_id", "anon"))
+            )
         except BookingError as e:
             # 业务错误转成人话，不让 traceback 冒到用户面前
-            return {"error": str(e), "department": department,
-                    "candidates": [n for n, _ in ranked[:5]]}
+            return {"error": str(e), "department": department, "candidates": [n for n, _ in ranked[:5]]}
 
     deps = ClinicDeps(
-        observe=_observe, score=_score, should_stop=_stop,
-        next_question=_next_question, check_red_line=guard.check,
-        answer=_answer, book=_book, wants_booking=wants_booking,
+        observe=_observe,
+        score=_score,
+        should_stop=_stop,
+        next_question=_next_question,
+        check_red_line=guard.check,
+        answer=_answer,
+        book=_book,
+        wants_booking=wants_booking,
         wants_emergency_care=wants_emergency_care,
-        emergency_advice=emergency_advice, emergency_menu=emergency_menu,
+        emergency_advice=emergency_advice,
+        emergency_menu=emergency_menu,
     )
-    return ClinicWiring(deps=deps, guard=guard, service=service,
-                        links=link_map, notes=notes)
+    return ClinicWiring(deps=deps, guard=guard, service=service, links=link_map, notes=notes)
 
 
 def clinic_cards_path() -> Path:

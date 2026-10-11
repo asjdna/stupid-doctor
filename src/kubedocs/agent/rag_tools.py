@@ -27,6 +27,7 @@ schema 与执行体放在同一个 `ToolSpec` 里，好处是"声明的东西就
 否则内核就会绑定某一个域的存储选型。也因此这里不 import `generate`：
 那条依赖链会拖进配置、LiteLLM、嵌入模型，而工具只需要一份正则。
 """
+
 from __future__ import annotations
 
 import re
@@ -83,8 +84,9 @@ def _hit_payload(hit: object, *, body_limit: int) -> dict[str, Any]:
     }
 
 
-def make_search_tool(retriever: object, *, domain: str = "k8s_docs",
-                     top_k: int = 5, body_limit: int = BODY_LIMIT) -> ToolSpec:
+def make_search_tool(
+    retriever: object, *, domain: str = "k8s_docs", top_k: int = 5, body_limit: int = BODY_LIMIT
+) -> ToolSpec:
     """构造 `search_docs` 工具。
 
     `top_k` 是**内核给出的检索预算上限**：模型可以在 schema 允许的 1~20 里提要求，
@@ -122,8 +124,7 @@ def make_search_tool(retriever: object, *, domain: str = "k8s_docs",
         raw_hits = getattr(result, "results", None)
         if raw_hits is None:
             raise ToolError(
-                f"检索器返回了没有 results 字段的对象（{type(result).__name__}）："
-                "无法把结果交给模型"
+                f"检索器返回了没有 results 字段的对象（{type(result).__name__}）：无法把结果交给模型"
             )
         hits = [_hit_payload(h, body_limit=body_limit) for h in raw_hits]
         payload: dict[str, Any] = {"query": query, "n": len(hits), "hits": hits}
@@ -166,8 +167,9 @@ def make_citation_check_tool() -> ToolSpec:
         text, n_available = params.text, params.n_available
 
         problems: list[str] = []
-        bad = sorted({int(m.group(1)) for m in _MARKER_RE.finditer(text)
-                      if not 1 <= int(m.group(1)) <= n_available})
+        bad = sorted(
+            {int(m.group(1)) for m in _MARKER_RE.finditer(text) if not 1 <= int(m.group(1)) <= n_available}
+        )
         if bad:
             labels = [f"[{i}]" for i in bad]
             problems.append(f"引用了未提供的片段编号 {labels}")

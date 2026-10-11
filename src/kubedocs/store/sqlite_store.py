@@ -39,6 +39,7 @@
    新插入的块可能拿到比现存块更小的 rowid。所以不能假设"rowid 单调递增"，
    `finalize()` 每次按当前 rowid 顺序**重建**矩阵并回写 `vector_row`。
 """
+
 from __future__ import annotations
 
 import json
@@ -129,13 +130,19 @@ CREATE VIRTUAL TABLE IF NOT EXISTS chunks_fts USING fts5(
 _BM25_WEIGHTS = (1.0, 3.0, 1.5)
 
 
-
 class SqliteStore:
     """SQLite + FTS5 + numpy 的本地索引实现。"""
 
-    def __init__(self, db_path: str | Path, vector_path: str | Path, *, dim: int,
-                 embedding_model: str = "", normalizer: Normalizer | None = None,
-                 domain: str = "") -> None:
+    def __init__(
+        self,
+        db_path: str | Path,
+        vector_path: str | Path,
+        *,
+        dim: int,
+        embedding_model: str = "",
+        normalizer: Normalizer | None = None,
+        domain: str = "",
+    ) -> None:
         self.db_path = Path(db_path)
         self.vector_path = Path(vector_path)
         self.dim = dim
@@ -149,8 +156,7 @@ class SqliteStore:
         # check_same_thread=False + 全库访问加锁：FastAPI 的同步端点跑在线程池里，
         # 一个连接跨线程使用本身是安全的，前提是同一时刻只有一处在用（这里用锁保证）。
         self._lock = threading.RLock()
-        self._con = sqlite3.connect(str(self.db_path), check_same_thread=False,
-                                    isolation_level=None)
+        self._con = sqlite3.connect(str(self.db_path), check_same_thread=False, isolation_level=None)
         self._con.row_factory = sqlite3.Row
         self._con.execute("PRAGMA journal_mode=WAL")
         self._con.execute("PRAGMA synchronous=NORMAL")
@@ -212,8 +218,7 @@ class SqliteStore:
             if old_dim != self.dim:
                 # 维度不一致会让矩阵乘法直接崩，早报比晚崩好
                 raise StoreError(
-                    f"索引向量维度不符：库里是 {old_dim}，当前配置 {self.dim}；"
-                    "换了嵌入模型必须重建索引"
+                    f"索引向量维度不符：库里是 {old_dim}，当前配置 {self.dim}；换了嵌入模型必须重建索引"
                 )
             old_model = rows.get("embedding_model", "")
             if old_model and self.embedding_model and old_model != self.embedding_model:
@@ -242,16 +247,15 @@ class SqliteStore:
         """把矩阵与 rowid 映射读进内存。向量矩阵按 vector_row 升序排列。"""
         with self._lock:
             self._row_index = [
-                r["chunk_id"] for r in self._con.execute(
-                    "SELECT chunk_id FROM chunks ORDER BY vector_row")
+                r["chunk_id"] for r in self._con.execute("SELECT chunk_id FROM chunks ORDER BY vector_row")
             ]
             self._old_row = {
-                r["chunk_id"]: r["vector_row"] for r in self._con.execute(
-                    "SELECT chunk_id, vector_row FROM chunks")
+                r["chunk_id"]: r["vector_row"]
+                for r in self._con.execute("SELECT chunk_id, vector_row FROM chunks")
             }
             self._hash_row = {
-                r["content_hash"]: r["vector_row"] for r in self._con.execute(
-                    "SELECT content_hash, vector_row FROM chunks ORDER BY vector_row")
+                r["content_hash"]: r["vector_row"]
+                for r in self._con.execute("SELECT content_hash, vector_row FROM chunks ORDER BY vector_row")
             }
         if self.vector_path.exists():
             mat = np.load(self.vector_path)
@@ -264,8 +268,10 @@ class SqliteStore:
     # ------------------------------------------------------------------ 读取
     def existing_doc_hashes(self) -> dict[str, str]:
         with self._lock:
-            return {r["rel_path"]: r["content_hash"]
-                    for r in self._con.execute("SELECT rel_path, content_hash FROM documents")}
+            return {
+                r["rel_path"]: r["content_hash"]
+                for r in self._con.execute("SELECT rel_path, content_hash FROM documents")
+            }
 
     def existing_hash_to_vector(self, hashes: set[str]) -> dict[str, Vector]:
         """按 content_hash 复用旧向量。只读取命中的行，不做全量拷贝。"""
@@ -288,7 +294,7 @@ class SqliteStore:
         out: dict[str, list[str]] = {d: [] for d in doc_ids}
         with self._lock:
             for i in range(0, len(doc_ids), 400):
-                batch = doc_ids[i:i + 400]
+                batch = doc_ids[i : i + 400]
                 marks = ",".join("?" * len(batch))
                 # marks 只由 '?' 组成，值一律走参数绑定，不存在拼接注入
                 sql = f"SELECT doc_id, body FROM chunks WHERE doc_id IN ({marks}) ORDER BY doc_id, ordinal"  # noqa: S608
@@ -302,12 +308,13 @@ class SqliteStore:
             row = self._con.execute(
                 "SELECT COUNT(*) AS n, COALESCE(SUM(n_chars), 0) AS chars FROM chunks"
             ).fetchone()
-            n_code = self._con.execute(
-                "SELECT COUNT(*) FROM chunks WHERE body LIKE '%```%'"
-            ).fetchone()[0]
+            n_code = self._con.execute("SELECT COUNT(*) FROM chunks WHERE body LIKE '%```%'").fetchone()[0]
             meta = {r["key"]: r["value"] for r in self._con.execute("SELECT key, value FROM meta")}
         return StoreStats(
-            n_docs=n_docs, n_chunks=row["n"], total_chars=row["chars"], n_with_code=n_code,
+            n_docs=n_docs,
+            n_chunks=row["n"],
+            total_chars=row["chars"],
+            n_with_code=n_code,
             embedding_model=meta.get("embedding_model", ""),
             embedding_dim=int(meta.get("embedding_dim", "0")),
             indexed_at=meta.get("indexed_at", ""),
@@ -322,15 +329,19 @@ class SqliteStore:
         with self._lock:
             # 分批 IN，避开 SQLite 变量数上限（默认 999）
             for i in range(0, len(chunk_ids), 400):
-                batch = chunk_ids[i:i + 400]
+                batch = chunk_ids[i : i + 400]
                 marks = ",".join("?" * len(batch))
                 # marks 只由 '?' 组成，值一律走参数绑定
                 sql = f"SELECT chunk_id, doc_id, ordinal, title, breadcrumb, source_url, body FROM chunks WHERE chunk_id IN ({marks})"  # noqa: S608
                 for r in self._con.execute(sql, batch):
                     out[r["chunk_id"]] = ChunkHit(
-                        chunk_id=r["chunk_id"], doc_id=r["doc_id"], ordinal=r["ordinal"],
-                        title=r["title"], breadcrumb=r["breadcrumb"],
-                        source_url=r["source_url"], body=r["body"],
+                        chunk_id=r["chunk_id"],
+                        doc_id=r["doc_id"],
+                        ordinal=r["ordinal"],
+                        title=r["title"],
+                        breadcrumb=r["breadcrumb"],
+                        source_url=r["source_url"],
+                        body=r["body"],
                     )
         return out
 
@@ -359,7 +370,8 @@ class SqliteStore:
             marks = ",".join("?" * len(ids))
             rows = self._con.execute(
                 f"SELECT rowid, chunk_id FROM chunks WHERE rowid IN ({marks})",  # noqa: S608 - marks 全是 ?
-                ids).fetchall()
+                ids,
+            ).fetchall()
         by_rowid = {r[0]: r[1] for r in rows}
         return [(by_rowid[r], i) for i, r in enumerate(ids, start=1) if r in by_rowid]
 
@@ -372,7 +384,7 @@ class SqliteStore:
         n = min(limit, len(self._row_index), self._matrix.shape[0])
         if n <= 0:
             return []
-        sims = self._matrix @ q            # 向量已归一化，内积即余弦
+        sims = self._matrix @ q  # 向量已归一化，内积即余弦
         # argpartition 取 top-n 后局部排序：全量 sort 在 10 万块量级是纯浪费
         idx = np.argpartition(-sims, n - 1)[:n]
         idx = idx[np.argsort(-sims[idx], kind="stable")]
@@ -397,8 +409,7 @@ class SqliteStore:
         removed = 0
         with self._tx() as con:
             for rel in rel_paths:
-                row = con.execute("SELECT doc_id FROM documents WHERE rel_path = ?",
-                                  (rel,)).fetchone()
+                row = con.execute("SELECT doc_id FROM documents WHERE rel_path = ?", (rel,)).fetchone()
                 if row is None:
                     continue
                 removed += self._drop_doc_chunks(con, row["doc_id"])
@@ -406,8 +417,7 @@ class SqliteStore:
         self._dirty = True
         return removed
 
-    def upsert_docs(self, docs: list[DocInput], chunks: list[ChunkInput],
-                    vectors: dict[str, Vector]) -> None:
+    def upsert_docs(self, docs: list[DocInput], chunks: list[ChunkInput], vectors: dict[str, Vector]) -> None:
         if not docs and not chunks:
             return
         missing = [c.chunk_id for c in chunks if c.chunk_id not in vectors]
@@ -432,22 +442,33 @@ class SqliteStore:
                     "INSERT INTO chunks(chunk_id, doc_id, ordinal, title, breadcrumb, source_url,"
                     " body, body_normalized, content_hash, n_chars, vector_row)"
                     " VALUES(?,?,?,?,?,?,?,?,?,?,?)",
-                    (c.chunk_id, c.doc_id, c.ordinal, c.title, c.breadcrumb, c.source_url,
-                     c.body, self.normalizer.index_text(c.body), c.content_hash, c.n_chars, -1),
+                    (
+                        c.chunk_id,
+                        c.doc_id,
+                        c.ordinal,
+                        c.title,
+                        c.breadcrumb,
+                        c.source_url,
+                        c.body,
+                        self.normalizer.index_text(c.body),
+                        c.content_hash,
+                        c.n_chars,
+                        -1,
+                    ),
                 )
                 rowid = cur.lastrowid
                 # 外内容表要显式给 rowid，让索引项与内容行一一对应
                 con.execute(
-                    "INSERT INTO chunks_fts(rowid, body_normalized, title, breadcrumb) "
-                    "VALUES(?,?,?,?)",
+                    "INSERT INTO chunks_fts(rowid, body_normalized, title, breadcrumb) VALUES(?,?,?,?)",
                     (rowid, self.normalizer.index_text(c.body), c.title, c.breadcrumb),
                 )
                 self._pending[c.chunk_id] = np.asarray(vectors[c.chunk_id], dtype=np.float32)
             self._index_chunk_vectors(con, chunks, vectors)
         self._dirty = True
 
-    def _index_chunk_vectors(self, con: sqlite3.Connection, chunks: list[ChunkInput],
-                             vectors: dict[str, Vector]) -> None:
+    def _index_chunk_vectors(
+        self, con: sqlite3.Connection, chunks: list[ChunkInput], vectors: dict[str, Vector]
+    ) -> None:
         """钩子：把刚写入事务的块向量落到本实现的向量结构里。
 
         基类（numpy 矩阵）的向量**不在这里落盘**：`chunks.rowid` 会被 SQLite 回收，
@@ -475,9 +496,7 @@ class SqliteStore:
                 if v is None:
                     old = self._old_row.get(cid)
                     if old is None or old >= len(self._matrix):
-                        raise MissingVectorError(
-                            f"块 {cid} 既无新向量也无旧向量；请用 rebuild 重建索引"
-                        )
+                        raise MissingVectorError(f"块 {cid} 既无新向量也无旧向量；请用 rebuild 重建索引")
                     v = self._matrix[old]
                 if v.shape[0] != self.dim:
                     raise StoreError(f"块 {cid} 向量维度 {v.shape[0]} != {self.dim}")
@@ -527,8 +546,8 @@ class SqliteStore:
     def doc_summary(self, limit: int = 20) -> list[dict[str, object]]:
         with self._lock:
             rows = self._con.execute(
-                "SELECT rel_path, n_chunks, updated_at FROM documents "
-                "ORDER BY rel_path LIMIT ?", (limit,)).fetchall()
+                "SELECT rel_path, n_chunks, updated_at FROM documents ORDER BY rel_path LIMIT ?", (limit,)
+            ).fetchall()
         return [dict(r) for r in rows]
 
     def meta_dump(self) -> dict[str, str]:

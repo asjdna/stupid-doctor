@@ -26,6 +26,7 @@
 > 移植说明：词表与门控移植自 clinic 域（原 medical-agent 项目）的 `capabilities/risk/risk_guard.py`，
 > 判定逻辑未改。原项目已就三维门控做过实测，本模块保留其全部结论与用例。
 """
+
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -36,9 +37,21 @@ from kubedocs.domains.clinic.polarity import assertion, is_reportable
 # 书面医学术语（胸骨后疼痛 / 呕血 / 端坐呼吸等）由 LLM 画像分析兜底——
 # 不为急诊单独再调一次模型，那是延迟与成本上的浪费。
 EMERGENCY_RED_LINE: tuple[str, ...] = (
-    "胸痛", "胸口压着疼", "心口疼", "喘不上气", "呼吸困难", "憋得慌",
-    "意识不清", "晕倒", "昏迷", "大出血", "吐了好多血", "口吐白沫",
-    "半边身子不能动", "说话不清楚", "突然看不清",
+    "胸痛",
+    "胸口压着疼",
+    "心口疼",
+    "喘不上气",
+    "呼吸困难",
+    "憋得慌",
+    "意识不清",
+    "晕倒",
+    "昏迷",
+    "大出血",
+    "吐了好多血",
+    "口吐白沫",
+    "半边身子不能动",
+    "说话不清楚",
+    "突然看不清",
 )
 
 # 用户在急诊二选一里选择"直接就医"的信号词
@@ -55,8 +68,10 @@ class RedLineHit:
     temporality: str
 
     def describe(self) -> str:
-        return (f"「{self.word}」 status={self.status} "
-                f"experiencer={self.experiencer} temporality={self.temporality}")
+        return (
+            f"「{self.word}」 status={self.status} "
+            f"experiencer={self.experiencer} temporality={self.temporality}"
+        )
 
 
 class RiskGuard:
@@ -73,9 +88,9 @@ class RiskGuard:
         for word in EMERGENCY_RED_LINE:
             if word in text and is_reportable(text, word):
                 a = assertion(text, word)
-                return RedLineHit(word=word, status=a["status"],
-                                  experiencer=a["experiencer"],
-                                  temporality=a["temporality"])
+                return RedLineHit(
+                    word=word, status=a["status"], experiencer=a["experiencer"], temporality=a["temporality"]
+                )
         return None
 
     def explain(self, text: str) -> list[str]:
@@ -89,22 +104,27 @@ class RiskGuard:
             if word in text:
                 a = assertion(text, word)
                 mark = "触发" if is_reportable(text, word) else "不触发"
-                out.append(f"{mark} 「{word}」 status={a['status']} "
-                           f"exp={a['experiencer']} tmp={a['temporality']}")
+                out.append(
+                    f"{mark} 「{word}」 status={a['status']} exp={a['experiencer']} tmp={a['temporality']}"
+                )
         return out
 
 
 def emergency_menu(word: str) -> str:
     """红线命中时的二选一提示（**不强制短路**：把选择权交回患者）。"""
-    return (f"您描述的情况（「{word}」）可能比较紧急。请您选择：\n"
-            "① 立即拨打 120 / 前往急诊；\n"
-            "② 暂不就医，我继续帮您追问判断。")
+    return (
+        f"您描述的情况（「{word}」）可能比较紧急。请您选择：\n"
+        "① 立即拨打 120 / 前往急诊；\n"
+        "② 暂不就医，我继续帮您追问判断。"
+    )
 
 
 def emergency_advice(word: str) -> str:
     """用户选择"立即就医"时的回复。"""
-    return (f"您提到「{word}」，这可能是比较紧急的情况，请您或家人立即拨打 120，"
-            "或尽快到最近的医院急诊，不要耽搁。")
+    return (
+        f"您提到「{word}」，这可能是比较紧急的情况，请您或家人立即拨打 120，"
+        "或尽快到最近的医院急诊，不要耽搁。"
+    )
 
 
 def wants_emergency_care(text: str) -> bool:

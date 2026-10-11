@@ -11,6 +11,7 @@
 （它**不**绕过闸门），人类可读的旁白改道 stderr，stdout 留给纯 JSON——
 与 `evaluation/harness.run_eval` 的 `emit()` 同一约定、同一理由。
 """
+
 from __future__ import annotations
 
 import argparse
@@ -34,7 +35,7 @@ GOLD = REPO_ROOT / "data" / "eval" / "clinic_gold.jsonl"
 BASELINE = REPO_ROOT / "data" / "eval" / "clinic_baseline.json"
 
 # 门限：红线召回容差为 0（安全属性），误报率上限见 evaluation/clinic.py
-GAITE_FP_TOLERANCE = 0.05      # 相对基线允许的误报率上升幅度
+GAITE_FP_TOLERANCE = 0.05  # 相对基线允许的误报率上升幅度
 
 TRIAGE_RED_NOTE = """为什么分诊现在是红的：**这不是本次改动引入的回归，而是冻结基线里本来就记着 0 分**。
   · data/eval/clinic_baseline.json 的 triage.accuracy = 0.0（hit 0 / total 5、evaluated=true）；
@@ -69,9 +70,8 @@ def _triage_candidates(*, json_mode: bool = False) -> Any:
         _emit("（分诊指标未评测：症状-科室关联表为空）", json_mode=json_mode)
         return None
 
-
     def candidates_for(text: str) -> dict[str, float] | None:
-        return None      # 占位：见下方按用例逐一计算
+        return None  # 占位：见下方按用例逐一计算
 
     return links, extract_evidence, hypothesis, candidates_for
 
@@ -96,8 +96,7 @@ def main(argv: list[str] | None = None) -> int:
         if wants_booking(case.text) == case.expect_booking:
             report.booking_correct += 1
         else:
-            report.booking_wrong.append(
-                f"{case.id} 期望 {case.expect_booking}：{case.text}")
+            report.booking_wrong.append(f"{case.id} 期望 {case.expect_booking}：{case.text}")
 
     # 分诊（依赖受限语料；缺语料时 evaluated=False，闸门**不通过**）
     triage_cases = [c for c in cases if c.expect_department]
@@ -125,7 +124,7 @@ def main(argv: list[str] | None = None) -> int:
                 missed.append(f"{case.id} 期望 {case.expect_department}，实际 {top3}")
         report.triage_total, report.triage_hit = triage_total, triage_hit
         report.triage_evaluated, report.triage_missed = evaluated, missed
-        _ = evaluate_triage      # 保留导出以便单测直接调用
+        _ = evaluate_triage  # 保留导出以便单测直接调用
 
     if args.json:
         print(json.dumps(report.to_json(), ensure_ascii=False, indent=2))
@@ -134,15 +133,22 @@ def main(argv: list[str] | None = None) -> int:
         raw_redline = payload["redline"]
         assert isinstance(raw_redline, dict)
         r = raw_redline
-        print(f"用例总数    : {report.n_cases}（红线） + {report.booking_total}（挂号意图）"
-              f" + {len(triage_cases)}（分诊）")
-        print(f"红线召回    : {report.redline_recall:.2%}"
-              f"  (TP={report.redline_tp} FN={report.redline_fn})"
-              f"   ← 硬闸门，要求 100%")
-        print(f"红线误报率  : {report.redline_false_positive_rate:.2%}"
-              f"  (FP={report.redline_fp} TN={report.redline_tn})")
-        print(f"挂号意图    : {report.booking_accuracy:.2%}"
-              f"  ({report.booking_correct}/{report.booking_total})")
+        print(
+            f"用例总数    : {report.n_cases}（红线） + {report.booking_total}（挂号意图）"
+            f" + {len(triage_cases)}（分诊）"
+        )
+        print(
+            f"红线召回    : {report.redline_recall:.2%}"
+            f"  (TP={report.redline_tp} FN={report.redline_fn})"
+            f"   ← 硬闸门，要求 100%"
+        )
+        print(
+            f"红线误报率  : {report.redline_false_positive_rate:.2%}"
+            f"  (FP={report.redline_fp} TN={report.redline_tn})"
+        )
+        print(
+            f"挂号意图    : {report.booking_accuracy:.2%}  ({report.booking_correct}/{report.booking_total})"
+        )
         acc = report.triage_accuracy
         print(f"分诊科室    : {'未评测（语料缺失）' if acc is None else f'{acc:.2%} top3 命中'}")
         if report.triage_evaluated and cov_den:
@@ -151,17 +157,19 @@ def main(argv: list[str] | None = None) -> int:
                 print("  ⚠ 覆盖率 0：**两套词汇不重合**。词典认的是口语主诉（咳嗽/发热），")
                 print("    卡片键是临床体征（纤毛结构缺陷/氧分压低）。这不是调参能解决的，")
                 print("    需要一层口语->体征映射或换语料（记入 P5）。")
-        for label, items in (("漏报", r["missed"]), ("误报", r["false_alarms"]),
-                             ("挂号判错", report.booking_wrong),
-                             ("分诊未命中", report.triage_missed)):
+        for label, items in (
+            ("漏报", r["missed"]),
+            ("误报", r["false_alarms"]),
+            ("挂号判错", report.booking_wrong),
+            ("分诊未命中", report.triage_missed),
+        ):
             for item in list(items)[:10]:
                 print(f"  ✗ {label}: {item}")
 
     if args.write_baseline:
         Path(args.baseline).parent.mkdir(parents=True, exist_ok=True)
         payload = {"schema": 1, "metrics": report.to_json()}
-        Path(args.baseline).write_text(
-            json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+        Path(args.baseline).write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
         _emit(f"\n已写入基线：{args.baseline}", json_mode=args.json)
         return 0
 

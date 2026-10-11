@@ -9,6 +9,7 @@
 
 全部用打桩 LLM（`ToolCaller`），不联网、不花钱。
 """
+
 from __future__ import annotations
 
 from pathlib import Path
@@ -34,8 +35,7 @@ class ScriptedCaller:
         self.seen_messages: list[list[dict[str, Any]]] = []
         self.seen_tools: list[list[dict[str, Any]]] = []
 
-    def choose(self, messages: list[dict[str, Any]],
-               tools: list[dict[str, Any]]) -> dict[str, Any]:
+    def choose(self, messages: list[dict[str, Any]], tools: list[dict[str, Any]]) -> dict[str, Any]:
         self.seen_messages.append(list(messages))
         self.seen_tools.append(list(tools))
         return self.script.pop(0) if self.script else {"content": "（无脚本）", "tool_calls": []}
@@ -66,11 +66,12 @@ class TestToolsAndLoopTogether:
 
     def test_model_choice_drives_execution_and_result_is_visible(self, wired):
         """LLM 选了 list_departments → 真的执行 → 结果回到下一轮上下文。"""
-        caller = ScriptedCaller([
-            {"content": "", "tool_calls": [{"name": "list_departments",
-                                            "arguments": {"contains": ""}}]},
-            {"content": "共有若干科室", "tool_calls": []},
-        ])
+        caller = ScriptedCaller(
+            [
+                {"content": "", "tool_calls": [{"name": "list_departments", "arguments": {"contains": ""}}]},
+                {"content": "共有若干科室", "tool_calls": []},
+            ]
+        )
         turn = run_tool_loop("有哪些科室", tools=_tools(), llm=caller)
         assert turn.used_tools == ["list_departments"]
         assert turn.tool_calls[0].error == ""
@@ -80,65 +81,91 @@ class TestToolsAndLoopTogether:
         assert "departments" in second
 
     def test_availability_tool_runs_end_to_end(self, wired):
-        caller = ScriptedCaller([
-            {"content": "", "tool_calls": [{"name": "get_availability",
-                                            "arguments": {"department": "心内科", "date": ""}}]},
-            {"content": "上午还有号", "tool_calls": []},
-        ])
+        caller = ScriptedCaller(
+            [
+                {
+                    "content": "",
+                    "tool_calls": [
+                        {"name": "get_availability", "arguments": {"department": "心内科", "date": ""}}
+                    ],
+                },
+                {"content": "上午还有号", "tool_calls": []},
+            ]
+        )
         turn = run_tool_loop("心内科还有号吗", tools=_tools(), llm=caller)
         assert turn.tool_calls[0].error == ""
         assert (turn.tool_calls[0].result or {}).get("slots")
 
     def test_side_effect_tool_is_refused_without_confirmation(self, wired):
         """取号不可逆：没有确认回调时**一次都不能执行**，号源数量不能变。"""
-        before = {s["time"]: s["remaining"]
-                  for s in wired.availability("心内科", "2026-01-01").slots}
-        caller = ScriptedCaller([
-            {"content": "", "tool_calls": [{"name": "book_appointment",
-                                            "arguments": {"department": "心内科",
-                                                          "date": "2026-01-01",
-                                                          "time_slot": "上午"}}]},
-            {"content": "需要您确认", "tool_calls": []},
-        ])
+        before = {s["time"]: s["remaining"] for s in wired.availability("心内科", "2026-01-01").slots}
+        caller = ScriptedCaller(
+            [
+                {
+                    "content": "",
+                    "tool_calls": [
+                        {
+                            "name": "book_appointment",
+                            "arguments": {"department": "心内科", "date": "2026-01-01", "time_slot": "上午"},
+                        }
+                    ],
+                },
+                {"content": "需要您确认", "tool_calls": []},
+            ]
+        )
         turn = run_tool_loop("帮我挂号", tools=_tools(), llm=caller, confirm=None)
         assert turn.tool_calls[0].error, "未确认却执行了有副作用的工具"
-        after = {s["time"]: s["remaining"]
-                 for s in wired.availability("心内科", "2026-01-01").slots}
+        after = {s["time"]: s["remaining"] for s in wired.availability("心内科", "2026-01-01").slots}
         assert after == before, "号源被改了——副作用闸门失效"
 
     def test_side_effect_tool_executes_when_confirmed(self, wired):
         """给确认回调后应当真的挂号，且号源减少——证明闸门是"要求确认"而非"禁用"。"""
-        caller = ScriptedCaller([
-            {"content": "", "tool_calls": [{"name": "book_appointment",
-                                            "arguments": {"department": "心内科",
-                                                          "date": "2026-01-01",
-                                                          "time_slot": "上午"}}]},
-            {"content": "已挂号", "tool_calls": []},
-        ])
-        turn = run_tool_loop("帮我挂号", tools=_tools(), llm=caller,
-                             confirm=lambda call: True)
+        caller = ScriptedCaller(
+            [
+                {
+                    "content": "",
+                    "tool_calls": [
+                        {
+                            "name": "book_appointment",
+                            "arguments": {"department": "心内科", "date": "2026-01-01", "time_slot": "上午"},
+                        }
+                    ],
+                },
+                {"content": "已挂号", "tool_calls": []},
+            ]
+        )
+        turn = run_tool_loop("帮我挂号", tools=_tools(), llm=caller, confirm=lambda call: True)
         assert turn.tool_calls[0].error == ""
         assert (turn.tool_calls[0].result or {}).get("ticket_no")
         assert wired.my_appointments("anon")
 
     def test_unknown_tool_name_is_fed_back_not_raised(self, wired):
-        caller = ScriptedCaller([
-            {"content": "", "tool_calls": [{"name": "no_such_tool", "arguments": {}}]},
-            {"content": "换个办法", "tool_calls": []},
-        ])
+        caller = ScriptedCaller(
+            [
+                {"content": "", "tool_calls": [{"name": "no_such_tool", "arguments": {}}]},
+                {"content": "换个办法", "tool_calls": []},
+            ]
+        )
         turn = run_tool_loop("随便", tools=_tools(), llm=caller)
         assert turn.tool_calls[0].error
         assert turn.answer == "换个办法"
 
     def test_booking_without_department_reports_readable_error(self, wired):
         """业务错误要变成人话，而不是抛异常。"""
-        caller = ScriptedCaller([
-            {"content": "", "tool_calls": [{"name": "book_appointment",
-                                            "arguments": {"department": "火星科",
-                                                          "date": "2026-01-01",
-                                                          "time_slot": "上午"}}]},
-            {"content": "没有这个科室", "tool_calls": []},
-        ])
+        caller = ScriptedCaller(
+            [
+                {
+                    "content": "",
+                    "tool_calls": [
+                        {
+                            "name": "book_appointment",
+                            "arguments": {"department": "火星科", "date": "2026-01-01", "time_slot": "上午"},
+                        }
+                    ],
+                },
+                {"content": "没有这个科室", "tool_calls": []},
+            ]
+        )
         turn = run_tool_loop("挂火星科", tools=_tools(), llm=caller, confirm=lambda c: True)
         assert turn.tool_calls[0].error
         assert "火星科" in turn.tool_calls[0].error
@@ -152,7 +179,7 @@ class TestRealCallerParsing:
         from kubedocs.config import Settings
 
         caller = LiteLLMToolCaller(Settings(embedding_provider="hashing"))
-        assert caller is not None      # 构造不应触发网络或导入 litellm 之外的副作用
+        assert caller is not None  # 构造不应触发网络或导入 litellm 之外的副作用
 
     def test_bad_json_is_marked_not_raised(self):
         """模型给出畸形 JSON 时不能崩——要把错误交回循环回灌给模型。"""
@@ -174,8 +201,7 @@ class _FakeLitellmForToolCaller:
 
     drop_params = True
 
-    def __init__(self, *, cost: object = None,
-                 cost_raises: Exception | None = None) -> None:
+    def __init__(self, *, cost: object = None, cost_raises: Exception | None = None) -> None:
         self._cost = cost
         self._cost_raises = cost_raises
         self.calls = 0
@@ -185,9 +211,9 @@ class _FakeLitellmForToolCaller:
         from types import SimpleNamespace
 
         return SimpleNamespace(
-            choices=[SimpleNamespace(message=SimpleNamespace(content="直接作答",
-                                                            tool_calls=None))],
-            usage=SimpleNamespace(prompt_tokens=10, completion_tokens=5))
+            choices=[SimpleNamespace(message=SimpleNamespace(content="直接作答", tool_calls=None))],
+            usage=SimpleNamespace(prompt_tokens=10, completion_tokens=5),
+        )
 
     def completion_cost(self, completion_response: Any = None) -> object:
         if self._cost_raises is not None:
@@ -207,7 +233,7 @@ class TestToolCallerReportsUnknownPrice:
         from kubedocs.config import Settings
 
         caller = LiteLLMToolCaller(Settings(embedding_provider="hashing"))
-        caller._litellm = fake          # 绕开 import litellm（并避免它去拉价格表）
+        caller._litellm = fake  # 绕开 import litellm（并避免它去拉价格表）
         return caller
 
     def test_price_map_miss_is_flagged_not_zeroed(self):
@@ -227,8 +253,7 @@ class TestToolCallerReportsUnknownPrice:
 
         out = caller.choose([{"role": "user", "content": "问"}], [])
 
-        assert out == {"content": "直接作答", "tool_calls": [],
-                       "cost_usd": 0.002, "cost_priced": True}
+        assert out == {"content": "直接作答", "tool_calls": [], "cost_usd": 0.002, "cost_priced": True}
         assert caller.cost == pytest.approx(0.002)
         assert caller.unpriced_calls == 0
 

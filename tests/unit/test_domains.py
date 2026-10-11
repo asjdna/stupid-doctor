@@ -3,6 +3,7 @@
 这三样是"双域平台"的地基，一旦其中任何一处静默失效，表现都是
 "换个域之后搜不到东西"——没有报错，极难排查。所以每一条都固化进测试。
 """
+
 from __future__ import annotations
 
 from pathlib import Path
@@ -43,8 +44,7 @@ class TestChineseNormalizer:
     def test_query_and_index_agree(self):
         """入库与查询必须走同一套切分，否则两个词汇空间对不上。"""
         n = ChineseNormalizer()
-        assert set(n.query_text("胸痛喘不上气").split()) & \
-               set(n.index_text("我胸痛而且喘不上气").split())
+        assert set(n.query_text("胸痛喘不上气").split()) & set(n.index_text("我胸痛而且喘不上气").split())
 
     def test_negation_is_never_dropped(self):
         """否定词被当停用词丢掉，「不胸痛」就等同于「胸痛」——这是安全事故，不是检索问题。"""
@@ -91,17 +91,28 @@ class TestChineseFullTextRoundTrip:
     """端到端：中文入库 -> 中文查询能命中（这是 P0 真正要证明的事）。"""
 
     def _store(self, tmp_path: Path) -> SqliteStore:
-        return SqliteStore(db_path=tmp_path / "zh.db", vector_path=tmp_path / "zh.npy",
-                           dim=8, embedding_model="test",
-                           normalizer=ChineseNormalizer(), domain="clinic")
+        return SqliteStore(
+            db_path=tmp_path / "zh.db",
+            vector_path=tmp_path / "zh.npy",
+            dim=8,
+            embedding_model="test",
+            normalizer=ChineseNormalizer(),
+            domain="clinic",
+        )
 
     def _seed(self, store: SqliteStore) -> None:
-        doc = DocInput(doc_id="c1", rel_path="c1.md", title="症状卡", source_url="u",
-                       content_hash="h")
-        chunk = ChunkInput(chunk_id="c1::0000", doc_id="c1", ordinal=0, title="症状卡",
-                           breadcrumb="心内科", source_url="u",
-                           body="胸痛：可能与心绞痛相关，建议尽快到心内科就诊。",
-                           content_hash="h0", n_chars=30)
+        doc = DocInput(doc_id="c1", rel_path="c1.md", title="症状卡", source_url="u", content_hash="h")
+        chunk = ChunkInput(
+            chunk_id="c1::0000",
+            doc_id="c1",
+            ordinal=0,
+            title="症状卡",
+            breadcrumb="心内科",
+            source_url="u",
+            body="胸痛：可能与心绞痛相关，建议尽快到心内科就诊。",
+            content_hash="h0",
+            n_chars=30,
+        )
         store.upsert_docs([doc], [chunk], {"c1::0000": np.ones(8, dtype=np.float32)})
         store.finalize()
 
@@ -118,8 +129,8 @@ class TestChineseFullTextRoundTrip:
         store = self._store(tmp_path)
         try:
             self._seed(store)
-            assert store.keyword_search("我最近胸口痛", 5) == []   # 「胸口痛」不等于「胸痛」
-            assert store.keyword_search("心内科挂哪个科", 5)       # 科室词能命中
+            assert store.keyword_search("我最近胸口痛", 5) == []  # 「胸口痛」不等于「胸痛」
+            assert store.keyword_search("心内科挂哪个科", 5)  # 科室词能命中
         finally:
             store.close()
 
@@ -131,18 +142,31 @@ class TestChineseFullTextRoundTrip:
         **短语级**词元（"建议尽快就医"只有整串出现才命中）。这里两种都验证。
         """
         body = "患者主诉胸痛伴呼吸困难需警惕急性冠脉综合征。建议尽快就医。"
-        doc = DocInput(doc_id="c2", rel_path="c2.md", title="症状卡", source_url="u",
-                       content_hash="h2")
-        chunk = ChunkInput(chunk_id="c2::0000", doc_id="c2", ordinal=0, title="症状卡",
-                           breadcrumb="急诊", source_url="u", body=body,
-                           content_hash="h2-0", n_chars=len(body))
+        doc = DocInput(doc_id="c2", rel_path="c2.md", title="症状卡", source_url="u", content_hash="h2")
+        chunk = ChunkInput(
+            chunk_id="c2::0000",
+            doc_id="c2",
+            ordinal=0,
+            title="症状卡",
+            breadcrumb="急诊",
+            source_url="u",
+            body=body,
+            content_hash="h2-0",
+            n_chars=len(body),
+        )
         vec = {"c2::0000": np.ones(8, dtype=np.float32)}
 
-        plain = SqliteStore(db_path=tmp_path / "p.db", vector_path=tmp_path / "p.npy",
-                            dim=8, embedding_model="test")           # identity
-        seg = SqliteStore(db_path=tmp_path / "g.db", vector_path=tmp_path / "g.npy",
-                          dim=8, embedding_model="test",
-                          normalizer=ChineseNormalizer(), domain="clinic")
+        plain = SqliteStore(
+            db_path=tmp_path / "p.db", vector_path=tmp_path / "p.npy", dim=8, embedding_model="test"
+        )  # identity
+        seg = SqliteStore(
+            db_path=tmp_path / "g.db",
+            vector_path=tmp_path / "g.npy",
+            dim=8,
+            embedding_model="test",
+            normalizer=ChineseNormalizer(),
+            domain="clinic",
+        )
         try:
             for s in (plain, seg):
                 s.upsert_docs([doc], [chunk], vec)
@@ -167,9 +191,15 @@ class TestChineseFullTextRoundTrip:
         finally:
             s1.close()
         from kubedocs.store.sqlite_store import StoreError
+
         with pytest.raises(StoreError, match="归一化器"):
-            SqliteStore(db_path=tmp_path / "zh.db", vector_path=tmp_path / "zh.npy",
-                        dim=8, embedding_model="test", normalizer=IdentityNormalizer())
+            SqliteStore(
+                db_path=tmp_path / "zh.db",
+                vector_path=tmp_path / "zh.npy",
+                dim=8,
+                embedding_model="test",
+                normalizer=IdentityNormalizer(),
+            )
 
 
 class TestDomainIsolation:
@@ -181,11 +211,15 @@ class TestDomainIsolation:
         assert a.sqlite_path.parent != b.sqlite_path.parent
 
     def test_domain_is_recorded_in_meta(self, tmp_path):
-        s = Settings(index_dir=str(tmp_path), domain="clinic", normalizer="chinese",
-                     embedding_dim=8)
-        store = SqliteStore(db_path=s.sqlite_path, vector_path=s.vector_path, dim=8,
-                            embedding_model="t", normalizer=ChineseNormalizer(),
-                            domain="clinic")
+        s = Settings(index_dir=str(tmp_path), domain="clinic", normalizer="chinese", embedding_dim=8)
+        store = SqliteStore(
+            db_path=s.sqlite_path,
+            vector_path=s.vector_path,
+            dim=8,
+            embedding_model="t",
+            normalizer=ChineseNormalizer(),
+            domain="clinic",
+        )
         try:
             st = store.stats()
             assert st.domain == "clinic"

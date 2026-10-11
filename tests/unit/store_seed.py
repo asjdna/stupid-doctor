@@ -6,6 +6,7 @@
 "同一批输入在不同后端上给出同样的结果"。如果每个文件各造一份数据，
 这个主张就不再是同一批输入了——对照就失去意义。
 """
+
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -55,12 +56,28 @@ def make_seed() -> Seed:
     vectors: dict[str, np.ndarray] = {}
     for doc_id, ordinal, body, vector in spec:
         cid = f"{doc_id}::{ordinal:04d}"
-        docs.setdefault(doc_id, DocInput(
-            doc_id=doc_id, rel_path=f"{doc_id}.md", title=doc_id,
-            source_url=f"https://kubernetes.io/docs/{doc_id}/", content_hash=f"h-{doc_id}"))
-        chunks.append(ChunkInput(
-            chunk_id=cid, doc_id=doc_id, ordinal=ordinal, title=doc_id, breadcrumb="sec",
-            source_url=f"https://kubernetes.io/docs/{doc_id}/", body=body,
-            content_hash=f"h-{doc_id}-{ordinal}", n_chars=len(body)))
+        docs.setdefault(
+            doc_id,
+            DocInput(
+                doc_id=doc_id,
+                rel_path=f"{doc_id}.md",
+                title=doc_id,
+                source_url=f"https://kubernetes.io/docs/{doc_id}/",
+                content_hash=f"h-{doc_id}",
+            ),
+        )
+        chunks.append(
+            ChunkInput(
+                chunk_id=cid,
+                doc_id=doc_id,
+                ordinal=ordinal,
+                title=doc_id,
+                breadcrumb="sec",
+                source_url=f"https://kubernetes.io/docs/{doc_id}/",
+                body=body,
+                content_hash=f"h-{doc_id}-{ordinal}",
+                n_chars=len(body),
+            )
+        )
         vectors[cid] = vector
     return Seed(docs=list(docs.values()), chunks=chunks, vectors=vectors)

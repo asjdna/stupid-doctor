@@ -19,6 +19,7 @@
 `test_store_backend.py` 里另有一组不依赖数据库的探测用例
 （`probe()` 的错误路径），它们在任何环境下都会跑。
 """
+
 from __future__ import annotations
 
 import uuid
@@ -55,8 +56,9 @@ def schema() -> str:
 
 @pytest.fixture
 def pg(schema: str) -> Iterator[PgVectorStore]:
-    store = PgVectorStore(_DSN, schema=schema, dim=DIM, embedding_model="hashing-test",
-                          domain=schema, pool_min=1, pool_max=4)
+    store = PgVectorStore(
+        _DSN, schema=schema, dim=DIM, embedding_model="hashing-test", domain=schema, pool_min=1, pool_max=4
+    )
     try:
         yield store
     finally:
@@ -99,15 +101,15 @@ def _sims(ids: list[str], vectors: dict[str, Vector], q: np.ndarray) -> list[flo
 def test_schema_ddl_creates_tables_indexes_and_extension(pg: PgVectorStore) -> None:
     """建表/建索引是自动的（`finalize` 与 `upsert` 不必先跑初始化命令）。"""
     with psycopg.connect(_DSN) as conn:
-        tables = {r[0] for r in conn.execute(
-            "SELECT tablename FROM pg_tables WHERE schemaname = %s", (pg.schema,))}
-        indexes = {r[0] for r in conn.execute(
-            "SELECT indexname FROM pg_indexes WHERE schemaname = %s", (pg.schema,))}
-        has_ext = conn.execute(
-            "SELECT 1 FROM pg_extension WHERE extname = 'vector'").fetchone()
+        tables = {
+            r[0] for r in conn.execute("SELECT tablename FROM pg_tables WHERE schemaname = %s", (pg.schema,))
+        }
+        indexes = {
+            r[0] for r in conn.execute("SELECT indexname FROM pg_indexes WHERE schemaname = %s", (pg.schema,))
+        }
+        has_ext = conn.execute("SELECT 1 FROM pg_extension WHERE extname = 'vector'").fetchone()
     assert {"documents", "chunks", "meta"} <= tables
-    assert {"idx_chunks_tsv", "idx_chunks_embedding", "idx_chunks_doc", "idx_chunks_hash"} \
-        <= indexes
+    assert {"idx_chunks_tsv", "idx_chunks_embedding", "idx_chunks_doc", "idx_chunks_hash"} <= indexes
     assert has_ext is not None, "pgvector 扩展必须已启用"
     assert pg.verify_fts() == "ok"
     assert pg.verify_hnsw() == "ok"
@@ -119,7 +121,8 @@ def test_tsv_is_a_generated_column(pg: PgVectorStore) -> None:
         row = conn.execute(
             "SELECT is_generated, generation_expression FROM information_schema.columns "
             "WHERE table_schema = %s AND table_name = 'chunks' AND column_name = 'tsv'",
-            (pg.schema,)).fetchone()
+            (pg.schema,),
+        ).fetchone()
     assert row is not None and row[0] == "ALWAYS"
     assert "to_tsvector" in row[1]
 
@@ -132,12 +135,15 @@ def test_hnsw_parameters_are_the_configured_ones(pg: PgVectorStore) -> None:
     """
     with psycopg.connect(_DSN) as conn:
         ddl = conn.execute(
-            "SELECT indexdef FROM pg_indexes WHERE schemaname = %s "
-            "AND indexname = 'idx_chunks_embedding'", (pg.schema,)).fetchone()[0]
+            "SELECT indexdef FROM pg_indexes WHERE schemaname = %s AND indexname = 'idx_chunks_embedding'",
+            (pg.schema,),
+        ).fetchone()[0]
     assert "hnsw" in ddl and "vector_cosine_ops" in ddl
     assert f"m='{pg.hnsw_m}'" in ddl or f"m={pg.hnsw_m}" in ddl
-    assert f"ef_construction='{pg.hnsw_ef_construction}'" in ddl \
+    assert (
+        f"ef_construction='{pg.hnsw_ef_construction}'" in ddl
         or f"ef_construction={pg.hnsw_ef_construction}" in ddl
+    )
     # ef_search 是**查询期**参数，由池的 `configure` 逐连接下发。
     # ⚠️ 因此必须在**池里取出来的连接**上查：`psycopg.connect(_DSN)` 拿到的是
     # 一条池外的裸连接，它从没走过 `configure`，`SHOW` 只会给出该 GUC 的默认值 40，
@@ -149,8 +155,7 @@ def test_hnsw_parameters_are_the_configured_ones(pg: PgVectorStore) -> None:
 
 
 # --------------------------------------------------------------------------- 与 SQLite 对照
-def test_dense_search_matches_sqlite_vec_on_same_input(pg: PgVectorStore,
-                                                       tmp_path: Path) -> None:
+def test_dense_search_matches_sqlite_vec_on_same_input(pg: PgVectorStore, tmp_path: Path) -> None:
     """核心对照：同一批语料下，pgvector 的向量路必须与 sqlite-vec 给出**同一个名次语义**。
 
     比的是**相似度序列**而不是 chunk_id 序列（理由见 `_sims`）：两个后端都是精确近邻，
@@ -158,8 +163,9 @@ def test_dense_search_matches_sqlite_vec_on_same_input(pg: PgVectorStore,
     也不强求 HNSW 与 vec0 在并列处对齐。
     """
     _seed_pg(pg)
-    sqlite_store = SqliteVecStore(db_path=tmp_path / "s.db", vector_path=tmp_path / "s.npy",
-                                 dim=DIM, embedding_model="hashing-test")
+    sqlite_store = SqliteVecStore(
+        db_path=tmp_path / "s.db", vector_path=tmp_path / "s.npy", dim=DIM, embedding_model="hashing-test"
+    )
     try:
         seed = make_seed()
         sqlite_store.upsert_docs(seed.docs, seed.chunks, seed.vectors)
@@ -189,8 +195,9 @@ def test_hnsw_matches_exact_search_on_small_index(pg: PgVectorStore) -> None:
 def test_keyword_hit_set_matches_sqlite(pg: PgVectorStore, tmp_path: Path) -> None:
     """全文路只保证**命中集合**一致，排序允许不同（`ts_rank` vs BM25，见 ADR-0004）。"""
     _seed_pg(pg)
-    sqlite_store = SqliteVecStore(db_path=tmp_path / "k.db", vector_path=tmp_path / "k.npy",
-                                 dim=DIM, embedding_model="hashing-test")
+    sqlite_store = SqliteVecStore(
+        db_path=tmp_path / "k.db", vector_path=tmp_path / "k.npy", dim=DIM, embedding_model="hashing-test"
+    )
     try:
         seed = make_seed()
         sqlite_store.upsert_docs(seed.docs, seed.chunks, seed.vectors)
@@ -200,8 +207,7 @@ def test_keyword_hit_set_matches_sqlite(pg: PgVectorStore, tmp_path: Path) -> No
             sq_hits = {c for c, _ in sqlite_store.keyword_search(q, 5)}
             assert pg_hits == sq_hits, f"查询 {q!r} 的命中集合不一致"
             if pg_hits:
-                assert [r for _, r in pg.keyword_search(q, 5)] == \
-                    list(range(1, len(pg_hits) + 1))
+                assert [r for _, r in pg.keyword_search(q, 5)] == list(range(1, len(pg_hits) + 1))
     finally:
         sqlite_store.close()
 
@@ -209,17 +215,23 @@ def test_keyword_hit_set_matches_sqlite(pg: PgVectorStore, tmp_path: Path) -> No
 def test_stats_and_doc_texts_match_sqlite(pg: PgVectorStore, tmp_path: Path) -> None:
     """统计口径与文档正文拼接必须与 SQLite 侧一致（标注集自检依赖后者）。"""
     _seed_pg(pg)
-    sqlite_store = SqliteVecStore(db_path=tmp_path / "t.db", vector_path=tmp_path / "t.npy",
-                                 dim=DIM, embedding_model="hashing-test")
+    sqlite_store = SqliteVecStore(
+        db_path=tmp_path / "t.db", vector_path=tmp_path / "t.npy", dim=DIM, embedding_model="hashing-test"
+    )
     try:
         seed = make_seed()
         sqlite_store.upsert_docs(seed.docs, seed.chunks, seed.vectors)
         sqlite_store.finalize()
         a, b = pg.stats(), sqlite_store.stats()
-        assert (a.n_docs, a.n_chunks, a.total_chars, a.n_with_code) == \
-            (b.n_docs, b.n_chunks, b.total_chars, b.n_with_code)
-        assert pg.doc_texts(["alpha", "beta", "missing"]) == \
-            sqlite_store.doc_texts(["alpha", "beta", "missing"])
+        assert (a.n_docs, a.n_chunks, a.total_chars, a.n_with_code) == (
+            b.n_docs,
+            b.n_chunks,
+            b.total_chars,
+            b.n_with_code,
+        )
+        assert pg.doc_texts(["alpha", "beta", "missing"]) == sqlite_store.doc_texts(
+            ["alpha", "beta", "missing"]
+        )
         assert pg.existing_doc_ids() == sqlite_store.existing_doc_ids()
         assert pg.existing_doc_hashes() == sqlite_store.existing_doc_hashes()
         assert {c: sorted(r.__dict__) for c, r in pg.get_chunks(["alpha::0000"]).items()}
@@ -233,11 +245,13 @@ def test_meta_guards_reject_model_and_dim_mismatch(pg: PgVectorStore) -> None:
     from kubedocs.store.base import StoreError
 
     with pytest.raises(StoreError, match="维度"):
-        PgVectorStore(_DSN, schema=pg.schema, dim=DIM * 2,
-                      embedding_model="hashing-test", domain=pg.schema, pool_max=2)
+        PgVectorStore(
+            _DSN, schema=pg.schema, dim=DIM * 2, embedding_model="hashing-test", domain=pg.schema, pool_max=2
+        )
     with pytest.raises(StoreError, match="嵌入模型"):
-        PgVectorStore(_DSN, schema=pg.schema, dim=DIM, embedding_model="other-model",
-                      domain=pg.schema, pool_max=2)
+        PgVectorStore(
+            _DSN, schema=pg.schema, dim=DIM, embedding_model="other-model", domain=pg.schema, pool_max=2
+        )
 
 
 def test_rebuild_delete_and_missing_vector(pg: PgVectorStore) -> None:

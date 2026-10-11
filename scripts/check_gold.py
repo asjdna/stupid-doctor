@@ -16,6 +16,7 @@
 
 退出码：0 全部通过；1 有标注站不住；3 找不到文件。
 """
+
 from __future__ import annotations
 
 import argparse
@@ -72,8 +73,10 @@ def check(gold_path: Path, corpus: Path) -> int:
     print(f"语料目录 : {corpus}")
     print(f"标注条数 : {len(rows)}")
     print(f"类型分布 : {dict(kinds)}")
-    print(f"目标文档 : {len(targets)} 篇不同文档"
-          + (f"，被标注最多的：{targets.most_common(3)}" if targets else ""))
+    print(
+        f"目标文档 : {len(targets)} 篇不同文档"
+        + (f"，被标注最多的：{targets.most_common(3)}" if targets else "")
+    )
     if dupes:
         print(f"重复 id  : ✗ {dupes}")
     print(f"路径不存在 : {len(bad_path)}")
@@ -84,8 +87,7 @@ def check(gold_path: Path, corpus: Path) -> int:
         print(f"  ✗ {rid}: {term!r} 不在 {doc}")
 
     ok = not (bad_path or bad_term or dupes) and bool(rows)
-    print(f"\n结果：{'通过' if ok else '不通过'}"
-          + ("" if rows else "（没有任何标注行）"))
+    print(f"\n结果：{'通过' if ok else '不通过'}" + ("" if rows else "（没有任何标注行）"))
     return 0 if ok else 1
 
 

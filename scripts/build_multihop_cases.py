@@ -27,6 +27,7 @@ regarding B?"）。但对"在小检索预算下，一次检索能不能装下两
 用法：
     python scripts/build_multihop_cases.py --pairs 400 --out data/eval/multihop_cases.jsonl
 """
+
 from __future__ import annotations
 
 import argparse
@@ -48,18 +49,83 @@ from kubedocs.store.sqlite_store import from_settings  # noqa: E402
 
 _WORD = re.compile(r"[A-Za-z][A-Za-z0-9_.-]{3,}")
 # 文档里到处都是的词没有区分度，锚点必须是"这一篇特有的"
-_GENERIC = frozenset(["kubernetes", "cluster", "container", "containers", "pod", "pods", "node", "nodes", "object", "objects", "field", "fields", "value", "values", "default", "example", "examples", "note", "notes", "must", "should", "which", "there", "their", "this", "that", "when", "where", "with", "been", "have", "from", "will", "your", "more", "than", "also", "only", "into", "some", "such", "other", "others", "spec", "metadata", "name", "names", "type", "types", "true", "false", "null", "list", "item", "items", "path", "paths"])
+_GENERIC = frozenset(
+    [
+        "kubernetes",
+        "cluster",
+        "container",
+        "containers",
+        "pod",
+        "pods",
+        "node",
+        "nodes",
+        "object",
+        "objects",
+        "field",
+        "fields",
+        "value",
+        "values",
+        "default",
+        "example",
+        "examples",
+        "note",
+        "notes",
+        "must",
+        "should",
+        "which",
+        "there",
+        "their",
+        "this",
+        "that",
+        "when",
+        "where",
+        "with",
+        "been",
+        "have",
+        "from",
+        "will",
+        "your",
+        "more",
+        "than",
+        "also",
+        "only",
+        "into",
+        "some",
+        "such",
+        "other",
+        "others",
+        "spec",
+        "metadata",
+        "name",
+        "names",
+        "type",
+        "types",
+        "true",
+        "false",
+        "null",
+        "list",
+        "item",
+        "items",
+        "path",
+        "paths",
+    ]
+)
 
 
-def doc_anchors(store: Any, *, per_doc: int = 6, max_docs: int = 1200,
-                ) -> dict[str, list[str]]:
+def doc_anchors(
+    store: Any,
+    *,
+    per_doc: int = 6,
+    max_docs: int = 1200,
+) -> dict[str, list[str]]:
     """给每篇文档挑几个**高 IDF 锚点词**（该文档特有、且在全语料里罕见）。
 
     纯统计，不看内容语义——这正是"机械生成"的意思。
     """
     with store._lock:  # noqa: SLF001
         rows = store._con.execute(  # noqa: SLF001
-            "SELECT doc_id, body FROM chunks ORDER BY doc_id").fetchall()
+            "SELECT doc_id, body FROM chunks ORDER BY doc_id"
+        ).fetchall()
     df: Counter[str] = Counter()
     per_doc_tokens: dict[str, Counter[str]] = {}
     for r in rows:
@@ -85,8 +151,9 @@ def doc_anchors(store: Any, *, per_doc: int = 6, max_docs: int = 1200,
     return out
 
 
-def disjoint_pairs(anchors: dict[str, list[str]], *, limit: int,
-                   max_overlap: float = 0.1) -> list[tuple[str, str]]:
+def disjoint_pairs(
+    anchors: dict[str, list[str]], *, limit: int, max_overlap: float = 0.1
+) -> list[tuple[str, str]]:
     """挑词面重叠度低的文档对——重叠低才可能"两跳证据不在同一篇"。"""
     docs = sorted(anchors)
     sets = {d: set(anchors[d]) for d in docs}
@@ -103,8 +170,10 @@ def disjoint_pairs(anchors: dict[str, list[str]], *, limit: int,
     return pairs
 
 
-def build_cases(pairs: list[tuple[str, str]], anchors: dict[str, list[str]],
-                ) -> list[dict[str, Any]]:
+def build_cases(
+    pairs: list[tuple[str, str]],
+    anchors: dict[str, list[str]],
+) -> list[dict[str, Any]]:
     """套固定模板出题。每跳的期望要点 = 该文档的锚点（取其前 2 个）。"""
     cases: list[dict[str, Any]] = []
     for n, (d1, d2) in enumerate(pairs, start=1):
@@ -112,22 +181,30 @@ def build_cases(pairs: list[tuple[str, str]], anchors: dict[str, list[str]],
         a2 = anchors[d2][:2]
         t1 = d1.rsplit("/", 1)[-1].replace("-", " ")
         t2 = d2.rsplit("/", 1)[-1].replace("-", " ")
-        cases.append({
-            "id": f"g{n:04d}",
-            "q": (f"What does the Kubernetes documentation on \"{t1}\" cover "
-                  f"regarding {a1[0]}, and what does the page on \"{t2}\" cover "
-                  f"regarding {a2[0]}?"),
-            "hops": [
-                {"q": f"{d1} {a1[0]}", "expect_points": a1, "doc": d1},
-                {"q": f"{d2} {a2[0]}", "expect_points": a2, "doc": d2},
-            ],
-            "why": "机械生成：两个高 IDF 锚点分属词面不相交的两篇文档",
-        })
+        cases.append(
+            {
+                "id": f"g{n:04d}",
+                "q": (
+                    f'What does the Kubernetes documentation on "{t1}" cover '
+                    f'regarding {a1[0]}, and what does the page on "{t2}" cover '
+                    f"regarding {a2[0]}?"
+                ),
+                "hops": [
+                    {"q": f"{d1} {a1[0]}", "expect_points": a1, "doc": d1},
+                    {"q": f"{d2} {a2[0]}", "expect_points": a2, "doc": d2},
+                ],
+                "why": "机械生成：两个高 IDF 锚点分属词面不相交的两篇文档",
+            }
+        )
     return cases
 
 
-def screen(cases: list[dict[str, Any]], retriever: Any, *, top_k: int = 5,
-           ) -> tuple[list[dict[str, Any]], dict[str, int]]:
+def screen(
+    cases: list[dict[str, Any]],
+    retriever: Any,
+    *,
+    top_k: int = 5,
+) -> tuple[list[dict[str, Any]], dict[str, int]]:
     """第一轮确定性筛选：锚点可检索 + 两跳 top-1 文档不同。"""
     keep: list[dict[str, Any]] = []
     stats: Counter[str] = Counter()
@@ -165,8 +242,7 @@ def main(argv: list[str] | None = None) -> int:
     settings = Settings()
     store = from_settings(settings)
     try:
-        retriever = HybridRetriever(store, HashingEmbedder(dim=settings.embedding_dim),
-                                   settings)
+        retriever = HybridRetriever(store, HashingEmbedder(dim=settings.embedding_dim), settings)
         print("统计 IDF 锚点 …", flush=True)
         anchors = doc_anchors(store)
         print(f"  有可用锚点的文档：{len(anchors)}")
@@ -181,14 +257,23 @@ def main(argv: list[str] | None = None) -> int:
         with open(out, "w", encoding="utf-8") as fh:
             for c in keep:
                 fh.write(json.dumps(c, ensure_ascii=False) + "\n")
-        (REPO_ROOT / args.report).write_text(json.dumps({
-            "anchored_docs": len(anchors), "pairs": len(pairs),
-            "candidates": len(cases), "screened": len(keep), "stats": stats,
-            "screen_top_k": args.screen_top_k,
-        }, ensure_ascii=False, indent=2), encoding="utf-8")
+        (REPO_ROOT / args.report).write_text(
+            json.dumps(
+                {
+                    "anchored_docs": len(anchors),
+                    "pairs": len(pairs),
+                    "candidates": len(cases),
+                    "screened": len(keep),
+                    "stats": stats,
+                    "screen_top_k": args.screen_top_k,
+                },
+                ensure_ascii=False,
+                indent=2,
+            ),
+            encoding="utf-8",
+        )
         print(f"已写出 {out}（{len(keep)} 条）")
-        print("下一步（花钱）：python scripts/ab_multihop.py --gold "
-              f"{args.out} --select --limit {len(keep)}")
+        print(f"下一步（花钱）：python scripts/ab_multihop.py --gold {args.out} --select --limit {len(keep)}")
         return 0 if keep else 3
     finally:
         store.close()

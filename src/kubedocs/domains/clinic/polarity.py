@@ -33,6 +33,7 @@
 - assertion(text, phrase) -> dict：四值状态 + 经验者 + 时间性（三维一次拿全）。
 - is_reportable(text, phrase) -> bool：能否作为「患者当前主诉」上报（急诊红线/病历用它）。
 """
+
 from __future__ import annotations
 
 from collections.abc import Iterable
@@ -40,15 +41,41 @@ from collections.abc import Iterable
 # 否定词（长词在前，避免「无明显」被「无」抢先匹配）。
 # 不含「非/否」——「非常疼」「否则」里的非/否是程度/连词，不是否定。
 NEGATION_WORDS = [
-    "无明显", "并无", "没有", "未见", "否认", "毫无", "完全无",
-    "无", "没", "不", "未",
+    "无明显",
+    "并无",
+    "没有",
+    "未见",
+    "否认",
+    "毫无",
+    "完全无",
+    "无",
+    "没",
+    "不",
+    "未",
 ]
 
 # 转折/重启词：否定作用域到此为止（"无发热，但是咳嗽" -> 咳嗽为正）。
 REVERSAL_WORDS = [
-    "但是", "但", "不过", "只是", "就是", "而是", "可是", "然而", "却",
-    "反而", "倒", "还有", "伴有", "伴", "出现", "存在", "主要", "倒是",
-    "又有", "并有",
+    "但是",
+    "但",
+    "不过",
+    "只是",
+    "就是",
+    "而是",
+    "可是",
+    "然而",
+    "却",
+    "反而",
+    "倒",
+    "还有",
+    "伴有",
+    "伴",
+    "出现",
+    "存在",
+    "主要",
+    "倒是",
+    "又有",
+    "并有",
 ]
 
 # 假否定复合词：「无X」里 X 是修饰而非被否定的症状（「无痛性血尿」= painless hematuria，血尿仍在）。
@@ -58,8 +85,21 @@ FAKE_NEGATION = ["无痛性", "无创", "无诱因"]
 # 「没劲」= 乏力，本身是个症状词；其中的「没」不是否定触发词，
 # 不排除的话它的作用域会把后面的症状吞掉（「没劲犯困」-> 犯困被判否定而丢掉）。
 NON_NEGATION = [
-    "差不多", "不错", "没准", "不过", "不仅", "不但", "不止", "没关系",
-    "不如", "不料", "不妨", "不由得", "没劲", "没力气", "没精神",
+    "差不多",
+    "不错",
+    "没准",
+    "不过",
+    "不仅",
+    "不但",
+    "不止",
+    "没关系",
+    "不如",
+    "不料",
+    "不妨",
+    "不由得",
+    "没劲",
+    "没力气",
+    "没精神",
 ]
 
 # 双否定 / 不确定 cue：后面的症状是 possible（可能有），不是 absent。
@@ -75,29 +115,110 @@ HYPOTHETICAL_CUES = ["如果", "假如", "要是", "万一", "一旦", "倘若",
 # 刻意**不收**「他/她」：口语里「他」可能指医生、也可能指本人，误判会把患者自己的症状
 # 当成别人的而漏掉 —— 漏急诊比假急诊更危险，所以歧义时一律按本人处理。
 EXPERIENCER_OTHER = [
-    "我老公", "我丈夫", "我老婆", "我妻子", "我儿子", "我女儿", "我家孩子", "我的孩子",
-    "我爸爸", "我爸", "我妈妈", "我妈", "我父亲", "我母亲", "我爷爷", "我奶奶",
-    "我姥姥", "我姥爷", "我外公", "我外婆", "我哥哥", "我哥", "我姐姐", "我姐",
-    "我弟弟", "我弟", "我妹妹", "我妹", "我孙子", "我孙女",
-    "家里人", "家人", "孩子", "小孩", "宝宝", "婴儿", "同事", "朋友", "邻居",
-    "别人", "他人", "亲戚",
+    "我老公",
+    "我丈夫",
+    "我老婆",
+    "我妻子",
+    "我儿子",
+    "我女儿",
+    "我家孩子",
+    "我的孩子",
+    "我爸爸",
+    "我爸",
+    "我妈妈",
+    "我妈",
+    "我父亲",
+    "我母亲",
+    "我爷爷",
+    "我奶奶",
+    "我姥姥",
+    "我姥爷",
+    "我外公",
+    "我外婆",
+    "我哥哥",
+    "我哥",
+    "我姐姐",
+    "我姐",
+    "我弟弟",
+    "我弟",
+    "我妹妹",
+    "我妹",
+    "我孙子",
+    "我孙女",
+    "家里人",
+    "家人",
+    "孩子",
+    "小孩",
+    "宝宝",
+    "婴儿",
+    "同事",
+    "朋友",
+    "邻居",
+    "别人",
+    "他人",
+    "亲戚",
     # 不带「我」的亲属称谓：预问诊里用户就是患者本人，所以这些一律指别人。
     # （长词在前，所以「我父亲」仍优先于「父亲」。）
-    "爸爸", "妈妈", "父亲", "母亲", "儿子", "女儿", "哥哥", "姐姐", "弟弟", "妹妹",
-    "爷爷", "奶奶", "姥姥", "姥爷", "外公", "外婆", "老公", "老婆", "丈夫", "妻子",
-    "孙子", "孙女",
+    "爸爸",
+    "妈妈",
+    "父亲",
+    "母亲",
+    "儿子",
+    "女儿",
+    "哥哥",
+    "姐姐",
+    "弟弟",
+    "妹妹",
+    "爷爷",
+    "奶奶",
+    "姥姥",
+    "姥爷",
+    "外公",
+    "外婆",
+    "老公",
+    "老婆",
+    "丈夫",
+    "妻子",
+    "孙子",
+    "孙女",
 ]
 EXPERIENCER_SELF = ["我自己", "本人", "我"]
 
 # 时间性：既往 vs 现在。既往症状不进「现病史」，也不该触发急诊红线。
 TEMPORAL_PAST = [
-    "大前年", "多年前", "上个月", "上个星期", "去年", "前年", "以前", "从前",
-    "曾经", "小时候", "上周", "上次", "之前", "当初", "当年", "当时",
-    "得过", "有过", "已经好了", "早好了",
+    "大前年",
+    "多年前",
+    "上个月",
+    "上个星期",
+    "去年",
+    "前年",
+    "以前",
+    "从前",
+    "曾经",
+    "小时候",
+    "上周",
+    "上次",
+    "之前",
+    "当初",
+    "当年",
+    "当时",
+    "得过",
+    "有过",
+    "已经好了",
+    "早好了",
 ]
 TEMPORAL_NOW = [
-    "这几天", "这两天", "这会儿", "现在", "目前", "当前", "今天", "昨天",
-    "刚刚", "刚才", "最近",
+    "这几天",
+    "这两天",
+    "这会儿",
+    "现在",
+    "目前",
+    "当前",
+    "今天",
+    "昨天",
+    "刚刚",
+    "刚才",
+    "最近",
 ]
 
 # 分句边界：否定作用域不跨越这些标点（逗号/顿号在列举中继续延续，不截断）
@@ -288,13 +409,17 @@ def _label_at(text: str, pos: int, hits: list, default: str, combined: list | No
 
 def _combined_hits(text: str) -> list:
     """三个维度的标记合并成一个按位置排序的序列（用于互相截断作用域）。"""
-    merged = (_marker_hits(text, EXPERIENCER_MARKERS, _EXPERIENCER_MAP)
-              + _marker_hits(text, TEMPORAL_MARKERS, _TEMPORAL_MAP)
-              + _marker_hits(text, HYPOTHETICAL_MARKERS, _HYPOTHETICAL_MAP))
+    merged = (
+        _marker_hits(text, EXPERIENCER_MARKERS, _EXPERIENCER_MAP)
+        + _marker_hits(text, TEMPORAL_MARKERS, _TEMPORAL_MAP)
+        + _marker_hits(text, HYPOTHETICAL_MARKERS, _HYPOTHETICAL_MAP)
+    )
     return sorted(merged, key=lambda h: h[0])
 
 
-def _attribution(text: str, phrase: str, markers: tuple[str, ...], mapping: dict[str, str], default: str) -> str:
+def _attribution(
+    text: str, phrase: str, markers: tuple[str, ...], mapping: dict[str, str], default: str
+) -> str:
     """短语的归因标签。
 
     **所有出现处**都命中该标签才算数（与 is_negated 同一约定）：只要有一处不是，
@@ -308,7 +433,7 @@ def _attribution(text: str, phrase: str, markers: tuple[str, ...], mapping: dict
     for p in positions:
         if _label_at(text, p, hits, default, combined) != default:
             continue
-        return default          # 有一处不是该标签 -> 按 default（保守）
+        return default  # 有一处不是该标签 -> 按 default（保守）
     return _label_at(text, positions[0], hits, default, combined)
 
 
@@ -351,9 +476,11 @@ def is_reportable(text: str, phrase: str) -> bool:
     经验者是本人、时间性是现在。
     """
     a = assertion(text, phrase)
-    return (a["status"] in ("present", "possible")
-            and a["experiencer"] == "self"
-            and a["temporality"] == "present")
+    return (
+        a["status"] in ("present", "possible")
+        and a["experiencer"] == "self"
+        and a["temporality"] == "present"
+    )
 
 
 def assertion_verdicts(text: str, phrases: Iterable[str]) -> dict[str, tuple[str, str, str]]:
@@ -373,8 +500,7 @@ def assertion_verdicts(text: str, phrases: Iterable[str]) -> dict[str, tuple[str
             continue
         if all(_polarity_at(p, neg_ranges) == "absent" for p in positions):
             status = "absent"
-        elif all(_label_at(text, p, hits["hyp"], "present", combined) == "hypothetical"
-                 for p in positions):
+        elif all(_label_at(text, p, hits["hyp"], "present", combined) == "hypothetical" for p in positions):
             status = "hypothetical"
         else:
             status = _polarity_at(positions[0], neg_ranges)

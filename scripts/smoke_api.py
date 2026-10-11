@@ -17,6 +17,7 @@
 
 退出码：0 全部通过 / 1 有失败项 / 3 服务层不可用。
 """
+
 from __future__ import annotations
 
 import argparse
@@ -30,8 +31,7 @@ sys.path.insert(0, str(REPO_ROOT / "src"))
 
 def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(description="服务层端到端冒烟")
-    p.add_argument("--empty-index", action="store_true",
-                   help="用空索引，验证「索引为空也不能 500」")
+    p.add_argument("--empty-index", action="store_true", help="用空索引，验证「索引为空也不能 500」")
     p.add_argument("--domain", default="k8s_docs")
     args = p.parse_args(argv)
 
@@ -46,8 +46,7 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.empty_index:
         tmp = tempfile.mkdtemp(prefix="kubedocs-smoke-")
-        settings = Settings(index_dir=tmp, domain=args.domain,
-                            embedding_provider="hashing", embedding_dim=32)
+        settings = Settings(index_dir=tmp, domain=args.domain, embedding_provider="hashing", embedding_dim=32)
         print(f"（使用空索引：{tmp}）")
     else:
         settings = Settings(domain=args.domain)
@@ -102,8 +101,7 @@ def main(argv: list[str] | None = None) -> int:
 
         # SSE：只验证"是流且收到了事件"，不验证内容（内容需要真实模型）
         try:
-            with client.stream("POST", "/chat",
-                               json={"message": "我咳嗽", "thread_id": "smoke"}) as s:
+            with client.stream("POST", "/chat", json={"message": "我咳嗽", "thread_id": "smoke"}) as s:
                 ctype = s.headers.get("content-type", "")
                 body = "".join(s.iter_text())
             check("POST /chat 是 SSE", "text/event-stream" in ctype, ctype)
@@ -113,10 +111,12 @@ def main(argv: list[str] | None = None) -> int:
 
         r = client.get("/")
         check("GET / 200", r.status_code == 200, f"{r.status_code}")
-        check("GET / 返回真正的前端页（不是兜底说明）",
-              "html" in r.headers.get("content-type", "").lower()
-              and ("<script" in r.text or "<form" in r.text),
-              f"{len(r.text)} 字节")
+        check(
+            "GET / 返回真正的前端页（不是兜底说明）",
+            "html" in r.headers.get("content-type", "").lower()
+            and ("<script" in r.text or "<form" in r.text),
+            f"{len(r.text)} 字节",
+        )
 
     width = max(len(n) for n, _, _ in checks)
     failed = 0

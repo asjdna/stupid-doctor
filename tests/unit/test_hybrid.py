@@ -1,4 +1,5 @@
 """混合检索测试：两路召回与融合、降级可观测性、结果可引用。"""
+
 from __future__ import annotations
 
 import numpy as np
@@ -49,19 +50,32 @@ def _seed(store: SqliteStore) -> None:
     """
     docs, chunks, vecs = [], [], {}
     for doc_id, body, vec in (
-        ("a", "## Section\n\nalphauniqueword describes the thing in detail here",
-         _v(0.0, 1.0)),
-        ("b", "## Section\n\nbetauniqueword explains something else entirely",
-         _v(1.0, 0.0)),
+        ("a", "## Section\n\nalphauniqueword describes the thing in detail here", _v(0.0, 1.0)),
+        ("b", "## Section\n\nbetauniqueword explains something else entirely", _v(1.0, 0.0)),
     ):
-        docs.append(DocInput(doc_id=doc_id, rel_path=f"{doc_id}.md", title=doc_id.title(),
-                             source_url=f"https://kubernetes.io/docs/{doc_id}/",
-                             content_hash=f"h-{doc_id}"))
+        docs.append(
+            DocInput(
+                doc_id=doc_id,
+                rel_path=f"{doc_id}.md",
+                title=doc_id.title(),
+                source_url=f"https://kubernetes.io/docs/{doc_id}/",
+                content_hash=f"h-{doc_id}",
+            )
+        )
         cid = f"{doc_id}::0000"
-        chunks.append(ChunkInput(chunk_id=cid, doc_id=doc_id, ordinal=0, title=doc_id.title(),
-                                 breadcrumb="Section",
-                                 source_url=f"https://kubernetes.io/docs/{doc_id}/",
-                                 body=body, content_hash=f"h-{doc_id}-0", n_chars=len(body)))
+        chunks.append(
+            ChunkInput(
+                chunk_id=cid,
+                doc_id=doc_id,
+                ordinal=0,
+                title=doc_id.title(),
+                breadcrumb="Section",
+                source_url=f"https://kubernetes.io/docs/{doc_id}/",
+                body=body,
+                content_hash=f"h-{doc_id}-0",
+                n_chars=len(body),
+            )
+        )
         vecs[cid] = vec
     store.upsert_docs(docs, chunks, vecs)
     store.finalize()
@@ -82,7 +96,7 @@ class TestChannels:
         res = retriever.search("alphauniqueword", channels=("dense",))
         # 查询向量是 e0，只有 b 的向量与之一致
         assert res.chunk_ids[0] == "b::0000"
-        assert "a::0000" in res.chunk_ids      # 仍会作为次优返回（余弦更低）
+        assert "a::0000" in res.chunk_ids  # 仍会作为次优返回（余弦更低）
 
     def test_hybrid_contains_both_channels(self, retriever: HybridRetriever):
         res = retriever.search("alphauniqueword")
@@ -106,17 +120,19 @@ class TestChannels:
 
 class TestDegradation:
     def test_vector_channel_failure_still_returns_lexical_results(
-            self, store: SqliteStore, settings: Settings):
+        self, store: SqliteStore, settings: Settings
+    ):
         _seed(store)
         r = HybridRetriever(store, BrokenEmbedder(), settings)
         res = r.search("alphauniqueword")
-        assert res.chunk_ids == ["a::0000"]           # 纯全文仍然给得出答案
+        assert res.chunk_ids == ["a::0000"]  # 纯全文仍然给得出答案
         degraded = res.diagnostics["degraded"]
         assert degraded and "向量路不可用" in degraded[0]  # type: ignore[index]
         assert res.diagnostics["channels_detail"]["dense"]["n"] == 0  # type: ignore[index]
 
     def test_missing_term_and_broken_dense_returns_empty_not_crash(
-            self, store: SqliteStore, settings: Settings):
+        self, store: SqliteStore, settings: Settings
+    ):
         _seed(store)
         r = HybridRetriever(store, BrokenEmbedder(), settings)
         assert r.search("no-such-token-anywhere").chunk_ids == []

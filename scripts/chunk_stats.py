@@ -7,6 +7,7 @@
     python scripts/chunk_stats.py --limit 50 # 抽样（快速）
     python scripts/chunk_stats.py --samples 3
 """
+
 from __future__ import annotations
 
 import argparse
@@ -58,9 +59,12 @@ def main() -> int:
             print(f"  跳过 {rel}：{type(e).__name__}")
             continue
         cs = chunk_document(
-            rel, text,
-            max_chars=s.chunk_max_chars, overlap=s.chunk_overlap_chars,
-            min_chars=s.chunk_min_chars, url_prefix=s.docs_url_prefix,
+            rel,
+            text,
+            max_chars=s.chunk_max_chars,
+            overlap=s.chunk_overlap_chars,
+            min_chars=s.chunk_min_chars,
+            url_prefix=s.docs_url_prefix,
         )
         if not cs:
             empty_files += 1
@@ -90,11 +94,11 @@ def main() -> int:
     print(f"  文件          {len(files)} 个（空文档 {empty_files} 个被跳过）")
     print(f"  块数          {len(chunks)}")
     print(f"  平均块长      {statistics.mean(sizes):.0f} 字符")
-    print(f"  中位 / p95    {statistics.median(sizes):.0f} / {sizes_sorted[int(len(sizes)*0.95)-1]} 字符")
-    print(f"  含代码块的块  {with_code} （{with_code/len(chunks):.1%}）")
+    print(f"  中位 / p95    {statistics.median(sizes):.0f} / {sizes_sorted[int(len(sizes) * 0.95) - 1]} 字符")
+    print(f"  含代码块的块  {with_code} （{with_code / len(chunks):.1%}）")
     print(f"  去重后链接    {len(urls)} 个（非法 URL {bad_urls} 个，应为 0）")
-    print(f"  内容重复块    {dup} 个（{dup/len(chunks):.2%}）")
-    print(f"  耗时          {dt:.1f}s（{len(files)/dt:.0f} 文件/s）")
+    print(f"  内容重复块    {dup} 个（{dup / len(chunks):.2%}）")
+    print(f"  耗时          {dt:.1f}s（{len(files) / dt:.0f} 文件/s）")
     print("\n  按二级目录分布（前 10）：")
     for k, v in by_dir.most_common(10):
         print(f"    {k:22s} {v:6d} 块")
@@ -113,8 +117,10 @@ def main() -> int:
                 break
 
     # 体检结论：给机器可读摘要，便于 CI/README 引用
-    print(f"\n  RESULT files={len(files)} chunks={len(chunks)} "
-          f"avg={statistics.mean(sizes):.0f} bad_urls={bad_urls} dup={dup}")
+    print(
+        f"\n  RESULT files={len(files)} chunks={len(chunks)} "
+        f"avg={statistics.mean(sizes):.0f} bad_urls={bad_urls} dup={dup}"
+    )
     return 0
 
 

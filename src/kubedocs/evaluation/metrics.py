@@ -17,6 +17,7 @@
 四个一起看，避免被单一指标误导（例如把正确答案从第 1 位挪到第 2 位，
 hit 不变、MRR 掉一半）。
 """
+
 from __future__ import annotations
 
 import math
@@ -33,8 +34,7 @@ def _dedup_keep_order(items: Sequence[str]) -> list[str]:
     return out
 
 
-def first_relevant_rank(ranked_docs: Sequence[str], relevant: set[str],
-                        k: int) -> int | None:
+def first_relevant_rank(ranked_docs: Sequence[str], relevant: set[str], k: int) -> int | None:
     """第一个相关结果的名次（从 1 起）；top-k 内没有则 None。"""
     for i, doc in enumerate(_dedup_keep_order(ranked_docs)[:k], start=1):
         if doc in relevant:

@@ -32,6 +32,7 @@ self-ask 的收益来自**检索的针对性**：一个复合问题（"节点资
 **不允许**把异常抛给上层：退化成"直接检索一次 + 合成"，并把原因写进 `notes`。
 静默降级的推理链路在评测里只表现为"分数莫名掉了几个点"，排查成本极高。
 """
+
 from __future__ import annotations
 
 import re
@@ -83,8 +84,7 @@ class SubAnswer:
 
     def to_cited_answer(self) -> CitedAnswer:
         """转成图状态里流动的 `CitedAnswer`，下游节点不必认识 self-ask 的内部类型。"""
-        return CitedAnswer(text=self.answer, citations=list(self.citations),
-                           sub_question=self.question)
+        return CitedAnswer(text=self.answer, citations=list(self.citations), sub_question=self.question)
 
 
 class Decomposer(Protocol):
@@ -224,8 +224,7 @@ def self_ask(
         # 降级/不分解路径：只检索一次原始问题，证据同样带 [1..n] 的局部（即全局）编号
         hits = _search(question, search, notes)
         text, citations, hit_ids = _evidence_and_citations(hits, notes)
-        compose_parts = [SubAnswer(question=question, answer=text,
-                                   citations=citations, hit_ids=hit_ids)]
+        compose_parts = [SubAnswer(question=question, answer=text, citations=citations, hit_ids=hit_ids)]
         merged_parts = []
 
     answer, composed_ok = _compose(question, compose_parts, llm, notes)
@@ -233,8 +232,7 @@ def self_ask(
         llm_calls += 1
         # 合成文本按全局编号解释（见 Decomposer 的类文档），这里只做越界校验：
         # 打不开的引用比没有引用更误导，越界标记一律剥除并记账。
-        answer, dropped = _rewrite_markers(
-            answer, {i: i for i in range(1, len(citations) + 1)})
+        answer, dropped = _rewrite_markers(answer, {i: i for i in range(1, len(citations) + 1)})
         if dropped:
             notes.append(f"合成答案里有 {dropped} 处引用标记越界，已剥除")
 
@@ -251,8 +249,7 @@ def self_ask(
     )
 
 
-def _decompose(question: str, *, cap: int, llm: Decomposer,
-               notes: list[str]) -> tuple[list[str], bool]:
+def _decompose(question: str, *, cap: int, llm: Decomposer, notes: list[str]) -> tuple[list[str], bool]:
     """调一次分解，返回 (子问题列表, 这次调用是否成功返回)。
 
     失败**不抛异常**：降级为"直接检索一次"（调用方看到空列表就会走那条路），
@@ -320,8 +317,7 @@ def _answer_sub(question: str, *, search: Callable[[str], object], notes: list[s
     return SubAnswer(question=question, answer=text, citations=citations, hit_ids=hit_ids)
 
 
-def _merge_citations(parts: Sequence[SubAnswer],
-                     notes: list[str]) -> tuple[list[SubAnswer], list[dict]]:
+def _merge_citations(parts: Sequence[SubAnswer], notes: list[str]) -> tuple[list[SubAnswer], list[dict]]:
     """合并各子答案的引用：按出现顺序从 1 重编、按 chunk_id 去重，**并改写正文标记**。
 
     为什么必须同时改正文（最容易出错的一步）：每个子答案的引用是局部编号
@@ -349,13 +345,15 @@ def _merge_citations(parts: Sequence[SubAnswer],
             if gi is None:
                 gi = len(citations) + 1
                 global_of[cid] = gi
-                citations.append({
-                    "index": gi,
-                    "chunk_id": cid,
-                    "title": str(cit.get("title", "")),
-                    "breadcrumb": str(cit.get("breadcrumb", "")),
-                    "source_url": str(cit.get("source_url", "")),
-                })
+                citations.append(
+                    {
+                        "index": gi,
+                        "chunk_id": cid,
+                        "title": str(cit.get("title", "")),
+                        "breadcrumb": str(cit.get("breadcrumb", "")),
+                        "source_url": str(cit.get("source_url", "")),
+                    }
+                )
             remap[local] = gi
 
         text, dropped = _rewrite_markers(part.answer, remap)
@@ -363,12 +361,14 @@ def _merge_citations(parts: Sequence[SubAnswer],
         # 该子答案自己的引用换成全局编号后的副本（拷贝一份，避免各子答案共享同一个
         # dict 后互相污染）
         part_citations = [dict(citations[gi - 1]) for gi in sorted(set(remap.values()))]
-        merged.append(SubAnswer(
-            question=part.question,
-            answer=text,
-            citations=part_citations,
-            hit_ids=[str(c["chunk_id"]) for c in part_citations],
-        ))
+        merged.append(
+            SubAnswer(
+                question=part.question,
+                answer=text,
+                citations=part_citations,
+                hit_ids=[str(c["chunk_id"]) for c in part_citations],
+            )
+        )
 
     if stripped:
         notes.append(f"各子答案里有 {stripped} 处引用标记找不到对应引用，已剥除")
@@ -394,8 +394,9 @@ def _rewrite_markers(text: str, remap: Mapping[int, int]) -> tuple[str, int]:
     return _MARKER_RE.sub(_replace, text), dropped
 
 
-def _compose(question: str, parts: Sequence[SubAnswer], llm: Decomposer,
-             notes: list[str]) -> tuple[str, bool]:
+def _compose(
+    question: str, parts: Sequence[SubAnswer], llm: Decomposer, notes: list[str]
+) -> tuple[str, bool]:
     """调一次合成；失败时退回子答案原文，绝不把异常抛给调用方。"""
     try:
         return llm.compose(question, parts), True
@@ -423,8 +424,9 @@ def _search(query: str, search: Callable[[str], object], notes: list[str]) -> li
     try:
         result = search(query)
     except Exception as e:  # 检索后端（网络/索引损坏）的异常不可枚举，一律只降级
-        notes.append(f"检索失败（{query[:40]}）：{type(e).__name__}: {e}；"
-                     "该子问题没有证据，其余子问题不受影响")
+        notes.append(
+            f"检索失败（{query[:40]}）：{type(e).__name__}: {e}；该子问题没有证据，其余子问题不受影响"
+        )
         return []
     hits = _hits_of(result)
     if not hits:
@@ -446,9 +448,7 @@ def _hits_of(result: object) -> list[object]:
     return list(raw)
 
 
-def _evidence_and_citations(
-    hits: Sequence[object], notes: list[str]
-) -> tuple[str, list[dict], list[str]]:
+def _evidence_and_citations(hits: Sequence[object], notes: list[str]) -> tuple[str, list[dict], list[str]]:
     """把命中整理成 `[n] 标题 › 面包屑 / 正文` 的证据文本 + **局部编号**的引用。
 
     编号与文本在**同一个循环**里生成：分开写两次遍历，一旦某条命中因缺 chunk_id
@@ -468,13 +468,15 @@ def _evidence_and_citations(
         if idx is None:
             idx = len(citations) + 1
             index_of[cid] = idx
-            citations.append({
-                "index": idx,
-                "chunk_id": cid,
-                "title": _pick(hit, "title"),
-                "breadcrumb": _pick(hit, "breadcrumb"),
-                "source_url": _pick(hit, "source_url"),
-            })
+            citations.append(
+                {
+                    "index": idx,
+                    "chunk_id": cid,
+                    "title": _pick(hit, "title"),
+                    "breadcrumb": _pick(hit, "breadcrumb"),
+                    "source_url": _pick(hit, "source_url"),
+                }
+            )
         title = _pick(hit, "title")
         breadcrumb = _pick(hit, "breadcrumb")
         label = f"{title} › {breadcrumb}" if breadcrumb else title
@@ -484,8 +486,7 @@ def _evidence_and_citations(
         blocks.append(f"[{idx}] {label}\n{body}")
 
     if missing:
-        notes.append(f"有 {missing} 条检索结果缺 chunk_id，已跳过："
-                     "引用必须能定位到块，缺 id 也无法去重")
+        notes.append(f"有 {missing} 条检索结果缺 chunk_id，已跳过：引用必须能定位到块，缺 id 也无法去重")
     hit_ids = [str(c["chunk_id"]) for c in citations]
     return "\n\n".join(blocks), citations, hit_ids
 

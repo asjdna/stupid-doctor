@@ -10,6 +10,7 @@
    在**没有任何索引**时都必须能返回，而且不能是 500。这条"部署中间态"是最容易
    被写崩的地方（例如 `cli.open_store(require_data=True)` 那种前置检查直接抛错）。
 """
+
 from __future__ import annotations
 
 import json
@@ -61,11 +62,24 @@ def _seed_index(settings: Settings, bodies: list[str], *, title: str = "Pod 驱�
             doc_id = f"doc{i}"
             url = f"https://kubernetes.io/docs/doc{i}/"
             digest = f"h-{i}"
-            docs.append(DocInput(doc_id=doc_id, rel_path=f"{doc_id}.md", title=title,
-                                 source_url=url, content_hash=digest))
-            chunks.append(ChunkInput(chunk_id=f"{doc_id}::0000", doc_id=doc_id, ordinal=0,
-                                     title=title, breadcrumb="配置", source_url=url,
-                                     body=body, content_hash=digest, n_chars=len(body)))
+            docs.append(
+                DocInput(
+                    doc_id=doc_id, rel_path=f"{doc_id}.md", title=title, source_url=url, content_hash=digest
+                )
+            )
+            chunks.append(
+                ChunkInput(
+                    chunk_id=f"{doc_id}::0000",
+                    doc_id=doc_id,
+                    ordinal=0,
+                    title=title,
+                    breadcrumb="配置",
+                    source_url=url,
+                    body=body,
+                    content_hash=digest,
+                    n_chars=len(body),
+                )
+            )
         matrix = HashingEmbedder(dim=settings.embedding_dim).encode([c.body for c in chunks])
         store.upsert_docs(docs, chunks, {c.chunk_id: matrix[i] for i, c in enumerate(chunks)})
         store.finalize()
@@ -80,9 +94,9 @@ def _sse_events(text: str) -> list[tuple[str, dict]]:
         name, data = "", {}
         for line in block.splitlines():
             if line.startswith("event: "):
-                name = line[len("event: "):].strip()
+                name = line[len("event: ") :].strip()
             elif line.startswith("data: "):
-                data = json.loads(line[len("data: "):])
+                data = json.loads(line[len("data: ") :])
         if name:
             events.append((name, data))
     return events
@@ -197,8 +211,7 @@ class TestSearch:
 
     @pytest.mark.parametrize("path", ["/search", "/ask"])
     @pytest.mark.parametrize("top_k", [0, 21])
-    def test_top_k_out_of_range_is_422(self, client: TestClient, path: str,
-                                       top_k: int) -> None:
+    def test_top_k_out_of_range_is_422(self, client: TestClient, path: str, top_k: int) -> None:
         """top_k 越界（0 或 21）→ 422：范围由 `Field(ge=1, le=20)` 定，不靠下游兜底。"""
         resp = client.post(path, json={"q": "pod", "top_k": top_k})
         assert resp.status_code == 422
@@ -242,9 +255,10 @@ class TestAsk:
         assert body["n_hits"] == 0
         assert body["degraded"]
 
-    def test_answer_and_citations_are_passed_through(self, api_settings: Settings,
-                                                     monkeypatch: pytest.MonkeyPatch) -> None:
-        """"有可用 LLM"时 /ask 把生成层的答案与引用原样透出（用打桩 LLM，绝不联网）。
+    def test_answer_and_citations_are_passed_through(
+        self, api_settings: Settings, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """ "有可用 LLM"时 /ask 把生成层的答案与引用原样透出（用打桩 LLM，绝不联网）。
 
         打桩打在**装配点** `build_answerer` 而不是 litellm 内部：只要有一处没打中，
         真调用就会发到供应商，而测试不允许存在这种可能。这一条覆盖的是
@@ -317,17 +331,19 @@ class TestChat:
         """message 超过 2000 字符 → 422（单轮对话文本的上限在 schema 里）。"""
         assert client.post("/chat", json={"message": "咳" * 2001}).status_code == 422
 
-    def test_interrupted_question_is_streamed_and_resumed(self, api_settings: Settings,
-                                                         monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_interrupted_question_is_streamed_and_resumed(
+        self, api_settings: Settings, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         """被 `interrupt` 挂起的追问以 message 事件送出（`awaiting_user=true`），
         同一个 `thread_id` 再来一次即 `resumed=true`——这是"真挂起"而不是"内存里记个标志位"。
 
         症状关联表用打桩：真实卡片语料不入库（`data/clinic/cards.json` 是派生文件），
         靠它会让这条用例在干净克隆里变成"永远只走兜底回答"，失去验证价值。
         """
-        monkeypatch.setattr("kubedocs.api.app._clinic_links",
-                            lambda: {"咳嗽": ("支气管炎", "呼吸内科"),
-                                     "发热": ("支气管炎", "感染科")})
+        monkeypatch.setattr(
+            "kubedocs.api.app._clinic_links",
+            lambda: {"咳嗽": ("支气管炎", "呼吸内科"), "发热": ("支气管炎", "感染科")},
+        )
         with TestClient(create_app(api_settings)) as client:
             first = client.post("/chat", json={"message": "我咳嗽", "thread_id": "t-resume"})
             asking = _event(_sse_events(first.text), "message")
@@ -358,9 +374,7 @@ class TestChatThreadOwnership:
     def test_same_patient_can_continue_its_own_thread(self, client: TestClient) -> None:
         """兼容性钉子：同一属主沿用同一个 thread_id 必须完全正常。"""
         for message in ("我最近咳嗽", "还有点发热"):
-            resp = client.post("/chat", json={"message": message,
-                                              "thread_id": "t-own-1",
-                                              "patient_id": "p1"})
+            resp = client.post("/chat", json={"message": message, "thread_id": "t-own-1", "patient_id": "p1"})
             assert resp.status_code == 200, resp.text
         assert _event(_sse_events(resp.text), "message")["thread_id"] == "t-own-1"
 
@@ -378,12 +392,10 @@ class TestChatThreadOwnership:
 
     def test_another_patient_using_the_same_thread_id_is_rejected(self, client: TestClient) -> None:
         """**关键断言**：换一个 patient_id 用同一个 thread_id ⇒ 409 + 可读原因。"""
-        first = client.post("/chat", json={"message": "我咳嗽", "thread_id": "t-own-2",
-                                           "patient_id": "p1"})
+        first = client.post("/chat", json={"message": "我咳嗽", "thread_id": "t-own-2", "patient_id": "p1"})
         assert first.status_code == 200
 
-        bad = client.post("/chat", json={"message": "继续说", "thread_id": "t-own-2",
-                                         "patient_id": "p2"})
+        bad = client.post("/chat", json={"message": "继续说", "thread_id": "t-own-2", "patient_id": "p2"})
 
         assert bad.status_code == 409, bad.text
         detail = bad.json()["detail"]
@@ -393,20 +405,18 @@ class TestChatThreadOwnership:
 
     def test_rejected_turn_does_not_get_the_other_patients_history(self, client: TestClient) -> None:
         """被拒之后越权者拿不到任何东西：读别人的线程直接抛（而不是返回别人的历史）。"""
-        client.post("/chat", json={"message": "我咳嗽", "thread_id": "t-own-3",
-                                   "patient_id": "p1"})
-        bad = client.post("/chat", json={"message": "继续说", "thread_id": "t-own-3",
-                                         "patient_id": "p2"})
+        client.post("/chat", json={"message": "我咳嗽", "thread_id": "t-own-3", "patient_id": "p1"})
+        bad = client.post("/chat", json={"message": "继续说", "thread_id": "t-own-3", "patient_id": "p2"})
         assert bad.status_code == 409
 
-        store = client.app.state.clinic_threads       # type: ignore[attr-defined]
+        store = client.app.state.clinic_threads  # type: ignore[attr-defined]
         with pytest.raises(ThreadOwnershipError):
             store.history("t-own-3", "p2")
         assert store.owner_of("t-own-3") == "p1", "被拒的请求改写了属主"
 
     def test_thread_store_is_bounded(self, client: TestClient) -> None:
         """会话表有上界：超过上限的旧线程会被淘汰（缺陷回归：原先是无界 dict）。"""
-        store = client.app.state.clinic_threads       # type: ignore[attr-defined]
+        store = client.app.state.clinic_threads  # type: ignore[attr-defined]
         store.max_threads = 3
         for i in range(5):
             resp = client.post("/chat", json={"message": "我咳嗽", "thread_id": f"t-cap-{i}"})
@@ -430,7 +440,8 @@ class TestChatBudget:
         path.write_text(json.dumps({time.strftime("%Y-%m-%d"): 99.0}), encoding="utf-8")
 
     def test_over_budget_stops_the_llm_and_is_reported_on_the_stream(
-            self, api_settings: Settings, monkeypatch: pytest.MonkeyPatch) -> None:
+        self, api_settings: Settings, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         api_settings.llm_daily_budget_usd = 1.0
         self._exhaust(api_settings)
         calls: list[int] = []
@@ -443,14 +454,12 @@ class TestChatBudget:
                 calls.append(1)
                 return {"content": "答", "tool_calls": []}
 
-        monkeypatch.setattr("kubedocs.agent.clinic_react.ClinicReactRuntime.has_llm",
-                            lambda self: True)
-        monkeypatch.setattr("kubedocs.agent.llm_tool_caller.LiteLLMToolCaller",
-                            _CountingCaller)
+        monkeypatch.setattr("kubedocs.agent.clinic_react.ClinicReactRuntime.has_llm", lambda self: True)
+        monkeypatch.setattr("kubedocs.agent.llm_tool_caller.LiteLLMToolCaller", _CountingCaller)
         with TestClient(create_app(api_settings)) as client:
             resp = client.post("/chat", json={"message": "我咳嗽", "thread_id": "t-budget"})
 
-        assert resp.status_code == 200      # 响应头早就发出去了，只能把失败当事件发
+        assert resp.status_code == 200  # 响应头早就发出去了，只能把失败当事件发
         err = _event(_sse_events(resp.text), "error")
         assert "BudgetExceeded" in err["error"] and "上限" in err["error"]
         assert calls == [], "超预算后仍然调用了模型：账单没被挡住"
@@ -460,8 +469,7 @@ class TestChatBudget:
 # 首页
 # ===========================================================================
 class TestIndexPage:
-    def test_missing_html_returns_200_explanation(self, api_settings: Settings,
-                                                  tmp_path: Path) -> None:
+    def test_missing_html_returns_200_explanation(self, api_settings: Settings, tmp_path: Path) -> None:
         """`data/web/index.html` 不存在时返回 200 说明页（404 会被当成"服务没起来"）。"""
         app = create_app(api_settings)
         app.state.index_html = tmp_path / "no-such-index.html"
@@ -472,8 +480,7 @@ class TestIndexPage:
         assert "text/html" in resp.headers["content-type"]
         assert "kubedocs" in resp.text
 
-    def test_existing_html_is_served_verbatim(self, api_settings: Settings,
-                                              tmp_path: Path) -> None:
+    def test_existing_html_is_served_verbatim(self, api_settings: Settings, tmp_path: Path) -> None:
         """有构建产物时原样返回它：说明页只在真的缺前端时出现。"""
         page = tmp_path / "index.html"
         page.write_text(STARTUP_PAGE, encoding="utf-8")

@@ -5,6 +5,7 @@
 2. 单一真相源——想知道"这个服务有哪些可调项"只看这一个文件；
 3. `.env` 与真实环境变量同源，容器里注入 env 即可，不需要改代码。
 """
+
 from __future__ import annotations
 
 import os
@@ -75,6 +76,11 @@ class Settings(BaseSettings):
     )
 
     # ---------- 应用 ----------
+    # ⚠️ `env`（`KUBEDOCS_ENV`）目前**只被声明和校验**（Literal：非法值启动即报错），
+    # 没有任何行为读它。原来的 `is_prod` 属性全仓零引用（`grep -rn is_prod` 只剩
+    # 它自己和一条只为它写的测试），是个"看起来能切环境"的假开关，已删除。
+    # 需要环境相关行为时，请**先接上真实分支**再让这个字段参与判断；在那之前不要
+    # 再派生任何 is_prod/is_ci 之类的属性——假开关比缺配置更糟。
     env: Literal["local", "ci", "prod"] = "local"
     log_level: str = "INFO"
     api_port: int = 8080
@@ -279,10 +285,6 @@ class Settings(BaseSettings):
         if self.milvus_db:
             return self._resolve(self.milvus_db)
         return self.index_path / "milvus.db"
-
-    @property
-    def is_prod(self) -> bool:
-        return self.env == "prod"
 
 
 @lru_cache(maxsize=1)

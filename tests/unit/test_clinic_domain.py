@@ -3,6 +3,7 @@
 不加载真实模型：用 HashingEmbedder 建索引起见（**只有 BM25 通道被断言**），
 稠密通道的语义质量由离线全量编码负责。这样测试秒级完成且不联网。
 """
+
 from __future__ import annotations
 
 import json
@@ -19,24 +20,45 @@ from kubedocs.normalize import ChineseNormalizer
 from kubedocs.store.sqlite_store import SqliteStore
 
 CARDS = [
-    {"kind": "symptom", "key": "咳嗽", "text": "咳嗽。可能相关的疾病：支气管炎、肺炎。"
-     "建议就诊科室：呼吸内科。", "diseases": ["支气管炎"], "departments": ["呼吸内科"]},
-    {"kind": "symptom", "key": "头痛", "text": "头痛。可能相关的疾病：偏头痛。"
-     "建议就诊科室：神经内科。", "diseases": ["偏头痛"], "departments": ["神经内科"]},
-    {"kind": "disease", "key": "支气管炎", "text": "支气管炎。建议就诊科室：呼吸内科。"
-     "常用药物：阿莫西林。", "departments": ["呼吸内科"], "drugs": ["阿莫西林"]},
+    {
+        "kind": "symptom",
+        "key": "咳嗽",
+        "text": "咳嗽。可能相关的疾病：支气管炎、肺炎。建议就诊科室：呼吸内科。",
+        "diseases": ["支气管炎"],
+        "departments": ["呼吸内科"],
+    },
+    {
+        "kind": "symptom",
+        "key": "头痛",
+        "text": "头痛。可能相关的疾病：偏头痛。建议就诊科室：神经内科。",
+        "diseases": ["偏头痛"],
+        "departments": ["神经内科"],
+    },
+    {
+        "kind": "disease",
+        "key": "支气管炎",
+        "text": "支气管炎。建议就诊科室：呼吸内科。常用药物：阿莫西林。",
+        "departments": ["呼吸内科"],
+        "drugs": ["阿莫西林"],
+    },
 ]
 
 
 def _settings(tmp_path: Path) -> Settings:
-    return Settings(index_dir=str(tmp_path / "index"), domain="clinic",
-                    normalizer="chinese", embedding_dim=32)
+    return Settings(
+        index_dir=str(tmp_path / "index"), domain="clinic", normalizer="chinese", embedding_dim=32
+    )
 
 
 def _store(settings: Settings) -> SqliteStore:
-    return SqliteStore(db_path=settings.sqlite_path, vector_path=settings.vector_path,
-                       dim=settings.embedding_dim, embedding_model="hashing-32",
-                       normalizer=ChineseNormalizer(), domain="clinic")
+    return SqliteStore(
+        db_path=settings.sqlite_path,
+        vector_path=settings.vector_path,
+        dim=settings.embedding_dim,
+        embedding_model="hashing-32",
+        normalizer=ChineseNormalizer(),
+        domain="clinic",
+    )
 
 
 # ===========================================================================
@@ -64,8 +86,9 @@ class TestCardsToInputs:
 
 class TestPackBuildIndex:
     def test_missing_corpus_gives_actionable_error(self, tmp_path, monkeypatch):
-        monkeypatch.setattr("kubedocs.domains.clinic.domain.clinic_cards_path",
-                            lambda: tmp_path / "nope.json")
+        monkeypatch.setattr(
+            "kubedocs.domains.clinic.domain.clinic_cards_path", lambda: tmp_path / "nope.json"
+        )
         with pytest.raises(FileNotFoundError, match="clinic_build_cards"):
             ClinicPack().load_cards()
 
@@ -73,8 +96,7 @@ class TestPackBuildIndex:
         """核心验收：中文查询能命中中文卡片——这正是 P0 归一化层存在的意义。"""
         cards_file = tmp_path / "cards.json"
         cards_file.write_text(json.dumps(CARDS, ensure_ascii=False), encoding="utf-8")
-        monkeypatch.setattr("kubedocs.domains.clinic.domain.clinic_cards_path",
-                            lambda: cards_file)
+        monkeypatch.setattr("kubedocs.domains.clinic.domain.clinic_cards_path", lambda: cards_file)
 
         settings = _settings(tmp_path)
         store = _store(settings)
@@ -94,10 +116,9 @@ class TestPackBuildIndex:
     def test_triage_links_only_uses_symptom_cards(self, tmp_path, monkeypatch):
         cards_file = tmp_path / "cards.json"
         cards_file.write_text(json.dumps(CARDS, ensure_ascii=False), encoding="utf-8")
-        monkeypatch.setattr("kubedocs.domains.clinic.domain.clinic_cards_path",
-                            lambda: cards_file)
+        monkeypatch.setattr("kubedocs.domains.clinic.domain.clinic_cards_path", lambda: cards_file)
         links = ClinicPack().triage_links()
-        assert set(links) == {"咳嗽", "头痛"}          # 疾病卡没有"症状"这一侧
+        assert set(links) == {"咳嗽", "头痛"}  # 疾病卡没有"症状"这一侧
         assert "呼吸内科" in links["咳嗽"]
 
 
@@ -122,8 +143,7 @@ class TestSelfAskOverClinicIndex:
     def test_self_ask_retrieves_and_composes_with_citations(self, tmp_path, monkeypatch):
         cards_file = tmp_path / "cards.json"
         cards_file.write_text(json.dumps(CARDS, ensure_ascii=False), encoding="utf-8")
-        monkeypatch.setattr("kubedocs.domains.clinic.domain.clinic_cards_path",
-                            lambda: cards_file)
+        monkeypatch.setattr("kubedocs.domains.clinic.domain.clinic_cards_path", lambda: cards_file)
         settings = _settings(tmp_path)
         store = _store(settings)
         try:
@@ -138,8 +158,12 @@ class TestSelfAskOverClinicIndex:
 
             # 注意：needs_decomposition 有长度闸门（默认 ≥12 字），过短的中文问题
             # 不会被分解——这是有意的（短问题分解只会徒增调用）。所以这里用长问题。
-            result = self_ask("我咳嗽而且头痛，分别该去哪个科室？要不要做检查？",
-                              search=search, llm=_StubDecomposer(), max_sub=2)
+            result = self_ask(
+                "我咳嗽而且头痛，分别该去哪个科室？要不要做检查？",
+                search=search,
+                llm=_StubDecomposer(),
+                max_sub=2,
+            )
             assert result.decomposed is True
             assert result.citations, "self-ask 没有带回引用"
             indexes = [c["index"] for c in result.citations]
@@ -176,8 +200,7 @@ class TestClinicDomainRegistration:
         """
         from kubedocs.config import repo_root
 
-        declared = {name: DomainRegistry.get(name).eval_sets()
-                    for name in DomainRegistry.names()}
+        declared = {name: DomainRegistry.get(name).eval_sets() for name in DomainRegistry.names()}
         assert declared["k8s_docs"], "k8s 域必须有金标集"
         assert declared["clinic"] == [], "clinic 金标集尚未建立，应显式为空而不是假路径"
         for name, paths in declared.items():

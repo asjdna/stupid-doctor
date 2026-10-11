@@ -4,6 +4,7 @@
 front matter 混进正文、shortcode 连正文一起丢掉、YAML 清单被切断、面包屑层级错乱、
 引用 URL 点不开。语料是 Hugo markdown，这些坑在真实 K8s 文档里全都会遇到。
 """
+
 from kubedocs.chunker import (
     chunk_document,
     clean_body,
@@ -51,7 +52,7 @@ def test_front_matter_剥离且用作标题():
     meta, body = parse_front_matter(FRONT_MATTER_DOC)
     assert meta["title"] == "使用 cgroups 限制资源"
     assert meta["weight"] == "20"
-    assert "description" not in body          # 元数据不得出现在正文里
+    assert "description" not in body  # 元数据不得出现在正文里
     assert body.lstrip().startswith("# 使用 cgroups")
 
 
@@ -99,8 +100,9 @@ def test_超长正文按段落切且带重叠():
     assert len(chunks) >= 2, "超长正文没有被切开"
     assert all(len(c.text) <= 600 + 200 for c in chunks), "块长度失控"
     # 相邻块应有重叠内容（尾部带入下一块）
-    assert any(chunks[i].text[-50:] in chunks[i + 1].text
-               for i in range(len(chunks) - 1)), "块之间没有重叠，跨块上下文会丢"
+    assert any(chunks[i].text[-50:] in chunks[i + 1].text for i in range(len(chunks) - 1)), (
+        "块之间没有重叠，跨块上下文会丢"
+    )
 
 
 def test_过短碎片并入前一块():
@@ -118,14 +120,15 @@ def test_chunk_id稳定且内容指纹随内容变化():
 
 
 def test_source_url可点击():
-    assert source_url_for("concepts/architecture/cgroups.md",
-                          "https://kubernetes.io/docs/") == \
-        "https://kubernetes.io/docs/concepts/architecture/cgroups/"
-    assert source_url_for("concepts/workloads/_index.md",
-                          "https://kubernetes.io/docs/") == \
-        "https://kubernetes.io/docs/concepts/workloads/"
-    assert source_url_for("_index.md", "https://kubernetes.io/docs/") == \
-        "https://kubernetes.io/docs/"
+    assert (
+        source_url_for("concepts/architecture/cgroups.md", "https://kubernetes.io/docs/")
+        == "https://kubernetes.io/docs/concepts/architecture/cgroups/"
+    )
+    assert (
+        source_url_for("concepts/workloads/_index.md", "https://kubernetes.io/docs/")
+        == "https://kubernetes.io/docs/concepts/workloads/"
+    )
+    assert source_url_for("_index.md", "https://kubernetes.io/docs/") == "https://kubernetes.io/docs/"
 
 
 def test_空文档返回空列表():
@@ -161,7 +164,8 @@ def test_真实文档端到端不丢正文():
 # ---------------------------------------------------------------------------
 def test_HTML_标签剥离但保留文字():
     from kubedocs.chunker import strip_html
-    raw = '<p>参数 <code>pretty</code> 用于美化输出。</p>'
+
+    raw = "<p>参数 <code>pretty</code> 用于美化输出。</p>"
     out = strip_html(raw)
     assert "<" not in out and ">" not in out
     assert "pretty" in out and "美化输出" in out, out
@@ -169,8 +173,11 @@ def test_HTML_标签剥离但保留文字():
 
 def test_HTML_表格变成可读行文本():
     from kubedocs.chunker import strip_html
-    raw = ("<table><thead><tr><th>Name</th><th>Type</th></tr></thead>"
-           "<tbody><tr><td>pretty</td><td>string</td></tr></tbody></table>")
+
+    raw = (
+        "<table><thead><tr><th>Name</th><th>Type</th></tr></thead>"
+        "<tbody><tr><td>pretty</td><td>string</td></tr></tbody></table>"
+    )
     out = strip_html(raw)
     assert "Name" in out and "pretty" in out
     assert "|" in out, f"单元格应变成可读分隔而不是粘在一起：{out!r}"
@@ -179,12 +186,14 @@ def test_HTML_表格变成可读行文本():
 
 def test_HTML_实体被解码():
     from kubedocs.chunker import strip_html
+
     out = strip_html("A &lt; B &amp;&amp; C &nbsp;D")
     assert "A < B" in out and "&&" in out
 
 
 def test_HTML_script_style_整块删除():
     from kubedocs.chunker import strip_html
+
     out = strip_html("正文<script>var x = 1;</script>结尾<style>p{color:red}</style>")
     assert "var x" not in out and "color:red" not in out
     assert "正文" in out and "结尾" in out
@@ -193,6 +202,7 @@ def test_HTML_script_style_整块删除():
 def test_HTML_不碰代码围栏内的尖括号():
     """`if [[ $x < 5 ]]` 是合法代码，剥离 HTML 时绝不能动它。"""
     from kubedocs.chunker import strip_html
+
     raw = "```bash\nif [[ $x < 5 ]]; then echo '<ok>'; fi\n```\n"
     out = strip_html(raw)
     assert "$x < 5" in out and "<ok>" in out, out
@@ -201,6 +211,7 @@ def test_HTML_不碰代码围栏内的尖括号():
 def test_重叠对齐到安全边界不切词():
     """按字符硬切会产生 `...rip between` 这种从词中间开始的块（真实语料实测）。"""
     from kubedocs.chunker import _safe_overlap_tail
+
     block = "alpha beta gamma delta epsilon zeta eta theta iota kappa"
     tail = _safe_overlap_tail(block, 20)
     assert tail, "应当能对齐到一个词边界"
@@ -219,7 +230,11 @@ def test_重叠对齐到安全边界不切词():
 # 5794 块（30.7%）逐字重复；加上之后降到 212 块（1.12%）。
 # ---------------------------------------------------------------------------
 def test_上下文头出现在块首():
-    doc = "---\ntitle: DeviceClass\n---\n\n## Operations\n\n### Query Parameters\n\n" + ("说明文字。" * 30) + "\n"
+    doc = (
+        "---\ntitle: DeviceClass\n---\n\n## Operations\n\n### Query Parameters\n\n"
+        + ("说明文字。" * 30)
+        + "\n"
+    )
     chunks = chunk_document("reference/device-class-v1.md", doc)
     # `## Operations` 自身成一块（它下面没有正文），完整面包屑在子节那块
     heads = [c.text.splitlines()[0] for c in chunks]

@@ -1,4 +1,5 @@
 """指标测试：手算对照 + "指标必须能失败"的守卫。"""
+
 from __future__ import annotations
 
 import math
@@ -21,7 +22,7 @@ RANKED = ["a", "b", "c", "d"]
 
 def test_first_relevant_rank():
     assert first_relevant_rank(RANKED, {"b"}, 4) == 2
-    assert first_relevant_rank(RANKED, {"d"}, 3) is None      # 超出 k
+    assert first_relevant_rank(RANKED, {"d"}, 3) is None  # 超出 k
     assert first_relevant_rank(RANKED, {"zzz"}, 4) is None
 
 
@@ -57,8 +58,8 @@ def test_duplicate_docs_do_not_inflate_scores():
     这里传入的已经是文档级序列（同一文档出现两次）。"""
     dupes = ["a", "a", "b"]
     assert recall_at_k(dupes, {"a", "b"}, 3) == pytest.approx(1.0)
-    assert recall_at_k(dupes, {"a"}, 3) == pytest.approx(1.0)   # 不是 2.0
-    assert first_relevant_rank(dupes, {"b"}, 3) == 2            # 不是 3
+    assert recall_at_k(dupes, {"a"}, 3) == pytest.approx(1.0)  # 不是 2.0
+    assert first_relevant_rank(dupes, {"b"}, 3) == 2  # 不是 3
     assert ndcg_at_k(dupes, {"b"}, 3) <= 1.0
 
 

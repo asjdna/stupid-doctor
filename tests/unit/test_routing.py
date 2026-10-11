@@ -6,6 +6,7 @@
 1. 单候选时不调模型——省钱，也少一次把唯一合法值答错的机会；
 2. 模型给出非法域时**拒绝并回退**，而不是把不存在的域放进下游。
 """
+
 from __future__ import annotations
 
 from collections.abc import Sequence
@@ -107,26 +108,30 @@ def _handler(spec: ToolSpec) -> Any:
 
 def _candidates() -> list[dict[str, Any]]:
     """两个候选域：只有多候选时"选择"才有意义，也才需要模型。"""
-    return build_candidates([
-        _StubDomain("clinic", "中文医疗问诊与挂号"),
-        _StubDomain("k8s_docs", "Kubernetes 官方文档问答（英文语料）"),
-    ])
+    return build_candidates(
+        [
+            _StubDomain("clinic", "中文医疗问诊与挂号"),
+            _StubDomain("k8s_docs", "Kubernetes 官方文档问答（英文语料）"),
+        ]
+    )
 
 
 # --------------------------------------------------------------------- 候选构造
 class TestBuildCandidates:
     def test_reads_name_and_description_from_domain_packs(self) -> None:
         """域包的 description 是路由提示的唯一来源：内核不硬编码任何域知识。"""
-        cands = build_candidates([_StubDomain("clinic", "中文医疗问诊"),
-                                 _StubDomain("k8s_docs", "K8s 文档问答")])
-        assert cands == [{"name": "clinic", "description": "中文医疗问诊"},
-                         {"name": "k8s_docs", "description": "K8s 文档问答"}]
+        cands = build_candidates(
+            [_StubDomain("clinic", "中文医疗问诊"), _StubDomain("k8s_docs", "K8s 文档问答")]
+        )
+        assert cands == [
+            {"name": "clinic", "description": "中文医疗问诊"},
+            {"name": "k8s_docs", "description": "K8s 文档问答"},
+        ]
 
     def test_accepts_domain_registry_describe_output(self) -> None:
         """`DomainRegistry.describe()` 给的是 dict：同一份清单不该因为容器形状不同丢掉。"""
         described = [{"name": "clinic", "description": "中文医疗问诊", "normalizer": "chinese"}]
-        assert build_candidates(described) == [{"name": "clinic",
-                                                "description": "中文医疗问诊"}]
+        assert build_candidates(described) == [{"name": "clinic", "description": "中文医疗问诊"}]
 
     def test_domain_without_name_is_a_programming_error(self) -> None:
         """没有 name 的域包永远选不中；静默跳过会让它以"神秘失踪"的形式出现。"""
@@ -152,18 +157,21 @@ class TestRouteSingleCandidate:
     def test_single_candidate_short_circuits_without_llm(self) -> None:
         """只有一个候选时模型没有选择空间：这一次调用纯属浪费。"""
         llm = _StubRouter(RouteDecision(domain="k8s_docs", confidence=0.3, reason="随便"))
-        decision = route("kubelet 怎么配", llm=llm,
-                         candidates=build_candidates([_StubDomain("k8s_docs", "K8s 文档")]),
-                         default="clinic")
+        decision = route(
+            "kubelet 怎么配",
+            llm=llm,
+            candidates=build_candidates([_StubDomain("k8s_docs", "K8s 文档")]),
+            default="clinic",
+        )
         assert decision.domain == "k8s_docs"
         assert decision.confidence == 1.0
         assert llm.calls == 0
 
     def test_single_candidate_ignores_default(self) -> None:
         """唯一候选就是答案：连 default 都不该影响结果。"""
-        decision = route("q", llm=None,
-                         candidates=build_candidates([_StubDomain("clinic", "问诊")]),
-                         default="k8s_docs")
+        decision = route(
+            "q", llm=None, candidates=build_candidates([_StubDomain("clinic", "问诊")]), default="k8s_docs"
+        )
         assert decision.domain == "clinic"
         assert decision.confidence == 1.0
         assert decision.reason
@@ -173,8 +181,7 @@ class TestRouteSingleCandidate:
 class TestRouteIllegalDomain:
     def test_hallucinated_domain_is_rejected_and_falls_back(self) -> None:
         """最重要的一条：模型能编出不存在的域，静默接受会让下游全部崩掉。"""
-        llm = _StubRouter(RouteDecision(domain="travel_advisor", confidence=0.97,
-                                        reason="看起来像旅行"))
+        llm = _StubRouter(RouteDecision(domain="travel_advisor", confidence=0.97, reason="看起来像旅行"))
         decision = route("怎么挂号", llm=llm, candidates=_candidates(), default="k8s_docs")
         assert decision.domain == "k8s_docs"
         assert decision.confidence == 0.0
@@ -264,8 +271,7 @@ class TestSearchTool:
         assert payload["n"] == 2
         assert len(payload["hits"]) == 2
         first = payload["hits"][0]
-        assert set(first) == {"chunk_id", "doc_id", "title", "breadcrumb",
-                              "source_url", "body"}
+        assert set(first) == {"chunk_id", "doc_id", "title", "breadcrumb", "source_url", "body"}
         assert first["chunk_id"] == "d1::0001"
         assert first["doc_id"] == "d1"
         assert first["source_url"].startswith("https://")
@@ -274,8 +280,7 @@ class TestSearchTool:
     def test_long_body_is_truncated(self) -> None:
         """整块正文塞进上下文会挤掉对话历史：截断并留 `…`，让模型知道后面还有内容。"""
         retriever = _StubRetriever([_StubChunk(1, body="x" * 5000)])
-        payload = _handler(make_search_tool(retriever, body_limit=100))(
-            SearchDocsParams(query="q"))
+        payload = _handler(make_search_tool(retriever, body_limit=100))(SearchDocsParams(query="q"))
         body = payload["hits"][0]["body"]
         assert body.endswith("…")
         assert len(body) < 200
@@ -347,34 +352,35 @@ class TestCitationCheckTool:
     def test_valid_markers_pass(self) -> None:
         """编号都在提供的范围内、且确实引用了：通过。"""
         payload = _handler(make_citation_check_tool())(
-            CitationCheckParams(text="先 requests [1]，再 limits [2]", n_available=2))
+            CitationCheckParams(text="先 requests [1]，再 limits [2]", n_available=2)
+        )
         assert payload == {"ok": True, "problems": []}
 
     def test_out_of_range_marker_is_reported(self) -> None:
         """越界编号必须被指出：打不开的引用比没有引用更误导。"""
         payload = _handler(make_citation_check_tool())(
-            CitationCheckParams(text="见 [1] 与 [99]", n_available=1))
+            CitationCheckParams(text="见 [1] 与 [99]", n_available=1)
+        )
         assert payload["ok"] is False
         assert any("[99]" in p for p in payload["problems"])
 
     def test_answer_without_markers_is_flagged(self) -> None:
         """一个引用都没有就等于无法核对来源，不能算通过。"""
         payload = _handler(make_citation_check_tool())(
-            CitationCheckParams(text="就是这么回事", n_available=3))
+            CitationCheckParams(text="就是这么回事", n_available=3)
+        )
         assert payload["ok"] is False
         assert any("没有任何引用标记" in p for p in payload["problems"])
 
     def test_zero_available_chunks_is_flagged(self) -> None:
         """片段数为 0 时任何引用都无从谈起。"""
-        payload = _handler(make_citation_check_tool())(
-            CitationCheckParams(text="答案 [1]", n_available=0))
+        payload = _handler(make_citation_check_tool())(CitationCheckParams(text="答案 [1]", n_available=0))
         assert payload["ok"] is False
         assert any("没有提供任何片段" in p for p in payload["problems"])
 
     def test_zero_marker_is_out_of_range(self) -> None:
         """`[0]` 不是合法编号（片段从 1 开始编号）。"""
-        payload = _handler(make_citation_check_tool())(
-            CitationCheckParams(text="见 [0]", n_available=3))
+        payload = _handler(make_citation_check_tool())(CitationCheckParams(text="见 [0]", n_available=3))
         assert payload["ok"] is False
         assert any("[0]" in p for p in payload["problems"])
 
@@ -395,8 +401,9 @@ class TestRegistryContract:
         ToolRegistry.clear()
         try:
             with pytest.raises(ValueError, match="when_not"):
-                ToolRegistry.register(ToolSpec(name="bad_tool", description="没有 when_not",
-                                               params=EmptyParams))
+                ToolRegistry.register(
+                    ToolSpec(name="bad_tool", description="没有 when_not", params=EmptyParams)
+                )
             assert ToolRegistry.names() == []
 
             ToolRegistry.register(make_search_tool(_StubRetriever([])))

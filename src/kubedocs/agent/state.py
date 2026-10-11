@@ -20,6 +20,7 @@
 `evidence` 用 `operator.add` 累加：一轮问答可能同时产生"新症状"与"否认旧症状"两类证据，
 后写的节点不该覆盖先写的。其余字段默认覆盖语义（`total=False` 允许部分更新）。
 """
+
 from __future__ import annotations
 
 import operator
@@ -78,9 +79,13 @@ class RedLine:
     advice_given: bool = False
 
     def to_dict(self) -> dict[str, Any]:
-        return {"word": self.word, "status": self.status,
-                "experiencer": self.experiencer, "temporality": self.temporality,
-                "advice_given": self.advice_given}
+        return {
+            "word": self.word,
+            "status": self.status,
+            "experiencer": self.experiencer,
+            "temporality": self.temporality,
+            "advice_given": self.advice_given,
+        }
 
 
 @dataclass
@@ -109,17 +114,17 @@ class ClinicState(TypedDict, total=False):
 
     # ---- 证据与推理 ----
     evidence: Annotated[list[SymptomEvidence], operator.add]
-    candidates: dict[str, float]        # 候选（疾病/科室） -> 分数
-    asked: Annotated[list[str], operator.add]   # 已问过的问题，避免重复追问
+    candidates: dict[str, float]  # 候选（疾病/科室） -> 分数
+    asked: Annotated[list[str], operator.add]  # 已问过的问题，避免重复追问
     last_question: str
-    pending_suggestion: dict[str, Any]   # 已抛出但未获回答的试探性假设
+    pending_suggestion: dict[str, Any]  # 已抛出但未获回答的试探性假设
 
     # ---- 结果 ----
     red_line: dict[str, Any] | None
-    triage: dict[str, Any]               # {departments, diseases, reason}
-    answer: dict[str, Any]               # CitedAnswer 的序列化形式
-    ticket: dict[str, Any]               # 挂号结果
-    status: str                          # asking / emergency / booking / done / refused
+    triage: dict[str, Any]  # {departments, diseases, reason}
+    answer: dict[str, Any]  # CitedAnswer 的序列化形式
+    ticket: dict[str, Any]  # 挂号结果
+    status: str  # asking / emergency / booking / done / refused
     stop_reason: str
 
     # ---- 可观测 ----
@@ -131,8 +136,21 @@ class ClinicState(TypedDict, total=False):
 def empty_state(question: str, *, patient_id: str = "anon") -> ClinicState:
     """新会话的初始状态。显式给全字段，避免下游到处写 `.get(k, default)`。"""
     return ClinicState(
-        question=question, patient_id=patient_id, turn=0,
-        evidence=[], candidates={}, asked=[], last_question="",
-        pending_suggestion={}, red_line=None, triage={}, answer={}, ticket={},
-        status="asking", stop_reason="", diagnostics=[], llm_calls=0, cost_usd=0.0,
+        question=question,
+        patient_id=patient_id,
+        turn=0,
+        evidence=[],
+        candidates={},
+        asked=[],
+        last_question="",
+        pending_suggestion={},
+        red_line=None,
+        triage={},
+        answer={},
+        ticket={},
+        status="asking",
+        stop_reason="",
+        diagnostics=[],
+        llm_calls=0,
+        cost_usd=0.0,
     )

@@ -10,6 +10,7 @@
 候选自然为空。早期版本的本文件就在这里踩过坑——它不是 bug，是红线在正常工作。
 所以问诊流程一律用非红线症状（咳嗽 / 发热 / 头痛…），红线只用来测紧急流程。
 """
+
 from __future__ import annotations
 
 import pytest
@@ -113,12 +114,15 @@ class TestEmergencyFlowEndToEnd:
         assert "120" in state["answer"]["text"]
         assert agent.pending_question(thread_id="e1") is None
 
-    @pytest.mark.parametrize("text,why", [
-        ("我老公胸痛，我没事", "家属"),
-        ("我去年胸痛过一次，现在好了", "既往"),
-        ("我没有胸痛", "否认"),
-        ("如果胸痛怎么办", "假设"),
-    ])
+    @pytest.mark.parametrize(
+        "text,why",
+        [
+            ("我老公胸痛，我没事", "家属"),
+            ("我去年胸痛过一次，现在好了", "既往"),
+            ("我没有胸痛", "否认"),
+            ("如果胸痛怎么办", "假设"),
+        ],
+    )
     def test_no_false_emergency(self, text, why):
         """装配后仍然不误报——三维门控在真实链路上生效的证明。"""
         agent, _ = _agent()

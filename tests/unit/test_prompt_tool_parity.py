@@ -22,6 +22,7 @@
 所以断言的是相等，而提示词里那份清单由 `build_system_prompt(tools)` 从注册表生成，
 两边是同一个数据源的两种视图——任何一侧被改回写死的文本，这里立刻红。
 """
+
 from __future__ import annotations
 
 from typing import Any
@@ -50,7 +51,7 @@ def promised_tools(prompt: str) -> set[str]:
     if TOOL_LIST_HEADER not in lines:
         return set()
     names: set[str] = set()
-    for line in lines[lines.index(TOOL_LIST_HEADER) + 1:]:
+    for line in lines[lines.index(TOOL_LIST_HEADER) + 1 :]:
         if not line.startswith("- "):
             break
         names.add(line[2:].strip())
@@ -59,9 +60,13 @@ def promised_tools(prompt: str) -> set[str]:
 
 @pytest.fixture
 def settings(tmp_path) -> Settings:
-    return Settings(index_dir=str(tmp_path), domain="clinic",
-                    embedding_provider="hashing", embedding_dim=32,
-                    llm_model="deepseek/deepseek-chat")
+    return Settings(
+        index_dir=str(tmp_path),
+        domain="clinic",
+        embedding_provider="hashing",
+        embedding_dim=32,
+        llm_model="deepseek/deepseek-chat",
+    )
 
 
 @pytest.fixture(autouse=True)
@@ -73,8 +78,7 @@ def _clean_registry() -> Any:
 
 
 def make_runtime(settings: Settings, retriever: Any = None) -> ClinicReactRuntime:
-    return ClinicReactRuntime(settings, BookingService(MockAppointmentProvider()),
-                              retriever=retriever)
+    return ClinicReactRuntime(settings, BookingService(MockAppointmentProvider()), retriever=retriever)
 
 
 class _StubRetriever:
@@ -94,10 +98,12 @@ class TestChatPathParity:
     def test_prompt_promises_exactly_what_is_registered(self, settings):
         rt = make_runtime(settings)
         registered = {t.name for t in rt.tools}
-        assert registered == {"list_departments", "get_availability",
-                              "book_appointment", "check_citations"}, (
-            "clinic 域的注册集合变了：确认是有意为之，再同步这条断言"
-        )
+        assert registered == {
+            "list_departments",
+            "get_availability",
+            "book_appointment",
+            "check_citations",
+        }, "clinic 域的注册集合变了：确认是有意为之，再同步这条断言"
         assert promised_tools(rt.system_prompt) == registered, (
             "系统提示承诺的工具与注册表不一致——模型会去调一个它没有的工具"
         )
@@ -147,8 +153,9 @@ class TestBuildSystemPrompt:
         from kubedocs.agent.tools import EmptyParams, ToolSpec
 
         def spec(name: str, domain: str = "clinic") -> ToolSpec:
-            return ToolSpec(name=name, description="（测试用）", params=EmptyParams,
-                            domain=domain, when_not="（测试用）")
+            return ToolSpec(
+                name=name, description="（测试用）", params=EmptyParams, domain=domain, when_not="（测试用）"
+            )
 
         prompt = build_system_prompt([spec("zeta"), spec("alpha"), spec("mid")])
         assert promised_tools(prompt) == {"alpha", "mid", "zeta"}

@@ -27,6 +27,7 @@ milvus-lite 把数据目录的 **LOCK 一直占到自己进程退出**，所以"
 该路径的证据是 ADR-0005 里那次**跨进程**实测（子进程报 `DataDirLockedError`），
 这里只守住"打不开就抛 `StoreError` 并给人话提示"这一层。
 """
+
 from __future__ import annotations
 
 import sys
@@ -62,8 +63,10 @@ EMBEDDING_MODEL = "hashing-test"
 def _make(tmp_path: Path, *, name: str = "m.db", **over: Any) -> MilvusStore:
     """构造一个独立的 milvus 后端（SQLite 与 Milvus 数据目录都在 tmp_path 下）。"""
     kwargs: dict[str, Any] = {
-        "db_path": tmp_path / "kubedocs.db", "vector_path": tmp_path / "chunk_vectors.npy",
-        "dim": DIM, "embedding_model": EMBEDDING_MODEL,
+        "db_path": tmp_path / "kubedocs.db",
+        "vector_path": tmp_path / "chunk_vectors.npy",
+        "dim": DIM,
+        "embedding_model": EMBEDDING_MODEL,
         "milvus_path": tmp_path / name,
     }
     kwargs.update(over)
@@ -87,8 +90,12 @@ def _seed(store: Store) -> None:
 
 def _milvus_ids(store: MilvusStore) -> set[str]:
     """直接问 Milvus 要一份主键清单（不经过 store 的任何缓冲/缓存）。"""
-    rows = store._client.query(COLLECTION, filter="", limit=10_000,  # noqa: SLF001
-                               output_fields=["chunk_id"])
+    rows = store._client.query(
+        COLLECTION,
+        filter="",
+        limit=10_000,  # noqa: SLF001
+        output_fields=["chunk_id"],
+    )
     return {str(r["chunk_id"]) for r in rows}
 
 
@@ -125,8 +132,7 @@ def test_repeated_upsert_does_not_duplicate_rows(ms: MilvusStore) -> None:
     _seed(ms)
     after = ms._client.get_collection_stats(COLLECTION)["row_count"]  # noqa: SLF001
     assert before == after == 5
-    assert _milvus_ids(ms) == {"alpha::0000", "alpha::0001", "beta::0000",
-                               "beta::0001", "gamma::0000"}
+    assert _milvus_ids(ms) == {"alpha::0000", "alpha::0001", "beta::0000", "beta::0001", "gamma::0000"}
 
 
 # --------------------------------------------------------------------------- 删除同步
@@ -153,12 +159,23 @@ def test_delete_then_reinsert_keeps_both_sides_aligned(ms: MilvusStore) -> None:
     ms.delete_docs({"beta.md"})
     ms.finalize()
     new_chunk = ChunkInput(
-        chunk_id="delta::0000", doc_id="delta", ordinal=0, title="delta", breadcrumb="sec",
-        source_url="https://kubernetes.io/docs/delta/", body="deltaterm",
-        content_hash="h-d0", n_chars=9)
+        chunk_id="delta::0000",
+        doc_id="delta",
+        ordinal=0,
+        title="delta",
+        breadcrumb="sec",
+        source_url="https://kubernetes.io/docs/delta/",
+        body="deltaterm",
+        content_hash="h-d0",
+        n_chars=9,
+    )
     new_doc = DocInput(
-        doc_id="delta", rel_path="delta.md", title="delta",
-        source_url="https://kubernetes.io/docs/delta/", content_hash="h-delta")
+        doc_id="delta",
+        rel_path="delta.md",
+        title="delta",
+        source_url="https://kubernetes.io/docs/delta/",
+        content_hash="h-delta",
+    )
     ms.upsert_docs([new_doc], [new_chunk], {"delta::0000": vec(d=1.0)})
     ms.finalize()
     assert ms.dense_search(vec(d=1.0), 1) == [("delta::0000", 1)]
@@ -200,8 +217,9 @@ def test_dense_search_matches_sqlite_backend(ms: MilvusStore, tmp_path: Path) ->
     拿它断言只会得到一个随机变红的测试）。所以 b 只比第一名。
     """
     _seed(ms)
-    reference = SqliteStore(db_path=tmp_path / "s.db", vector_path=tmp_path / "s.npy",
-                            dim=DIM, embedding_model=EMBEDDING_MODEL)
+    reference = SqliteStore(
+        db_path=tmp_path / "s.db", vector_path=tmp_path / "s.npy", dim=DIM, embedding_model=EMBEDDING_MODEL
+    )
     try:
         _seed(reference)
         for q in (vec(a=1.0), vec(c=1.0)):
@@ -218,8 +236,9 @@ def test_keyword_path_is_byte_identical_to_sqlite_vec(ms: MilvusStore, tmp_path:
     换后端导致的指标变化就再也无法归因。
     """
     _seed(ms)
-    other = SqliteVecStore(db_path=tmp_path / "v.db", vector_path=tmp_path / "v.npy",
-                           dim=DIM, embedding_model=EMBEDDING_MODEL)
+    other = SqliteVecStore(
+        db_path=tmp_path / "v.db", vector_path=tmp_path / "v.npy", dim=DIM, embedding_model=EMBEDDING_MODEL
+    )
     try:
         _seed(other)
         for q in ("kubelet", "eviction threshold", "crashloopbackoff", "resourcequota"):
@@ -240,15 +259,19 @@ def test_existing_hash_to_vector_roundtrip_is_bit_exact(ms: MilvusStore) -> None
 def test_stats_and_get_chunks_match_sqlite(ms: MilvusStore, tmp_path: Path) -> None:
     """统计口径与块取回必须与 SQLite 侧一致（评测的语料指纹依赖它）。"""
     _seed(ms)
-    reference = SqliteStore(db_path=tmp_path / "r.db", vector_path=tmp_path / "r.npy",
-                            dim=DIM, embedding_model=EMBEDDING_MODEL)
+    reference = SqliteStore(
+        db_path=tmp_path / "r.db", vector_path=tmp_path / "r.npy", dim=DIM, embedding_model=EMBEDDING_MODEL
+    )
     try:
         _seed(reference)
         a, b = ms.stats(), reference.stats()
-        assert (a.n_docs, a.n_chunks, a.total_chars, a.n_with_code) == \
-            (b.n_docs, b.n_chunks, b.total_chars, b.n_with_code)
-        assert ms.get_chunks(["gamma::0000", "nope"]) == reference.get_chunks(
-            ["gamma::0000", "nope"])
+        assert (a.n_docs, a.n_chunks, a.total_chars, a.n_with_code) == (
+            b.n_docs,
+            b.n_chunks,
+            b.total_chars,
+            b.n_with_code,
+        )
+        assert ms.get_chunks(["gamma::0000", "nope"]) == reference.get_chunks(["gamma::0000", "nope"])
         assert ms.doc_texts(["alpha", "beta"]) == reference.doc_texts(["alpha", "beta"])
         assert ms.existing_doc_ids() == reference.existing_doc_ids()
         assert ms.existing_doc_hashes() == reference.existing_doc_hashes()
@@ -271,8 +294,7 @@ def test_hnsw_params_are_recorded_in_index_meta(ms: MilvusStore) -> None:
     assert meta["vector_backend"] == BACKEND
 
 
-def test_changing_build_params_without_rebuild_is_refused(ms: MilvusStore,
-                                                          tmp_path: Path) -> None:
+def test_changing_build_params_without_rebuild_is_refused(ms: MilvusStore, tmp_path: Path) -> None:
     """改了 `M` 却不重建索引 -> 报错，而不是"配置看起来改了、索引其实没变"。"""
     _seed(ms)
     ms.close()
@@ -324,7 +346,8 @@ def test_metric_is_configurable_and_recorded(tmp_path: Path) -> None:
 
 # --------------------------------------------------------------------------- 不可用路径
 def test_missing_dependency_raises_instead_of_falling_back(
-        tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """**没装 pymilvus 时必须报错，绝不回退到 numpy 扫描**。
 
     这是本项目明确禁止的"静默降级"：回退之后排序会变（近似 vs 精确），
@@ -336,11 +359,17 @@ def test_missing_dependency_raises_instead_of_falling_back(
 
 
 def test_factory_does_not_fall_back_when_milvus_is_broken(
-        tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """工厂层同上：`KUBEDOCS_STORE=milvus` 起不来就抛错，不会顺手构造 sqlite。"""
-    settings = Settings(index_dir=str(tmp_path / "index"), domain="kubedocs",
-                        embedding_provider="hashing", embedding_dim=DIM,
-                        embedding_model=EMBEDDING_MODEL, store="milvus")
+    settings = Settings(
+        index_dir=str(tmp_path / "index"),
+        domain="kubedocs",
+        embedding_provider="hashing",
+        embedding_dim=DIM,
+        embedding_model=EMBEDDING_MODEL,
+        store="milvus",
+    )
     monkeypatch.setitem(sys.modules, "pymilvus", None)
     with pytest.raises(StoreError):
         from_settings(settings)
@@ -392,8 +421,15 @@ def test_missing_vectors_are_detected_not_silently_ignored(ms: MilvusStore) -> N
 def test_orphan_vectors_are_detected(ms: MilvusStore) -> None:
     """向量侧多出块表里没有的条目：同样是报错，而不是"检索出一个取不到正文的块"。"""
     _seed(ms)
-    ms._client.upsert(COLLECTION, [{"chunk_id": "ghost::0000",  # noqa: SLF001
-                                    "embedding": np.asarray(vec(d=1.0), dtype=np.float32)}])
+    ms._client.upsert(
+        COLLECTION,
+        [
+            {
+                "chunk_id": "ghost::0000",  # noqa: SLF001
+                "embedding": np.asarray(vec(d=1.0), dtype=np.float32),
+            }
+        ],
+    )
     with pytest.raises(StoreError, match="不一致"):
         ms.finalize()
     report = ms.verify_vec()
@@ -413,9 +449,12 @@ def test_backend_takeover_requires_an_explicit_flag(tmp_path: Path) -> None:
 
     要接管必须显式打开闸门（只有迁移脚本会这么做），见 `adopt_legacy_matrix`。
     """
-    legacy = SqliteVecStore(db_path=tmp_path / "kubedocs.db",
-                            vector_path=tmp_path / "chunk_vectors.npy",
-                            dim=DIM, embedding_model=EMBEDDING_MODEL)
+    legacy = SqliteVecStore(
+        db_path=tmp_path / "kubedocs.db",
+        vector_path=tmp_path / "chunk_vectors.npy",
+        dim=DIM,
+        embedding_model=EMBEDDING_MODEL,
+    )
     try:
         _seed(legacy)
     finally:
@@ -431,9 +470,12 @@ def test_backend_takeover_requires_an_explicit_flag(tmp_path: Path) -> None:
 
 def test_adopt_legacy_matrix_is_idempotent_and_bit_exact(tmp_path: Path) -> None:
     """迁移（不重新编码）：抽样逐位相等，且可以重复跑（脚本会重跑）。"""
-    legacy = SqliteStore(db_path=tmp_path / "kubedocs.db",
-                         vector_path=tmp_path / "chunk_vectors.npy",
-                         dim=DIM, embedding_model=EMBEDDING_MODEL)
+    legacy = SqliteStore(
+        db_path=tmp_path / "kubedocs.db",
+        vector_path=tmp_path / "chunk_vectors.npy",
+        dim=DIM,
+        embedding_model=EMBEDDING_MODEL,
+    )
     try:
         _seed(legacy)
     finally:
@@ -442,7 +484,7 @@ def test_adopt_legacy_matrix_is_idempotent_and_bit_exact(tmp_path: Path) -> None
     store = _make(tmp_path, allow_backend_takeover=True)
     try:
         assert store.adopt_legacy_matrix() == 5
-        assert store.adopt_legacy_matrix() == 5       # 幂等：不产生重复行
+        assert store.adopt_legacy_matrix() == 5  # 幂等：不产生重复行
         assert store.verify_vec() == "ok"
         got = store.existing_hash_to_vector({"h-alpha-0", "h-alpha-1"})
         assert np.array_equal(got["h-alpha-0"], np.asarray(mat[0], dtype=np.float32))
@@ -480,9 +522,12 @@ def test_detach_lets_another_backend_take_over(tmp_path: Path) -> None:
     finally:
         store.close()
     # 摘掉之后，sqlite-vec 后端可以正常打开这份索引（块行与全文索引没被动过）
-    other = SqliteVecStore(db_path=tmp_path / "kubedocs.db",
-                           vector_path=tmp_path / "chunk_vectors.npy",
-                           dim=DIM, embedding_model=EMBEDDING_MODEL)
+    other = SqliteVecStore(
+        db_path=tmp_path / "kubedocs.db",
+        vector_path=tmp_path / "chunk_vectors.npy",
+        dim=DIM,
+        embedding_model=EMBEDDING_MODEL,
+    )
     try:
         assert other.stats().n_chunks == 5
         assert other.keyword_search("kubelet", 5)
