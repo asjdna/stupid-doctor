@@ -288,3 +288,95 @@ def test_hashing_embedder_is_deterministic():
     b = e.encode(["pod resource limits"])
     assert (a == b).all()
     assert float((a ** 2).sum()) == pytest.approx(1.0)
+
+
+# ------------------------------------------------- `--json` 不得绕过闸门（回归测试）
+class TestJsonDoesNotBypassGate:
+    """缺陷回归：`--json` 曾经抢在 `--gate` 之前 `return EXIT_OK`。
+
+    后果不是"输出格式不对"，而是**退出码失去意义**：`eval --gate --json` 恒为 0，
+    闸门连比较都没做。任何用 `--json` 卡闸门的自动化都在看假绿灯。
+    因此这里的断言钉的是**退出码本身**，而不是"打印了什么"。
+    """
+
+    @staticmethod
+    def _fixture(settings, store, embedder, tmp_path):
+        _corpus_with_two_docs(settings)
+        ingest(store, embedder, settings)
+        gold = tmp_path / "gold.jsonl"
+        gold.write_text(
+            json.dumps({"id": "g1", "kind": "concept", "q": "who enforces memory limits",
+                        "must_contain": {DOC: "kubelet enforces memory"}}) + "\n"
+            + json.dumps({"id": "g2", "kind": "concept",
+                          "q": "network policy ingress egress label selector",
+                          "must_contain": {DOC: "kubelet enforces memory"}}) + "\n",
+            encoding="utf-8")
+        baseline = tmp_path / "base.json"
+        # top_k=1 + 一条问不到的查询 -> hit=0.5，给"抬高基线触发回归"留出空间
+        assert run_eval(_eval_args(gold, baseline, write_baseline=True, top_k=1),
+                        settings, store) == 0
+        return gold, baseline
+
+    def test_gate_exit_code_matches_with_and_without_json(
+            self, settings, store, embedder, tmp_path, capsys):
+        """同一输入下，`--gate --json` 与 `--gate` 的退出码必须**逐位相同**。"""
+        gold, baseline = self._fixture(settings, store, embedder, tmp_path)
+        args = {"top_k": 1, "gate": True}
+
+        # 1) 基线 == 当前 -> 两个变体都应通过（0）
+        assert run_eval(_eval_args(gold, baseline, **args), settings, store) == 0
+        capsys.readouterr()
+        assert run_eval(_eval_args(gold, baseline, json=True, **args),
+                        settings, store) == 0
+
+        # 2) 抬高基线到当前达不到的水平 -> 两个变体都必须判为回归（2）
+        payload = json.loads(baseline.read_text(encoding="utf-8"))
+        payload["metrics"]["hit"] = 1.0
+        payload["metrics"]["mrr"] = 1.0
+        baseline.write_text(json.dumps(payload), encoding="utf-8")
+
+        rc_plain = run_eval(_eval_args(gold, baseline, **args), settings, store)
+        capsys.readouterr()
+        rc_json = run_eval(_eval_args(gold, baseline, json=True, **args), settings, store)
+
+        assert rc_plain == 2, "不带 --json 时闸门应当判为不通过"
+        assert rc_json == rc_plain, (
+            f"--json 改变了退出码（{rc_json} != {rc_plain}）——闸门被静默跳过")
+
+    def test_json_output_is_pure_json_on_stdout_gate_noise_on_stderr(
+            self, settings, store, embedder, tmp_path, capsys):
+        """`--json` 时 stdout 必须仍是**可解析的纯 JSON**：闸门旁白走 stderr。"""
+        gold, baseline = self._fixture(settings, store, embedder, tmp_path)
+        capsys.readouterr()          # 清掉 fixture 里那次 run_eval 的 stdout
+        payload = json.loads(baseline.read_text(encoding="utf-8"))
+        payload["metrics"]["hit"] = 1.0
+        payload["metrics"]["mrr"] = 1.0
+        baseline.write_text(json.dumps(payload), encoding="utf-8")
+
+        rc = run_eval(_eval_args(gold, baseline, top_k=1, gate=True, json=True),
+                      settings, store)
+        assert rc == 2
+        captured = capsys.readouterr()
+        parsed = json.loads(captured.out)          # 解析失败即测试失败
+        assert parsed["n_gold"] == 2
+        assert parsed["metrics"]["hit"] == pytest.approx(0.5)
+        # 闸门结论没被丢掉，只是在 stderr 上
+        assert "闸门：不通过" in captured.err
+    def test_write_baseline_with_json_still_writes_file(
+            self, settings, store, embedder, tmp_path, capsys):
+        """`--write-baseline --json`：JSON 只改输出格式，写盘动作不能被动掉。"""
+        _corpus_with_one_doc(settings)
+        ingest(store, embedder, settings)
+        gold = tmp_path / "gold.jsonl"
+        gold.write_text(json.dumps({
+            "id": "g1", "kind": "concept", "q": "who enforces memory limits",
+            "must_contain": {DOC: "kubelet enforces memory"},
+        }) + "\n", encoding="utf-8")
+        baseline = tmp_path / "base.json"
+
+        rc = run_eval(_eval_args(gold, baseline, write_baseline=True, json=True),
+                      settings, store)
+        assert rc == 0
+        assert baseline.exists()
+        assert json.loads(baseline.read_text(encoding="utf-8"))["n_gold"] == 1
+        capsys.readouterr()

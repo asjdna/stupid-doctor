@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import sys
 import time
 from argparse import Namespace
 from dataclasses import dataclass, field
@@ -257,28 +258,38 @@ def _print_table(results: dict[str, ModeResult], k: int, n_by_kind: dict[str, in
 def run_eval(args: Namespace, settings: Settings, store: Store) -> int:
     from kubedocs.cli import EXIT_GATE_FAIL, EXIT_OK, EXIT_PRECONDITION
 
+    def emit(msg: str, *, flush: bool = False) -> None:
+        """所有**人类可读**的输出都走这里。
+
+        `--json` 时改道 **stderr**：stdout 留给机器可读的纯 JSON，
+        否则 `python -m kubedocs.cli eval --json | jq` 会被旁白打断。
+        退出码与信息一条都不少，只是分流。
+        """
+        print(msg, file=sys.stderr if args.json else sys.stdout, flush=flush)
+
     repo = repo_root()
     gold_path = _resolve(args.gold, repo)
     if not gold_path.exists():
-        print(f"找不到标注集：{gold_path}")
+        emit(f"找不到标注集：{gold_path}")
         return EXIT_PRECONDITION
 
     rows = load_gold(gold_path)
     problems = validate_gold(rows, store)
     if problems:
-        print(f"标注集自检未通过（{len(problems)} 项）——不产出任何分数：")
+        emit(f"标注集自检未通过（{len(problems)} 项）——不产出任何分数：")
         for p in problems[:20]:
-            print(f"  ✗ {p.row_id}: {p.issue}")
+            emit(f"  ✗ {p.row_id}: {p.issue}")
         return EXIT_PRECONDITION
-    print(f"标注集：{gold_path}")
-    print(f"  条数 {len(rows)}，自检通过（引用的文档与关键词均已在索引中）")
+    emit(f"标注集：{gold_path}")
+    emit(f"  条数 {len(rows)}，自检通过（引用的文档与关键词均已在索引中）")
     n_by_kind: dict[str, int] = {}
     for r in rows:
         n_by_kind[r.kind] = n_by_kind.get(r.kind, 0) + 1
-    print(f"  类型分布：{n_by_kind}")
+    emit(f"  类型分布：{n_by_kind}")
 
     st = store.stats()
-    print(f"索引：{st.n_chunks} 块 / {st.n_docs} 文档，{st.embedding_model}（{st.embedding_dim} 维）")
+    emit(f"索引：{st.n_chunks} 块 / {st.n_docs} 文档，"
+         f"{st.embedding_model}（{st.embedding_dim} 维）")
 
     retriever = HybridRetriever(store, build_embedder(settings), settings)
 
@@ -289,13 +300,13 @@ def run_eval(args: Namespace, settings: Settings, store: Store) -> int:
     if rows:
         retriever.search(rows[0].q, top_k=1)
     cold_s = time.perf_counter() - t_cold
-    print(f"预热完成：冷启动 {cold_s:.1f}s（不计入下面的延迟统计）")
+    emit(f"预热完成：冷启动 {cold_s:.1f}s（不计入下面的延迟统计）")
 
     modes = ["hybrid"] if args.no_ablation else list(MODES)
     k = args.top_k
     results: dict[str, ModeResult] = {}
     for mode in modes:
-        print(f"跑 {mode} …", flush=True)
+        emit(f"跑 {mode} …", flush=True)
         results[mode] = run_mode(mode, rows, retriever, k, settings)
 
     hv = results["hybrid"]
@@ -313,21 +324,41 @@ def run_eval(args: Namespace, settings: Settings, store: Store) -> int:
         "corpus_sha": _corpus_fingerprint(store),
     }
 
-    if args.json:
-        print(json.dumps(current, ensure_ascii=False, indent=2))
-        return EXIT_OK
+    # ⚠️ 这一段的**顺序本身**是做过缺陷修复的，别改回去。
+    #
+    # 曾经的写法是 `if args.json: print(...); return EXIT_OK` 抢在 `--write-baseline`
+    # 与 `--gate` **之前**返回。后果：`eval --gate --json` 永远退出码 0，闸门连
+    # `check_gate` 都没调到就"通过"了——**退出码 0 与"质量达标"之间不再有任何关系**，
+    # 任何拿 `--json` 跑闸门的自动化（CI、发版脚本）都在看一个假绿灯。
+    # 实测对照（修复前）：带 `--json` → exit 0；不带 → exit 2 并打印「闸门：不通过」。
+    #
+    # 现在的契约：**`--json` 只影响输出格式，不影响是否跑闸门、也不影响退出码。**
+    # 退出码只由 `--write-baseline` / `--gate` 决定，JSON 一律最后才打印。
+    if not args.json:
+        _print_table(results, k, n_by_kind)
+        if hv.citation_violations:
+            print(f"\n引用完整性：{len(hv.citation_violations)} 条违规")
+            for v in hv.citation_violations[:5]:
+                print(f"  ✗ {v}")
+        else:
+            print("\n引用完整性：通过（每条结果都有可点击且可重算的官方 URL）")
+        if hv.misses:
+            print(f"\n未命中 {len(hv.misses)} 条：")
+            for m in hv.misses[:12]:
+                print(f"  ✗ {m}")
 
-    _print_table(results, k, n_by_kind)
-    if hv.citation_violations:
-        print(f"\n引用完整性：{len(hv.citation_violations)} 条违规")
-        for v in hv.citation_violations[:5]:
-            print(f"  ✗ {v}")
-    else:
-        print("\n引用完整性：通过（每条结果都有可点击且可重算的官方 URL）")
-    if hv.misses:
-        print(f"\n未命中 {len(hv.misses)} 条：")
-        for m in hv.misses[:12]:
-            print(f"  ✗ {m}")
+    if not args.json:
+        _print_table(results, k, n_by_kind)
+        if hv.citation_violations:
+            emit(f"\n引用完整性：{len(hv.citation_violations)} 条违规")
+            for v in hv.citation_violations[:5]:
+                emit(f"  ✗ {v}")
+        else:
+            emit("\n引用完整性：通过（每条结果都有可点击且可重算的官方 URL）")
+        if hv.misses:
+            emit(f"\n未命中 {len(hv.misses)} 条：")
+            for m in hv.misses[:12]:
+                emit(f"  ✗ {m}")
 
     baseline_path = _resolve(args.baseline, repo)
 
@@ -336,25 +367,31 @@ def run_eval(args: Namespace, settings: Settings, store: Store) -> int:
         payload = {"schema": BASELINE_SCHEMA, **current}
         with open(baseline_path, "w", encoding="utf-8") as fh:
             json.dump(payload, fh, ensure_ascii=False, indent=2)
-        print(f"\n已写入基线：{baseline_path}")
+        emit(f"\n已写入基线：{baseline_path}")
+        if args.json:
+            print(json.dumps(payload, ensure_ascii=False, indent=2))
         return EXIT_OK
 
-    if not args.gate:
-        return EXIT_OK
+    rc = EXIT_OK
+    if args.gate:
+        base = load_baseline(baseline_path)
+        if base is None:
+            emit(f"\n没有基线文件 {baseline_path}；先跑一次 `eval --write-baseline`")
+            rc = EXIT_GATE_FAIL
+        else:
+            fails = check_gate(base, current, allow_drift=args.allow_corpus_drift)
+            hard = [f for f in fails if not f.startswith("警告")]
+            for f in fails:
+                emit(("  ✗ " if not f.startswith("警告") else "  ⚠ ") + f)
+            if hard:
+                emit("\n闸门：不通过")
+                rc = EXIT_GATE_FAIL
+            else:
+                emit("\n闸门：通过")
 
-    base = load_baseline(baseline_path)
-    if base is None:
-        print(f"\n没有基线文件 {baseline_path}；先跑一次 `eval --write-baseline`")
-        return EXIT_GATE_FAIL
-    fails = check_gate(base, current, allow_drift=args.allow_corpus_drift)
-    hard = [f for f in fails if not f.startswith("警告")]
-    for f in fails:
-        print(("  ✗ " if not f.startswith("警告") else "  ⚠ ") + f)
-    if hard:
-        print("\n闸门：不通过")
-        return EXIT_GATE_FAIL
-    print("\n闸门：通过")
-    return EXIT_OK
+    if args.json:
+        print(json.dumps(current, ensure_ascii=False, indent=2))
+    return rc
 
 
 def _corpus_fingerprint(store: Store) -> str:
