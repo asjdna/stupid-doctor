@@ -34,23 +34,27 @@ pip install -e ".[dev]"
 ## 2. 跑门禁：`make check`
 
 ```bash
-make check          # = lint + type + test，与 CI 的 quality job 等价
+make check          # = lint + fmt + type + test + refs，与 CI 的 quality job 等价
 ```
 
-三件事串起来，**全部阻塞**（非零退出码即失败）：
+五件事串起来，**全部阻塞**（非零退出码即失败）：
 
 | 目标 | 命令 | 抓什么 |
 |---|---|---|
 | `make lint` | `ruff check .` | `E/F/W/B/I/UP/S/C4/RET/SIM`（含 flake8-bandit 的 `S` 子集） |
+| `make fmt` | `ruff format --check .` | 排版漂移。`ruff check` 管规则、它管排版，**两道不同的门**都得在 |
 | `make type` | `mypy src scripts` | `disallow_untyped_defs` 等，**新函数必须带类型注解** |
-| `make test` | `pytest tests/unit -p no:cacheprovider` | 单元测试；零外部依赖、秒级、不加载嵌入模型 |
+| `make test` | `pytest tests/unit -p no:cacheprovider -rs` | 单元测试；不需要网络与嵌入模型，秒级 |
+| `make refs` | `python scripts/check_doc_refs.py` | 文档里的 `文件:行号` 引用是否指着它声称的东西 |
 
 单独跑也一样：
 
 ```bash
 python -m ruff check .
+python -m ruff format --check .
 python -m mypy src scripts
-python -m pytest tests/unit -p no:cacheprovider
+python -m pytest tests/unit -p no:cacheprovider -rs
+python scripts/check_doc_refs.py
 ```
 
 > ⚠️ **直接调 pytest 时不要再加 `-q`**：`pyproject.toml` 的
@@ -58,13 +62,20 @@ python -m pytest tests/unit -p no:cacheprovider
 > **最后那行汇总**（`N passed`）一起吞掉，你会看不到实际通过数。
 >
 > `-p no:cacheprovider` 只是为了不留下 `.pytest_cache`（`make test`、CI 与
-> `make clean` 的清单都按这个来），与测试结果无关。这三处的命令是**同一份**：
+> `make clean` 的清单都按这个来），与测试结果无关。
+> `-rs` 把每条 skip 的**原因**打进日志：CI 里**允许** skip 的只有 milvus 那一族
+> （`pymilvus` / `milvus-lite` 是可选依赖，`pyproject.toml` 没声明），出现别的 skip 就是回归。
+> 这三处的命令是**同一份**：
 > `Makefile` 的 `test` 目标、`.github/workflows/ci.yml`、以及上面这个代码块。
 
-**没有 `make` 的机器**（原生的 Windows 环境常见）可以直接跑上面三条命令——
+**没有 `make` 的机器**（原生的 Windows 环境常见）可以直接跑上面那几条命令——
 它们才是真相，`make` 只是把它们串起来。
 
 **单元测试绝不能联网、不能花钱**：`tests/` 用哈希向量与打桩 LLM。
+唯一需要外部进程的是 `tests/unit/test_pgvector_store.py`（12 条）：它要一条真实
+Postgres——CI 用 `pgvector/pgvector:pg16` service 起它（见 `ci.yml` 的 quality job，
+同一条 service 也让 `test_store_contract.py` 的 `pgvector` 参数真正出现），
+本地没起库时整个文件 skip 并把探测到的错误写进 `reason`（`-rs` 能看到）。
 如果你要写一个"真的调模型/真的加载模型"的测试，标 `@pytest.mark.slow`
 （`pyproject.toml` 的 markers 已声明 `integration` 与 `slow`，且开了 `--strict-markers`，
 **没声明的 mark 会直接失败**）。
@@ -126,7 +137,10 @@ P8：用例工厂 + 样本扩到 46 条 —— 多跳被**有统计意义地**�
    因为冻结基线里就记着 `triage.accuracy = 0.0`。
    **这条红不要"修"**：既不许改基线，也不许放宽门限——那是把红灯涂成绿灯。
    汇报时必须把"闸门红的原因是有据可查的既有缺口"说清楚（见 `SECURITY.md` S-4）。
-   同理，`cli eval --gate`（检索域，pgvector 基线）也是红的，理由见 ADR-0004。
+   同理，**pgvector 后端**上的 `cli eval --store pgvector --gate` 也是红的
+   （冻结基线的口径是 sqlite/sqlite-vec，而 pgvector 的 hybrid hit@10 是 0.74 而非 0.84），
+   而**默认后端**的 `cli eval --gate` 是**绿的**（本机实测 hit@10 = 0.8400、退出码 0）。
+   理由与四条候选路径见 ADR-0004 第五、九节。
 5. **没有实测就不要写数字。** 宁可写"未验证"，这一条比任何格式要求都重要。
 
 ---

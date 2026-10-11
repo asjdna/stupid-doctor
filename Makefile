@@ -28,7 +28,7 @@ RUN = $(PY)
 # 受限网络下模型下载源与离线加载（模型已缓存后必须离线，否则联网校验会挂死）
 HF := --hf-endpoint https://hf-mirror.com
 
-.PHONY: help install check lint type refs test lock corpus cstats ingest ingest-hash search stats \
+.PHONY: help install check lint fmt type refs test lock corpus cstats ingest ingest-hash search stats \
         gold eval eval-baseline up down logs clean
 
 # help 也用 $(PY) -c 实现，与 clean 同一手法、同一理由：
@@ -50,11 +50,18 @@ install:  ## 建 venv 并安装（含 dev 依赖）
 	python -m venv --system-site-packages .venv
 	$(PY) -m pip install -e ".[dev]"
 
-check: lint type test refs  ## 跑完所有静态闸门（与 CI 等价）
+check: lint fmt type test refs  ## 跑完所有静态闸门（与 CI 的 quality job 等价）
 	@echo "所有闸门通过"
 
 lint:  ## ruff（阻塞）
 	$(RUN) -m ruff check .
+
+# `ruff check`（规则）与 `ruff format --check`（排版）是**两道**门，与 ci.yml 的
+# quality job 里那两步一一对应。这一步原先只有 CI 有：本地 `make check` 一路绿灯、
+# 推到 CI 却挂在排版上——"本地与 CI 是两道不同的门"正是这个仓库自己明令禁止的事
+# （见下面 refs 目标的注释）。补上它，`make check` 才真的等于 CI 的 quality job。
+fmt:  ## ruff 排版检查（阻塞）
+	$(RUN) -m ruff format --check .
 
 type:  ## mypy（阻塞）
 	$(RUN) -m mypy src scripts
@@ -71,8 +78,11 @@ refs:  ## 文档锚点校验（阻塞）
 # 两个叠成 `-qq` 之后 pytest 连 "N passed" 汇总行都不打，只剩一屏进度点——
 # 汇总行恰恰是“这次到底跑了多少、跳了多少”的唯一出处。
 # 加 `-p no:cacheprovider`：这里不需要缓存，make 也就不会顺手留下 .pytest_cache。
-test:  ## 单元测试（零依赖、秒级，不加载模型）
-	$(RUN) -m pytest tests/unit -p no:cacheprovider
+# 加 `-rs`：把每条 skip 的**原因**打出来。CI 里 skippable 的只有 milvus 那一族
+# （可选依赖，pyproject 没声明），出现别的 skip 就算回归——不能藏在 "N skipped" 里。
+# 本地没起 Postgres 时，tests/unit/test_pgvector_store.py 整文件 skip（CI 用 service 起库）。
+test:  ## 单元测试（不需要网络与模型，秒级）
+	$(RUN) -m pytest tests/unit -p no:cacheprovider -rs
 
 lock:  ## 重跑依赖锁文件（改了 pyproject 依赖后必须做；只查漂移见 scripts/gen_lock.py --check）
 	$(RUN) scripts/gen_lock.py

@@ -397,8 +397,11 @@ python -m kubedocs.cli --provider hashing ingest --limit-files 100
 
 ## 工程质量
 
-- **闸门全部阻塞**：`ruff`（含 S/B/SIM 规则）、`mypy`（`disallow_untyped_defs`）、`pytest`
-- **测试分层**：`tests/unit`（零依赖、秒级、用哈希向量，不加载模型）
+- **闸门全部阻塞**：`ruff`（含 S/B/SIM 规则）、`mypy`（`disallow_untyped_defs`）、`pytest`、
+  `scripts/check_doc_refs.py`，外加 `ci.yml` 的 `gate` job（真实模型 + 冻结基线，指标退化即红）
+- **测试分层**：`tests/unit`（用哈希向量、不加载模型、不联网，秒级；其中
+  `test_pgvector_store.py` 要一条真实 Postgres，CI 用 `pgvector/pgvector:pg16` service 真跑它，
+  本地没起库时整个文件 skip）
 - **确定性**：融合同分按 key 定序、向量条带按 chunk_id 定序——否则评测会随进程抖动
 - **失败模式**：向量路不可用 → 降级为纯全文检索并**记录原因**（不静默降级）；
   精排不可用 → 保持 RRF 顺序并记录；零向量 → 直接拒绝写入而不是让它永远排最后

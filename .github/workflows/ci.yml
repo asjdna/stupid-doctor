@@ -2,15 +2,23 @@ name: CI
 
 # 工业项目的 CI 应当回答两个问题：
 # 1) "换个干净环境还能装起来并跑通吗" —— 装依赖走 pyproject，在 ubuntu 上跑
-# 2) "改动有没有让质量下降" —— lint/type/test/管道自检全部**阻塞**（非零码即失败）
+# 2) "改动有没有让质量下降" —— lint/type/test/管道自检/质量闸门全部**阻塞**（非零码即失败）
 #
-# 关于"质量闸门"为什么不在 CI 里跑（见 docs/adr/0002）：
-#   `cli eval --gate` 比较的是**冻结基线**，而基线绑定了三样东西——标注集哈希、
-#   嵌入模型、索引块数。CI 每次都从 GitHub 重新拉官方文档，上游文档一变块数就变，
-#   闸门会（正确地）拒绝比较。所以：
-#     · CI 跑"管道自检"：全量语料 + 确定性哈希向量（离线、快、不下载模型），
-#       验证 摄取 → FTS 一致性 → 标注集自检 → 指标 → 引用完整性 整条链路不坏；
-#     · 真实模型的质量闸门是**发版前的本地/手动步骤**（README「快速开始」第 5 步）。
+# 三个 job，各管一件事（别合并）：
+#   · quality   静态检查 + 单元测试；带 pgvector service，所以需要真实 Postgres 的用例**真跑**
+#   · pipeline  全链路自检：全量语料 + 确定性哈希向量（离线、快、不下载模型）
+#   · gate      检索质量闸门：真实嵌入模型 + 与冻结基线同口径的索引，指标退化就红
+#
+# ## 为什么闸门**不能**直接加在 pipeline 那一步上（本次改动最要紧的一条，已实测）
+#
+# `cli eval --gate` 比较的是**冻结基线**，而基线绑定了嵌入模型
+# （data/eval/retrieval_baseline.json 的 embedding_model = BAAI/bge-small-en-v1.5）。
+# pipeline job 刻意用 hashing（不下载模型），索引里记的模型名会是 `hashing-384`：
+# 本机实测用 `--provider hashing` 建同一份 18861 块索引后跑 `eval --top-k 10 --gate` →
+# 打印「嵌入模型变了（BAAI/bge-small-en-v1.5 -> hashing-384），向量空间不可比」，退出码 2；
+# 即使忽略这一关，hashing 的 hybrid hit@10 = 0.6200 也远低于基线的 0.8400。
+# 也就是说：把 `--gate` 加在 hashing 那一步上，CI 会**永远红**——那是假红，
+# 比没有闸门更糟（红着的门没人会再看）。所以闸门单独一个 job，用真实模型跑。
 
 on:
   push:
@@ -27,6 +35,31 @@ jobs:
     name: 静态检查 + 单元测试
     runs-on: ubuntu-latest
     timeout-minutes: 20
+    # 需要真实 Postgres 的用例此前在 CI 里一直是 skip 的——"测过"与"没测"在日志里长得一样。
+    # 起了这条 service 之后它们必须真跑（本机对照：库不可达 706 passed/61 skipped；
+    # 库可达 736 passed/49 skipped，少掉的 12 条正是 test_pgvector_store.py）。
+    # 另外两条容易被忽略的事实：
+    #   · tests/unit/test_store_contract.py 的 `pgvector` 参数在库不可达时**根本不出现在参数化里**
+    #     （不是 skip，是"悄悄消失"，见该文件顶部注释）——那 18 条用例同样以这条 service 为前提；
+    #   · probe() 只要求"连得上 + pg_available_extensions 里有 vector"，扩展本身由
+    #     PgVectorStore._ensure_schema() 建（service 的 POSTGRES_USER 在官方镜像里是超级用户）。
+    services:
+      postgres:
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_USER: kubedocs
+          POSTGRES_PASSWORD: kubedocs
+          POSTGRES_DB: kubedocs
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U kubedocs -d kubedocs"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    env:
+      # 与 Settings.database_url 的默认值同形，只把取值对齐到上面的 service。
+      KUBEDOCS_DATABASE_URL: postgresql://kubedocs:kubedocs@127.0.0.1:5432/kubedocs
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -37,13 +70,19 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install -e ".[dev]"
-      # 单元测试**不需要**数据库、模型与网络：这是刻意的设计（纯函数 + 依赖注入），
-      # 让反馈回路保持在秒级。需要真实模型的评测见下面的 pipeline job 与 README。
+      # 单元测试**不需要**模型与网络：这是刻意的设计（纯函数 + 依赖注入），
+      # 让反馈回路保持在秒级。需要真实模型的评测见下面的 gate job 与 README。
       # **不要再叠加 `-q`**：pyproject 的 addopts 里已经有一个 `-q`，两个叠成 `-qq`
       # 会把 "N passed" 汇总行一起吞掉（CI 日志里就看不到实际通过数了）。
       # `-p no:cacheprovider` 与 `make test`、CONTRIBUTING.md 的命令保持一致（CI 不需要缓存）。
-      - name: 单元测试（零依赖、秒级）
-        run: pytest tests/unit -p no:cacheprovider
+      # `-rs` 让每条 skip 的**原因**进日志。可接受的 skip **只有**下面这一族，别的一律算回归：
+      #   · milvus，49 条 = test_milvus_store.py 29 + test_store_contract.py 的 milvus 参数 18
+      #     + test_store_backend.py 2。理由是 `pymilvus` / `milvus-lite` 属**可选**依赖，
+      #     pyproject.toml 没有声明、CI 也就不装（它们是本地文件模式，不需要服务端）。
+      #     真要在 CI 里跑，就得在这里显式 `pip install "pymilvus>=2.5" "milvus-lite>=2.4"`。
+      #   · **Postgres 曾在这一族里（12 条），现在不在**：有 service 了，它们必须真跑。
+      - name: 单元测试（含需要真实 Postgres 的用例）
+        run: pytest tests/unit -p no:cacheprovider -rs
       - name: ruff（阻塞）
         run: ruff check .
       # 只跑 `ruff check .` 会让"格式已经跑偏"在 CI 里完全不可见：本次接入时
@@ -51,6 +90,7 @@ jobs:
       # 是两道不同的门（前者管规则，后者管排版），必须都在。
       # 行尾由 pyproject 的 `[tool.ruff.format] line-ending = "lf"` 定死，
       # 保证 Windows 开发机与 ubuntu runner 判定一致。
+      # 注意：`make check` 里**没有**这一步（见 CONTRIBUTING 第 2 节的表）。
       - name: ruff format --check（阻塞）
         run: ruff format --check .
       - name: mypy（阻塞）
@@ -97,4 +137,71 @@ jobs:
       - name: 评测流程自检（不卡质量闸门，只用退出码验证链路）
         # 退出码 3 = 标注集/索引不合法；能跑到 0 说明自检、指标、引用完整性都通了。
         # 注意哈希向量的分数**不代表检索质量**，不要把它当质量结论。
+        # **不要在这里加 `--gate`**：hashing 的模型名与冻结基线绑定
+        # `BAAI/bge-small-en-v1.5` 不可比，闸门会（正确地）拒绝比较并退出 2 ——
+        # 加在这里等于让 CI 永远红。真正的闸门见下面的 gate job，文件顶部的注释有实测数据。
         run: python -m kubedocs.cli eval --top-k 10
+
+  gate:
+    name: 检索质量闸门（真实模型 + 冻结基线）
+    runs-on: ubuntu-latest
+    needs: [quality]
+    # 缓存未命中时要装 torch、下 bge-small、真的编码 18861 块（本机 i7-13700H 实测
+    # 全量摄取约 35 分钟，见 README「实测数字」/ ADR-0002）；runner 更慢，所以给足上限。
+    # 命中缓存后这一步只剩评测本身（分钟级）。
+    timeout-minutes: 120
+    env:
+      # 冻结基线绑定的是真实嵌入模型；hashing 的分数与它不可比（见文件顶部注释）。
+      KUBEDOCS_EMBEDDING_PROVIDER: bge
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+          cache: pip
+      - run: pip install -e ".[dev]"
+
+      - name: 缓存嵌入模型权重（bge-small-en-v1.5，约 130MB）
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/huggingface
+          key: hf-${{ runner.os }}-bge-small-en-v1.5
+
+      # 语料与索引**一起缓存、同一个键**：它俩共同构成"冻结基线口径"的可复现载体
+      # （基线绑定了 n_chunks=18861 与 embedding_model，语料一变块数就变，闸门会正确地
+      # 拒绝比较——ADR-0002 说的问题正是这个，所以把口径钉在缓存里而不是每次重拉 main）。
+      # 键里**只有**切块/嵌入/标注集，故意**不含** retrieve/ 与 store/：那两处正是闸门要守的
+      # 东西，把它们放进键里会让缓存每次都失效、每个 PR 都重编码 35 分钟，等于用缓存把闸门绕过去。
+      # 改了切块/嵌入/标注集 → 键变 → 重建；那种情况下基线本来就该重新冻结（CONTRIBUTING 第 5 节）。
+      - name: 缓存语料与真实索引
+        id: idx
+        uses: actions/cache@v4
+        with:
+          path: |
+            data/raw
+            data/index
+          key: kd-gate-${{ runner.os }}-bge-small-en-v1.5-${{ hashFiles('src/kubedocs/chunker.py', 'src/kubedocs/embed.py', 'data/eval/retrieval_gold.jsonl') }}
+
+      - name: 拉官方语料（缓存未命中时）
+        if: steps.idx.outputs.cache-hit != 'true'
+        run: python scripts/fetch_corpus.py
+
+      - name: 摄取真实索引（缓存未命中时；本机实测约 35 分钟）
+        if: steps.idx.outputs.cache-hit != 'true'
+        run: python -m kubedocs.cli ingest --rebuild
+
+      - name: 标注集预检（对原始语料）
+        run: python scripts/check_gold.py
+
+      # 这里**不**把索引灌进 pgvector（`python scripts/load_pgvector.py --index-dir data/index
+      # --domain k8s_docs`）：那要给本 job 再起一条 Postgres service，并且每次 run 都得把
+      # 1.9 万块重灌一遍（分钟级 → 十分钟级），而它验证的是"镜像完整性"、与质量闸门无关。
+      # 生产后端的**契约**已由 quality job 里那 30 条 pgvector 用例覆盖（test_pgvector_store.py
+      # 12 条 + test_store_contract.py 的 pgvector 参数 18 条）。pgvector 的**指标**对照冻结基线
+      # 是已知且刻意保留的红（README 里程碑 8 / ADR-0004 第 9 节），不能塞进这个 job 假装通过。
+      - name: 质量闸门（指标退化 → 退出码 2 → CI 红）
+        # 比 hit@10 / mrr@10（容差各 0.02），并拒绝跨标注集/跨模型/跨语料的比较。
+        # 本机实测（同一份冻结索引）：`eval --top-k 10 --gate` → hybrid hit@10 = 0.8400，退出码 0。
+        # 负例（闸门真的会红）：`eval --top-k 10 --gate --store pgvector` → hit@10 0.8400 → 0.7400，
+        # 退出码 2。
+        run: python -m kubedocs.cli eval --top-k 10 --gate
