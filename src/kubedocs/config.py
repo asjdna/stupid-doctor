@@ -192,6 +192,12 @@ class Settings(BaseSettings):
     llm_timeout: float = Field(default=30.0, gt=0)
     llm_max_retries: int = Field(default=2, ge=0)
     llm_daily_budget_usd: float = Field(default=5.0, ge=0.0)
+    # litellm **算不出价**（价格表里没有这个模型）时，每次调用按这个金额保守计入
+    # 当日预算。默认**不假设免费**：按 0 记会让预算闸门永远拦不住（缺陷记录见
+    # generate.UNPRICED_CALL_FALLBACK_USD 的说明，0.25 的取值推导也在那里）。
+    # 真跑本地免费模型（例如 ollama）时可以置 0：那种情况下 litellm 会正常返回
+    # 0.0（`cost_priced=True`），本来就不走这条保守路径，所以一般不需要改这里。
+    llm_unpriced_call_usd: float = Field(default=0.25, ge=0.0)
 
     # ---------- 可观测 ----------
     otel_enable: bool = True

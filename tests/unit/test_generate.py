@@ -5,15 +5,19 @@
 from __future__ import annotations
 
 import json
+import time
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
 from kubedocs.config import Settings
 from kubedocs.generate import (
+    UNPRICED_CALL_FALLBACK_USD,
     Answerer,
     BudgetExceeded,
     DailyBudget,
+    LiteLLMClient,
     LLMResult,
     LLMUnavailable,
     build_context,
@@ -34,10 +38,11 @@ class StubLLM:
     """
 
     def __init__(self, text: str = "答案 [1]", cost: float = 0.0,
-                 raises: Exception | None = None) -> None:
+                 raises: Exception | None = None, cost_priced: bool = True) -> None:
         self.text = text
         self.cost = cost
         self.raises = raises
+        self.cost_priced = cost_priced
         self.calls: list[tuple[str, str]] = []
 
     def complete(self, system: str, user: str) -> LLMResult:
@@ -45,7 +50,7 @@ class StubLLM:
         if self.raises is not None:
             raise self.raises
         return LLMResult(text=self.text, prompt_tokens=100, completion_tokens=20,
-                         cost_usd=self.cost)
+                         cost_usd=self.cost, cost_priced=self.cost_priced)
 
 
 def _hit(i: int, title: str = "Doc", body: str = "Body text", crumb: str = "Sec",
@@ -205,6 +210,132 @@ class TestDailyBudget:
         assert isinstance(json.loads(p.read_text(encoding="utf-8")), dict)
 
 
+class TestUnknownCostIsNotFree:
+    """缺陷回归：**算不出价不许按 0 记**。
+
+    缺陷形态：`LiteLLMClient` / `LiteLLMToolCaller` 都把 `completion_cost()` 的异常
+    吞掉后按 `cost_usd=0.0` 记账 ⇒ 账本上永远是 0 ⇒ `check()` 永远不触发，
+    "日预算上限"对未知模型完全失效（SECURITY.md 的 S-2）。
+    """
+
+    def test_unpriced_call_is_charged_the_conservative_ceiling(self, tmp_path: Path):
+        b = DailyBudget(tmp_path / "spend.json", 5.0, unpriced_usd=0.25)
+        b.record(0.0, priced=False)
+        assert b.spent_today() == pytest.approx(0.25), "未定价的调用被当成了免费"
+        assert b.unpriced_calls_today() == 1
+        assert b.record(0.0, priced=False) == pytest.approx(0.5)   # 逐次累计
+
+    def test_unpriced_calls_reach_the_limit_and_then_refuse(self, tmp_path: Path):
+        b = DailyBudget(tmp_path / "spend.json", 0.5, unpriced_usd=0.25)
+        b.record(0.0, priced=False)
+        b.check()                                   # 0.25 < 0.5：还放行
+        b.record(0.0, priced=False)
+        with pytest.raises(BudgetExceeded) as e:
+            b.check()
+        assert "算不出价" in str(e.value), "超限原因要说清是未定价调用累积出来的"
+
+    def test_priced_zero_stays_zero(self, tmp_path: Path):
+        """真免费（本地模型定价就是 0）不该被收"未定价"的罚金。"""
+        b = DailyBudget(tmp_path / "spend.json", 5.0, unpriced_usd=0.25)
+        b.record(0.0, priced=True)
+        assert b.spent_today() == 0.0
+        assert b.unpriced_calls_today() == 0
+
+    def test_fallback_can_be_disabled_but_counting_continues(self, tmp_path: Path):
+        """`unpriced_usd=0` 是运营者的显式选择：不计金额，但仍然计数。"""
+        b = DailyBudget(tmp_path / "spend.json", 5.0, unpriced_usd=0.0)
+        b.record(0.0, priced=False)
+        assert b.spent_today() == 0.0
+        assert b.unpriced_calls_today() == 1
+
+    def test_unpriced_counter_survives_a_reload(self, tmp_path: Path):
+        p = tmp_path / "spend.json"
+        DailyBudget(p, 5.0, unpriced_usd=0.25).record(0.0, priced=False)
+        again = DailyBudget(p, 5.0, unpriced_usd=0.25)
+        assert again.unpriced_calls_today() == 1
+        assert again.spent_today() == pytest.approx(0.25)
+
+    def test_legacy_spend_file_still_loads(self, tmp_path: Path):
+        """老格式（`{"日期": 金额}`）必须继续可用：这是**已落盘**的账本。"""
+        p = tmp_path / "spend.json"
+        today = time.strftime("%Y-%m-%d")
+        p.write_text(json.dumps({today: 0.3}), encoding="utf-8")
+        b = DailyBudget(p, 5.0)
+        assert b.spent_today() == pytest.approx(0.3)
+        assert b.unpriced_calls_today() == 0
+        b.record(0.1)
+        assert b.spent_today() == pytest.approx(0.4)
+
+    def test_default_fallback_is_a_conservative_positive_number(self):
+        """默认值必须是**正数**：0 就等于"未知 = 免费"，那正是缺陷本身。"""
+        assert UNPRICED_CALL_FALLBACK_USD > 0
+
+
+class _FakeLitellm:
+    """假 litellm：只回一个响应 + 一个可由用例指定的成本行为（不联网）。"""
+
+    drop_params = True
+
+    def __init__(self, resp: object, *, cost: object = None,
+                 cost_raises: Exception | None = None) -> None:
+        self._resp = resp
+        self._cost = cost
+        self._cost_raises = cost_raises
+        self.calls = 0
+
+    def completion(self, **_kwargs: object) -> object:
+        self.calls += 1
+        return self._resp
+
+    def completion_cost(self, completion_response: object = None) -> object:
+        if self._cost_raises is not None:
+            raise self._cost_raises
+        return self._cost
+
+
+def _fake_response() -> object:
+    return SimpleNamespace(model="deepseek/deepseek-chat",
+                           choices=[SimpleNamespace(
+                               message=SimpleNamespace(content="打桩回答 [1]"))],
+                           usage=SimpleNamespace(prompt_tokens=100,
+                                                 completion_tokens=20))
+
+
+class TestRealClientFlagsUnknownPrice:
+    """`LiteLLMClient` 必须把"算不出价"**如实标出来**，而不是悄悄记 0。"""
+
+    def _client(self, settings: Settings, fake: _FakeLitellm,
+                monkeypatch: pytest.MonkeyPatch) -> LiteLLMClient:
+        monkeypatch.setenv("DEEPSEEK_API_KEY", "sk-test")
+        client = LiteLLMClient(settings)
+        client._litellm = fake          # 绕开 import litellm（并避免它去拉价格表）
+        return client
+
+    def test_price_map_miss_is_flagged_not_zeroed(self, settings, monkeypatch):
+        fake = _FakeLitellm(_fake_response(),
+                            cost_raises=Exception("This model isn't mapped yet"))
+        result = self._client(settings, fake, monkeypatch).complete("sys", "user")
+        assert result.cost_usd == 0.0
+        assert result.cost_priced is False, "算不出价必须标成未定价（否则闸门永远拦不住）"
+
+    def test_none_cost_is_flagged_not_zeroed(self, settings, monkeypatch):
+        fake = _FakeLitellm(_fake_response(), cost=None)
+        result = self._client(settings, fake, monkeypatch).complete("sys", "user")
+        assert result.cost_priced is False
+
+    def test_real_price_is_reported_as_priced(self, settings, monkeypatch):
+        fake = _FakeLitellm(_fake_response(), cost=0.0012)
+        result = self._client(settings, fake, monkeypatch).complete("sys", "user")
+        assert result.cost_usd == pytest.approx(0.0012)
+        assert result.cost_priced is True
+
+    def test_priced_zero_from_the_provider_is_not_unpriced(self, settings, monkeypatch):
+        """免费模型的定价就是 0.0：不能把它误判成"算不出价"。"""
+        fake = _FakeLitellm(_fake_response(), cost=0.0)
+        result = self._client(settings, fake, monkeypatch).complete("sys", "user")
+        assert (result.cost_usd, result.cost_priced) == (0.0, True)
+
+
 # --------------------------------------------------------------------- 密钥推断
 class TestApiKeyDetection:
     def test_provider_to_env_mapping(self):
@@ -318,6 +449,24 @@ class TestAnswerer:
         a = _answerer(settings, [_hit(1)], StubLLM("ok [1]", cost=0.05))
         a.answer("q")
         assert a.budget.spent_today() == pytest.approx(0.05)
+
+    def test_unpriced_cost_is_charged_and_flagged(self, settings):
+        """`/ask` 路径同样不许把"算不出价"当免费（原先 `except: cost = 0.0`）。"""
+        settings.llm_unpriced_call_usd = 0.25
+        a = _answerer(settings, [_hit(1)], StubLLM("ok [1]", cost_priced=False))
+
+        ans = a.answer("q")
+
+        assert a.budget.spent_today() == pytest.approx(0.25), "未定价的调用没记账"
+        assert a.budget.unpriced_calls_today() == 1
+        assert any("算不出价" in d for d in ans.degraded), "降级说明里要能看见它"
+
+    def test_priced_zero_does_not_touch_the_ledger(self, settings):
+        """真免费的调用不写账本文件（与修复前的行为逐字相同）。"""
+        a = _answerer(settings, [_hit(1)], StubLLM("ok [1]", cost=0.0))
+        a.answer("q")
+        assert a.budget.spent_today() == 0.0
+        assert not a.budget.path.exists()
 
     def test_hallucinated_citation_is_stripped(self, settings):
         ans = _answerer(settings, [_hit(1)], StubLLM("见 [1] 与 [7]")).answer("q")

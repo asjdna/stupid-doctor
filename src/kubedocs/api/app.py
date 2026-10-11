@@ -44,6 +44,17 @@
 确定性的规则 + 词表（`ClinicAgent` 是同步 `graph.invoke`），本文件用线程池把它挪出
 事件循环，使 `thread` 事件能先于这一轮推理送达客户端；真正的 token 级流式要等
 生成层给出流式接口，这里**没有**伪造成 token 流。
+
+## `thread_id` 的属主与上界（`api/threads.py`）
+
+`thread_id` 是**客户端自带**的，所以这里有两件事必须由服务端管住：
+
+- **属主校验**：`thread_id` 首次出现即绑定 `patient_id`；换一个 `patient_id` 用同一个
+  `thread_id` → **409**（在响应头发出之前就拒绝，所以能给出明确的 4xx 与可读原因）。
+  不静默当新会话、也不静默接到别人的历史上。属主判定放在**端点里**（不是流里面），
+  因此工具循环路径与确定性图路径受同一道检查。
+- **有界**：会话表是 LRU（`MAX_THREADS` 个会话 × 每会话 8 条消息），
+  淘汰最久未用者——理由与边界见 `api/threads.py`。
 """
 from __future__ import annotations
 
@@ -75,6 +86,7 @@ from kubedocs.api.schemas import (
     SearchResponse,
     ToolsResponse,
 )
+from kubedocs.api.threads import ThreadOwnershipError, ThreadStore
 from kubedocs.config import Settings, get_settings, repo_root
 from kubedocs.domains import load_all
 from kubedocs.domains.base import DomainRegistry
@@ -342,6 +354,8 @@ class _ChatOutcome:
         self.text = str(answer.get("text", "")) if isinstance(answer, dict) else ""
         self.citations = list(answer.get("citations", [])) if isinstance(answer, dict) else []
         self.status = str(state.get("status", ""))
+        # 图路径不走工具循环，没有"算不出价"这个概念（它的 LLM 调用在别处记账）
+        self.unpriced_calls = 0
 
     @classmethod
     def from_clinic_turn(cls, turn: Any) -> _ChatOutcome:
@@ -366,6 +380,8 @@ class _ChatOutcome:
         self.text = turn.text
         self.citations = list(getattr(turn, "citations", []) or [])
         self.status = "emergency" if turn.emergency else "done"
+        # "算不出价"的调用次数透传到 SSE：让未知成本在**响应里**也看得见
+        self.unpriced_calls = int(getattr(turn, "unpriced_calls", 0) or 0)
         return self
 
 
@@ -385,19 +401,24 @@ def _get_clinic_react(app: FastAPI) -> Any:
     settings = app.state.settings
     rt = ClinicReactRuntime(settings, BookingService(MockAppointmentProvider()))
     app.state.clinic_react = rt
-    app.state.clinic_history = {}
     return rt
 
 
 def _converse_with_tools(app: FastAPI, request: ChatRequest, thread_id: str) -> _ChatOutcome:
-    """走工具循环：**LLM 通过 function calling 自己决定调哪个工具、调几次**。"""
+    """走工具循环：**LLM 通过 function calling 自己决定调哪个工具、调几次**。
+
+    历史存在 `app.state.clinic_threads`（属主 + LRU 上界，见 `api/threads.py`）：
+    属主校验在**端点**里已经做过一次，这里的 `history/append` 是第二道——
+    两次都必须过，因为这一层才是真正读写别人历史的地方。
+    """
     rt = _get_clinic_react(app)
-    history: dict[str, list[dict[str, Any]]] = app.state.clinic_history
-    past = list(history.get(thread_id, []))
+    store: ThreadStore = app.state.clinic_threads
+    past = store.history(thread_id, request.patient_id)
     turn = rt.turn(request.message, history=past)
-    # 保留最近 8 条（4 轮）：无上限会让上下文无限增长、成本线性上升
-    history[thread_id] = (past + [{"role": "user", "content": request.message},
-                                 {"role": "assistant", "content": turn.text}])[-8:]
+    # 保留最近 8 条（4 轮）由 ThreadStore 自己按 max_messages 执行（与修复前的 [-8:] 同口径）
+    store.append(thread_id, request.patient_id,
+                 [{"role": "user", "content": request.message},
+                  {"role": "assistant", "content": turn.text}])
     return _ChatOutcome.from_clinic_turn(turn)
 
 
@@ -463,6 +484,8 @@ async def _chat_events(app: FastAPI, request: ChatRequest,
         "awaiting_user": bool(pending),
         "status": "asking" if pending else outcome.status,
         "resumed": outcome.resuming,
+        # 0 是常态；>0 表示有调用的价算不出来（已按保守上限记账，**不是免费**）
+        "unpriced_llm_calls": outcome.unpriced_calls,
     })
     yield _sse("done", {"thread_id": thread_id, "ok": True})
 
@@ -558,6 +581,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.state.runtimes_lock = threading.Lock()
     app.state.agent_lock = threading.Lock()
     app.state.clinic_agent = None
+    # /chat 的会话表：属主绑定 + LRU 上界。**不放在 `_get_clinic_react` 里**——
+    # 那个函数只在有 LLM 密钥、且真的走到工具循环时才被调用，而属主校验必须在
+    # 端点里、对两条路径都生效，所以它必须是 create_app 的常驻状态。
+    app.state.clinic_threads = ThreadStore()
     current = _DomainRuntime(cfg)
     app.state.runtimes = {cfg.domain: current}
     app.state.store = current.store  # 约定：当前域的 store 挂在 app.state.store
@@ -625,8 +652,20 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
         `thread_id` 留空时由服务端生成，并在**首个事件** `thread` 里返回；
         带同一个 `thread_id` 再来一次即续聊（内核用 `interrupt` 挂起的追问会被 `resume`）。
+
+        **属主校验在这里做**（不是流里面）：`thread_id` 首次出现即绑定 `patient_id`，
+        换一个 `patient_id` 用同一个 `thread_id` → **409**。放在这里有两个好处：
+        响应头还没发出，所以能给出真正的 4xx 而不是流里的一条 error 事件；
+        而且它同时覆盖工具循环与确定性图两条路径。
         """
         thread_id = body.thread_id or uuid.uuid4().hex
+        store: ThreadStore = request.app.state.clinic_threads
+        try:
+            store.claim(thread_id, body.patient_id)
+        except ThreadOwnershipError as e:
+            logger.warning("拒绝跨属主续聊：thread_id=%s patient_id=%s",
+                           thread_id, body.patient_id)
+            raise HTTPException(status_code=409, detail=str(e)) from e
         return EventSourceResponse(_chat_events(request.app, body, thread_id))
 
     # ---------------------------------------------------------------- 首页

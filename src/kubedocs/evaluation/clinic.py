@@ -12,12 +12,17 @@
 所以闸门是：**红线召回必须 100%**（一条都不许漏），误报率只设上限不设门限。
 这条不对称是刻意的，也和 `polarity` 模块"宁可留着"的保守偏向一致。
 
-## 分诊指标依赖受限语料，缺语料时标为"未评测"
+## 分诊指标依赖受限语料，缺语料时标为"未评测"——但**未评测也算闸门失败**
 
 症状 -> 科室 的关联来自知识卡片（上游标注「仅用于学术研究」），本仓库不携带。
 缺语料时 `triage_department` 类用例**不可能答对**，把它算成 0% 会产生两个坏后果：
 指标看起来很差、而且这个差与系统质量无关。所以这里明确返回 `evaluated=False`，
 而不是给一个会误导人的数字。
+
+**"诚实标记为未评测"与"闸门放行"是两件事**：`gate_failures()` 现在把分诊
+一并纳入（未评测 / 低于 `DEFAULT_TRIAGE_MIN_ACCURACY` 都判失败）。
+理由见那个常量的说明——一句话是：**"没测"不等于"测了没问题"**，
+否则删掉语料就能让闸门变绿。
 """
 from __future__ import annotations
 
@@ -31,6 +36,39 @@ from kubedocs.domains.clinic.redline import RiskGuard
 # 红线误报率的容忍上限。误报比漏报轻得多，但仍要有上限——
 # 否则"把所有话都判成急诊"也能拿到 100% 召回。
 DEFAULT_FALSE_POSITIVE_LIMIT = 0.20
+
+DEFAULT_TRIAGE_MIN_ACCURACY = 0.60
+"""分诊科室命中率（top-3）的最低可接受值，低于它闸门不通过。
+
+## 为什么需要这条门限
+
+分诊是 clinic 域**唯一对外给出的结论**（"该挂哪个科"）。本模块原先的
+`gate_failures()` 只看红线，于是"一条分诊都没答对"与"分诊全部答对"在退出码上
+**完全一样**：`data/eval/clinic_baseline.json` 里明明白白记着
+`triage.accuracy = 0.0`（hit 0 / total 5、`evaluated=true`），闸门照样通过。
+质量闸门不看这条质量指标，就是"闸门绿 != 可用"的根源。
+
+## 为什么取 0.60（三条理由）
+
+1. **导诊答错的代价可恢复，所以不要求 100%**：患者拿到错误科室 = 多跑一趟、
+   到分诊台被纠正一次，不是延误抢救。这与红线召回"容差为 0"的不对称是同一套
+   判断（见模块文档开头的表格），不能因为把分诊纳入闸门就顺手要求满分。
+2. **0.60 远高于随机/常数猜测的上界**：候选科室实测 **40 个**
+   （`ClinicPack().triage_links()` 的取值集合，2026-11 本机实测），
+   随机取 top-3 的命中率上界是 `3/40 = 7.5%`。0.60 是它的 8 倍，
+   把"措辞碰巧撞上"和"真的能导诊"分开。
+3. **在冻结金标集的 5 条分诊用例上，它等价于"至少答对 3 条"**：
+   `> 0` 那种门限太松（答对 1/5 = 0.20 也能过，而 0.20 仍然意味着
+   五条里四条给不出任何候选科室），0.60 是这份样本量下"能看出趋势"的最小值。
+
+## 边界写清楚
+
+- 门限是**具名常量 + 函数参数**（`gate_failures(triage_min_accuracy=...)`）：
+  将来接上真实卡片语料、分诊用例变多之后，要么上调这个数，要么改成按科室加权的口径，
+  都只在一处改。
+- 它**不**替代"分诊指标本身是否可信"的判断：自建 5 条用例的成绩同样不是临床验证
+  （与红线 1.0 的免责声明同一条，见 SECURITY.md 的 S-4）。
+"""
 
 REDLINE_CASES = ("redline_trigger", "redline_other", "redline_past",
                  "redline_negated", "redline_hypothetical", "redline_uncertain",
@@ -176,12 +214,22 @@ def evaluate_triage(cases: Sequence[ClinicCase], *, candidate_fn: Mapping[str, f
 
 
 def gate_failures(report: ClinicReport, *,
-                  fp_limit: float = DEFAULT_FALSE_POSITIVE_LIMIT) -> list[str]:
+                  fp_limit: float = DEFAULT_FALSE_POSITIVE_LIMIT,
+                  triage_min_accuracy: float = DEFAULT_TRIAGE_MIN_ACCURACY) -> list[str]:
     """闸门判定：返回失败原因列表（空 = 通过）。
 
     - 红线召回 < 100% → **一定失败**（安全属性，容差为 0）
     - 红线误报率 > 上限 → 失败
-    - 分诊指标仅在评测过时才检查（缺语料不算失败，但会记一条说明）
+    - 分诊**未评测**（`evaluated=False`，或评测了却一条可评测用例都没有）→ 失败
+    - 分诊准确率 < `triage_min_accuracy` → 失败（阈值理由见该常量的说明）
+
+    ## 为什么"分诊没测"也必须算失败
+
+    "体检没做"与"体检合格"是两件事。`evaluate_triage()` 在缺语料时诚实地返回
+    `evaluated=False`（而不是伪造一个 0 分），这是对的；但如果闸门把"未评测"
+    当成通过，那么**删掉语料就会变成让闸门变绿的手段**——指标消失了，
+    闸门反而放行。所以"没测"与"测了但不达标"同样红，只是失败原因要分清是哪一种，
+    这样读者才知道该去补语料还是该去改算法。
     """
     fails: list[str] = []
     if report.redline_fn:
@@ -192,4 +240,18 @@ def gate_failures(report: ClinicReport, *,
         fails.append(f"红线误报率 {report.redline_false_positive_rate:.2%} 超过上限 "
                      f"{fp_limit:.0%}")
         fails.extend(f"  误报: {m}" for m in report.false_alarms[:10])
+
+    accuracy = report.triage_accuracy
+    if not report.triage_evaluated or accuracy is None:
+        fails.append(
+            "分诊未评测（triage.evaluated=False 或没有可评测用例）："
+            "没测不等于测了没问题——若把它当通过，“删掉语料”就成了让闸门变绿的手段"
+        )
+    elif accuracy < triage_min_accuracy:
+        fails.append(
+            f"分诊准确率 {accuracy:.2%}（hit {report.triage_hit}/{report.triage_total}）"
+            f"低于最低门限 {triage_min_accuracy:.0%}；分诊是 clinic 域对外唯一的结论，"
+            "答不出/答错科室等于给出错误指引"
+        )
+        fails.extend(f"  未命中: {m}" for m in report.triage_missed[:10])
     return fails

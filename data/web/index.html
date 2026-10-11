@@ -854,6 +854,14 @@
   $('btnSend').onclick = sendChat;
   $('btnStop').onclick = stopChat;
   $('btnNewChat').onclick = resetChat;
+  // 改 patient_id = 换一个属主：旧 thread_id 归上一个 patient_id（后端会拒 409），
+  // 所以顺手清掉它，让下一轮自动新开会话。不改 patient_id 的正常流程完全不受影响。
+  $('patientId').addEventListener('change', function () {
+    if (threadId) {
+      threadId = '';
+      addMsg('sys', 'patient_id 已改变：thread_id 已清空（会话属主绑定在 patient_id 上，下一轮会新开会话）。');
+    }
+  });
   $('chatInput').addEventListener('keydown', function (e) {
     if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendChat(); }
   });

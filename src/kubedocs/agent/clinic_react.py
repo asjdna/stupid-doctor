@@ -99,6 +99,12 @@ class ClinicTurn:
     emergency: bool = False
     steps: int = 0
     llm_calls: int = 0
+    cost_usd: float = 0.0
+    unpriced_calls: int = 0
+    """其中**算不出价**（litellm 价格表里没有这个模型）的调用次数。
+
+    透传到 HTTP 层，好让"未知成本"这件事在**响应里**也能看见，而不是只躺在账本文件里。
+    """
     notes: list[str] | None = None
 
 
@@ -115,6 +121,15 @@ class ClinicReactRuntime:
         self.service = service
         self.retriever = retriever
         self.guard = RiskGuard()
+        # 预算闸门与 CLI `ask` / `POST /ask` **共用同一个花费文件**（同一个域目录下的
+        # llm_spend.json）：两条路径算的是同一个钱包，各记各的账等于给了两份额度。
+        # 这里是长寿命对象（`api/app.py` 缓存它），所以闸门状态跨请求有效——
+        # 曾经每轮新建的是 caller（成本随之丢弃），见 SECURITY.md 的 S-2。
+        from kubedocs.generate import DailyBudget
+
+        self.budget = DailyBudget(settings.index_path / "llm_spend.json",
+                                  settings.llm_daily_budget_usd,
+                                  unpriced_usd=settings.llm_unpriced_call_usd)
         # 注册工具是"接线"动作：不做它，run_tool_loop 拿到的 tools 会是空的
         register_domain_tools("clinic", service=service, retriever=retriever)
 
@@ -168,7 +183,7 @@ class ClinicReactRuntime:
         user_asked_to_book = wants_booking(message)
         turn: AgentTurn = run_tool_loop(
             message, tools=self.tools, llm=caller, system=prompt, max_steps=5,
-            history=history,
+            history=history, budget=self.budget,
             confirm=(lambda _call: True) if user_asked_to_book else None,
         )
         return ClinicTurn(
@@ -177,7 +192,8 @@ class ClinicReactRuntime:
                          "error": tc.error or None,
                          "result": None if tc.error else tc.result}
                         for tc in turn.tool_calls],
-            steps=turn.steps, llm_calls=turn.llm_calls, notes=list(turn.notes))
+            steps=turn.steps, llm_calls=turn.llm_calls, notes=list(turn.notes),
+            cost_usd=turn.cost_usd, unpriced_calls=turn.unpriced_calls)
 
 
 def emergency_text_for(message: str) -> str | None:

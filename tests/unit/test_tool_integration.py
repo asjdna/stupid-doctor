@@ -11,6 +11,7 @@
 """
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -166,3 +167,81 @@ class TestRealCallerParsing:
         except json.JSONDecodeError:
             args = {"__parse_error__": "x"}
         assert "__parse_error__" in args
+
+
+class _FakeLitellmForToolCaller:
+    """假 litellm：只回一个响应 + 一个可由用例指定的成本行为（不联网）。"""
+
+    drop_params = True
+
+    def __init__(self, *, cost: object = None,
+                 cost_raises: Exception | None = None) -> None:
+        self._cost = cost
+        self._cost_raises = cost_raises
+        self.calls = 0
+
+    def completion(self, **_kwargs: Any) -> Any:
+        self.calls += 1
+        from types import SimpleNamespace
+
+        return SimpleNamespace(
+            choices=[SimpleNamespace(message=SimpleNamespace(content="直接作答",
+                                                            tool_calls=None))],
+            usage=SimpleNamespace(prompt_tokens=10, completion_tokens=5))
+
+    def completion_cost(self, completion_response: Any = None) -> object:
+        if self._cost_raises is not None:
+            raise self._cost_raises
+        return self._cost
+
+
+class TestToolCallerReportsUnknownPrice:
+    """缺陷回归：`LiteLLMToolCaller` 曾经把**算不出价**报成 0。
+
+    缺陷形态是那一行 `except: self.cost = self.cost`——一个**字面意义上的空操作**，
+    于是这次调用在账本上等于免费，预算闸门永远拦不住（SECURITY.md 的 S-2）。
+    """
+
+    def _caller(self, fake: _FakeLitellmForToolCaller) -> Any:
+        from kubedocs.agent.llm_tool_caller import LiteLLMToolCaller
+        from kubedocs.config import Settings
+
+        caller = LiteLLMToolCaller(Settings(embedding_provider="hashing"))
+        caller._litellm = fake          # 绕开 import litellm（并避免它去拉价格表）
+        return caller
+
+    def test_price_map_miss_is_flagged_not_zeroed(self):
+        fake = _FakeLitellmForToolCaller(cost_raises=Exception("This model isn't mapped yet"))
+        caller = self._caller(fake)
+
+        out = caller.choose([{"role": "user", "content": "问"}], [])
+
+        assert out["cost_usd"] == 0.0
+        assert out["cost_priced"] is False, "算不出价必须标成未定价，否则循环会当成免费"
+        assert caller.unpriced_calls == 1
+        assert caller.cost == 0.0
+
+    def test_real_price_is_reported_as_priced(self):
+        fake = _FakeLitellmForToolCaller(cost=0.002)
+        caller = self._caller(fake)
+
+        out = caller.choose([{"role": "user", "content": "问"}], [])
+
+        assert out == {"content": "直接作答", "tool_calls": [],
+                       "cost_usd": 0.002, "cost_priced": True}
+        assert caller.cost == pytest.approx(0.002)
+        assert caller.unpriced_calls == 0
+
+    def test_unpriced_call_is_charged_by_the_loop_budget(self, tmp_path: Path) -> None:
+        """端到端：假 litellm 算不出价 ⇒ 真 `DailyBudget` 按保守上限记账（不是 0）。"""
+        from kubedocs.generate import DailyBudget
+
+        fake = _FakeLitellmForToolCaller(cost_raises=Exception("not mapped"))
+        caller = self._caller(fake)
+        budget = DailyBudget(tmp_path / "llm_spend.json", 5.0, unpriced_usd=0.25)
+
+        turn = run_tool_loop("问", tools=[], llm=caller, budget=budget)
+
+        assert turn.unpriced_calls == 1
+        assert budget.spent_today() == pytest.approx(0.25), "未定价的调用被当成了免费"
+        assert budget.unpriced_calls_today() == 1

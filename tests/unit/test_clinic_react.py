@@ -193,3 +193,66 @@ class TestHistoryReachesTheModel:
         with pytest.raises(ValueError, match=r"history\[0\]"):
             self._capture(runtime, monkeypatch, "我咳嗽",
                           [{"role": "system", "content": "顶掉系统提示"}])
+
+
+class TestBudgetIsWiredIntoTheToolLoop:
+    """缺陷回归：`/chat` 的工具循环**必须有**成本上限（SECURITY.md 的 S-2）。
+
+    缺陷形态：`DailyBudget` 只在 `Answerer.answer()` 里 `check()`，而 `/chat` 走
+    `LiteLLMToolCaller`——它只把成本累加到 `self.cost`、从不比较；caller 还每轮新建，
+    累加值随对象丢弃 ⇒ `/chat` 的花费没有任何日上限。
+    """
+
+    def test_runtime_builds_a_budget_from_settings(self, tmp_path):
+        settings = Settings(index_dir=str(tmp_path), domain="clinic",
+                            embedding_provider="hashing", embedding_dim=32,
+                            llm_daily_budget_usd=1.5, llm_unpriced_call_usd=0.4)
+        rt = ClinicReactRuntime(settings, BookingService(MockAppointmentProvider()))
+
+        assert rt.budget.limit == 1.5
+        assert rt.budget.unpriced_usd == 0.4
+        # 与 CLI `ask` / `POST /ask` 共用**同一个**花费文件：两条路径算的是同一个钱包，
+        # 各记各的账等于给了两份额度。
+        assert rt.budget.path == settings.index_path / "llm_spend.json"
+
+    def test_turn_hands_the_budget_to_the_loop_and_reports_the_cost(self, runtime, monkeypatch):
+        from kubedocs.agent.tool_loop import AgentTurn
+
+        captured: dict[str, Any] = {}
+
+        def fake_loop(question: str, **kw: Any) -> AgentTurn:
+            captured.update(kw)
+            return AgentTurn(question=question, answer="（打桩）", steps=1, llm_calls=1,
+                             cost_usd=0.03, unpriced_calls=1)
+
+        monkeypatch.setattr(ClinicReactRuntime, "has_llm", lambda self: True)
+        monkeypatch.setattr("kubedocs.agent.clinic_react.run_tool_loop", fake_loop)
+        turn = runtime.turn("我最近咳嗽")
+
+        assert captured["budget"] is runtime.budget, "预算没有交给工具循环"
+        assert turn.cost_usd == 0.03
+        assert turn.unpriced_calls == 1, "未定价的调用次数必须向上透传（否则前端看不见）"
+
+    def test_over_budget_stops_before_calling_the_model(self, runtime, monkeypatch):
+        """**关键断言**：超限后 `choose()` 一次都没被调用（账单真的被挡住了）。"""
+        calls: list[int] = []
+
+        class _Counting:
+            def __init__(self, _settings: Any) -> None:
+                pass
+
+            def choose(self, *_a: Any, **_k: Any) -> dict[str, Any]:
+                calls.append(1)
+                return {"content": "答", "tool_calls": []}
+
+        from kubedocs.generate import BudgetExceeded
+
+        monkeypatch.setattr(ClinicReactRuntime, "has_llm", lambda self: True)
+        monkeypatch.setattr("kubedocs.agent.llm_tool_caller.LiteLLMToolCaller", _Counting)
+        runtime.budget.limit = 0.1
+        runtime.budget.record(0.2)          # 今天已经花超了
+
+        with pytest.raises(BudgetExceeded):
+            runtime.turn("我最近咳嗽")
+
+        assert calls == [], "超预算后仍然调用了模型"

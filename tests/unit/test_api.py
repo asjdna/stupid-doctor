@@ -13,13 +13,16 @@
 from __future__ import annotations
 
 import json
+import time
 from collections.abc import Iterator
 from pathlib import Path
+from typing import Any
 
 import pytest
 from fastapi.testclient import TestClient
 
 from kubedocs.api.app import create_app
+from kubedocs.api.threads import ThreadOwnershipError
 from kubedocs.config import Settings
 from kubedocs.embed import HashingEmbedder
 from kubedocs.generate import Answerer, LLMResult
@@ -336,6 +339,121 @@ class TestChat:
             resumed = _event(_sse_events(second.text), "message")
             assert resumed["resumed"] is True, "第二轮必须是从挂起点续跑，而不是开新会话"
             assert resumed["thread_id"] == "t-resume"
+
+    def test_message_event_reports_zero_unpriced_calls(self, client: TestClient) -> None:
+        """`unpriced_llm_calls` 是"未知成本可见"的契约：正常情况下必须是 0（不是缺失）。"""
+        resp = client.post("/chat", json={"message": "我咳嗽"})
+        assert _event(_sse_events(resp.text), "message")["unpriced_llm_calls"] == 0
+
+
+# ===========================================================================
+# /chat 的 thread_id 属主校验（缺陷回归）
+#
+# 缺陷形态：端点直接拿客户端传来的 `thread_id` 当 `app.state.clinic_history` 的键，
+# 没有任何属主校验 ⇒ 猜到/拿到别人的 thread_id 就能续聊别人的会话（SECURITY.md S-3）。
+# 现在的契约：thread_id 首见即绑定 patient_id；换属主 ⇒ **409**（不静默当新会话、
+# 也不静默接到别人的历史上）；**一直用同一个 patient_id + thread_id 的行为完全不变**。
+# ===========================================================================
+class TestChatThreadOwnership:
+    def test_same_patient_can_continue_its_own_thread(self, client: TestClient) -> None:
+        """兼容性钉子：同一属主沿用同一个 thread_id 必须完全正常。"""
+        for message in ("我最近咳嗽", "还有点发热"):
+            resp = client.post("/chat", json={"message": message,
+                                              "thread_id": "t-own-1",
+                                              "patient_id": "p1"})
+            assert resp.status_code == 200, resp.text
+        assert _event(_sse_events(resp.text), "message")["thread_id"] == "t-own-1"
+
+    def test_default_patient_id_is_also_a_stable_owner(self, client: TestClient) -> None:
+        """不传 patient_id（默认 `anon`）的用户同样不受影响。"""
+        for _ in range(3):
+            resp = client.post("/chat", json={"message": "我咳嗽", "thread_id": "t-anon"})
+            assert resp.status_code == 200, resp.text
+
+    def test_server_generated_thread_id_is_always_accepted(self, client: TestClient) -> None:
+        """留空 thread_id（服务端生成）不受属主检查影响：新 id 归本次请求者。"""
+        resp = client.post("/chat", json={"message": "我咳嗽", "patient_id": "p9"})
+        assert resp.status_code == 200
+        assert _event(_sse_events(resp.text), "thread")["thread_id"]
+
+    def test_another_patient_using_the_same_thread_id_is_rejected(self, client: TestClient) -> None:
+        """**关键断言**：换一个 patient_id 用同一个 thread_id ⇒ 409 + 可读原因。"""
+        first = client.post("/chat", json={"message": "我咳嗽", "thread_id": "t-own-2",
+                                           "patient_id": "p1"})
+        assert first.status_code == 200
+
+        bad = client.post("/chat", json={"message": "继续说", "thread_id": "t-own-2",
+                                         "patient_id": "p2"})
+
+        assert bad.status_code == 409, bad.text
+        detail = bad.json()["detail"]
+        assert "t-own-2" in detail and "patient_id" in detail
+        # 拒绝理由里**不能**回显属主是谁（否则等于帮着做身份探测）
+        assert "p1" not in detail
+
+    def test_rejected_turn_does_not_get_the_other_patients_history(self, client: TestClient) -> None:
+        """被拒之后越权者拿不到任何东西：读别人的线程直接抛（而不是返回别人的历史）。"""
+        client.post("/chat", json={"message": "我咳嗽", "thread_id": "t-own-3",
+                                   "patient_id": "p1"})
+        bad = client.post("/chat", json={"message": "继续说", "thread_id": "t-own-3",
+                                         "patient_id": "p2"})
+        assert bad.status_code == 409
+
+        store = client.app.state.clinic_threads       # type: ignore[attr-defined]
+        with pytest.raises(ThreadOwnershipError):
+            store.history("t-own-3", "p2")
+        assert store.owner_of("t-own-3") == "p1", "被拒的请求改写了属主"
+
+    def test_thread_store_is_bounded(self, client: TestClient) -> None:
+        """会话表有上界：超过上限的旧线程会被淘汰（缺陷回归：原先是无界 dict）。"""
+        store = client.app.state.clinic_threads       # type: ignore[attr-defined]
+        store.max_threads = 3
+        for i in range(5):
+            resp = client.post("/chat", json={"message": "我咳嗽", "thread_id": f"t-cap-{i}"})
+            assert resp.status_code == 200
+        assert len(store) == 3
+        assert store.n_evicted == 2
+
+
+# ===========================================================================
+# /chat 的成本上限（缺陷回归）
+#
+# 缺陷形态：`DailyBudget` 只在 `Answerer.answer()` 里 check()，而 `/chat` 走
+# `LiteLLMToolCaller`，它只累加 `self.cost`、从不与预算比较（SECURITY.md S-2）。
+# 现在的契约：超限时**一次模型调用都不发生**，并把原因如实送到流上。
+# ===========================================================================
+class TestChatBudget:
+    def _exhaust(self, settings: Settings) -> None:
+        """把当日花费写成远超上限：模拟"今天已经花完了"。"""
+        path = settings.index_path / "llm_spend.json"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps({time.strftime("%Y-%m-%d"): 99.0}), encoding="utf-8")
+
+    def test_over_budget_stops_the_llm_and_is_reported_on_the_stream(
+            self, api_settings: Settings, monkeypatch: pytest.MonkeyPatch) -> None:
+        api_settings.llm_daily_budget_usd = 1.0
+        self._exhaust(api_settings)
+        calls: list[int] = []
+
+        class _CountingCaller:
+            def __init__(self, _settings: Any) -> None:
+                pass
+
+            def choose(self, *_a: Any, **_k: Any) -> dict[str, Any]:
+                calls.append(1)
+                return {"content": "答", "tool_calls": []}
+
+        monkeypatch.setattr("kubedocs.agent.clinic_react.ClinicReactRuntime.has_llm",
+                            lambda self: True)
+        monkeypatch.setattr("kubedocs.agent.llm_tool_caller.LiteLLMToolCaller",
+                            _CountingCaller)
+        with TestClient(create_app(api_settings)) as client:
+            resp = client.post("/chat", json={"message": "我咳嗽", "thread_id": "t-budget"})
+
+        assert resp.status_code == 200      # 响应头早就发出去了，只能把失败当事件发
+        err = _event(_sse_events(resp.text), "error")
+        assert "BudgetExceeded" in err["error"] and "上限" in err["error"]
+        assert calls == [], "超预算后仍然调用了模型：账单没被挡住"
 
 
 # ===========================================================================

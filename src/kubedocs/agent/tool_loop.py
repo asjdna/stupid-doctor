@@ -35,6 +35,24 @@
 这个参数是补上一次真实缺陷加上的：调用方（`clinic_react.turn`）把 history 拼进了一个
 本地 `messages` 列表，却**从来没把它交给循环**——而 `messages` 被 `extend` 过，
 所以连 F841 都抓不到。表现是"`/chat` 多轮对话没有上下文"，而日志里看不出任何异常。
+
+## 预算（`budget=`）为什么必须由循环来查，而不是由 ToolCaller 自己记
+
+循环每轮最多调 5 次模型（`max_steps`），**每一次调用都是一个花钱点**。曾经的形态是
+`LiteLLMToolCaller` 只把成本累加到 `self.cost`、从不与预算比较，而
+`ClinicReactRuntime.turn()` 每轮新建一个 caller——累加值随对象一起丢掉。
+结果：`/chat` 路径的花费**没有任何上限**（缺陷记录见 SECURITY.md 的 S-2）。
+
+所以预算闸门放在这里：**每次调用模型之前 `budget.check()`，调用之后
+`budget.record(...)`**。三条不变量：
+
+- **检查在调用之前**：超限时那一次模型调用根本不会发生（不是"先花了再拒")。
+- **预算异常原样上抛**：`check()` 抛出的异常**不**走下面那个"LLM 是外部服务"
+  的 `except`——预算超限是**本地策略**决定，不是供应商故障，绝不能降级成一条
+  note 就算了（note 在 `/chat` 的响应里根本到不了调用方）。
+- **算不出价要如实上报**：`ToolCaller` 用 `cost_priced=False` 表示"这次算不出价"，
+  循环会把它记进 `turn.unpriced_calls` 与 `notes`，并交给 `budget.record(priced=False)`
+  保守计入。**"算不出价"绝不等于"免费"**。
 """
 from __future__ import annotations
 
@@ -57,6 +75,21 @@ TOOL_RESULT_LIMIT = 4000
 
 ConfirmFn = Callable[["ToolCall"], bool]
 """副作用工具的执行确认：返回 True 才真的执行。没有它，`side_effect` 工具一律拒绝。"""
+
+
+class SpendGuard(Protocol):
+    """预算闸门。循环**每次调用模型之前**问一次，调用之后记一次。
+
+    刻意只要求这两个方法、不 import `generate.DailyBudget`：工具循环是**域无关**的，
+    "预算是谁实现的、超限抛什么异常"属于调用方的策略（`DailyBudget` 就是它的一个实现）。
+    鸭子类型在这里也真的有用：单测可以传一个只数调用次数的假闸门。
+    """
+
+    def check(self, estimated_usd: float = 0.0) -> None:
+        """超限则抛异常（异常类型由实现决定，循环原样上抛）。"""
+
+    def record(self, usd: float, *, priced: bool = True) -> float:
+        """累计一次花费；`priced=False` 表示这次算不出价（实现方须保守处理）。"""
 
 HISTORY_ROLES = ("user", "assistant")
 """`history` 里**允许**出现的角色，只有这两种。
@@ -94,6 +127,12 @@ class AgentTurn:
     steps: int = 0
     llm_calls: int = 0
     cost_usd: float = 0.0
+    unpriced_calls: int = 0
+    """其中**算不出价**的调用次数（0 = 每次调用的价都拿到了）。
+
+    单独一个计数而不是只看 `cost_usd`：`cost_usd == 0.0` 既可能是"真免费"
+    也可能是"没算出来"，而这两者对预算的含义完全相反，必须能分开看。
+    """
     notes: list[str] = field(default_factory=list)
 
     @property
@@ -115,7 +154,13 @@ class ToolCaller(Protocol):
 
     def choose(self, messages: list[dict[str, Any]],
                tools: list[dict[str, Any]]) -> dict[str, Any]:
-        """返回 {"content": str, "tool_calls": [{"name": str, "arguments": dict}]}"""
+        """返回 {"content": str, "tool_calls": [{"name": str, "arguments": dict}]}
+
+        可选键 `cost_usd`（float）与 `cost_priced`（bool）：
+        **`cost_priced=False` 表示"这次调用的价算不出来"**（不是 0）。
+        实现方把算不出价报成 `cost_usd=0.0` 而不带这个标记，预算闸门就会被绕过——
+        那正是 `LiteLLMToolCaller` 曾经的缺陷。
+        """
 
 
 @dataclass(frozen=True)
@@ -167,7 +212,8 @@ def _history_messages(history: Sequence[dict[str, Any]] | None) -> list[dict[str
 def run_tool_loop(question: str, *, tools: Sequence[ToolSpec], llm: ToolCaller,
                   system: str = "", max_steps: int = 5,
                   confirm: ConfirmFn | None = None,
-                  history: Sequence[dict[str, Any]] | None = None) -> AgentTurn:
+                  history: Sequence[dict[str, Any]] | None = None,
+                  budget: SpendGuard | None = None) -> AgentTurn:
     """跑一轮"模型选工具 -> 执行 -> 回灌 -> 再选"的循环，直到模型给出最终回答。
 
     `max_steps` 是 **LLM 轮次**的硬上限（不是工具执行次数）：一轮里模型可以要求调多个
@@ -181,6 +227,11 @@ def run_tool_loop(question: str, *, tools: Sequence[ToolSpec], llm: ToolCaller,
     只有 `system`（若有）与本轮 `question` 两条。这里**不做长度/字符截断**——上下文窗口
     的预算属于调用方的职责（`api/app.py` 用 `[-8:]` 保留最近 4 轮），循环自己不猜一个
     没验证过的截断策略。
+
+    `budget` 是成本闸门（见 `SpendGuard`）。默认 `None` = **不做预算检查**，与没有这个
+    参数时行为一致（打桩循环、离线自检不受影响）。给了它就一定生效：
+    **每次调用模型之前 `check()`、之后 `record()`**；`check()` 抛出的异常**原样上抛**
+    （不被下面那个"外部服务失败"的 `except` 吞掉），因为预算超限是本地策略决定。
     """
     if max_steps < 1:
         raise ValueError(f"max_steps 必须 >= 1（收到 {max_steps}）：0 步的循环没有意义")
@@ -208,6 +259,10 @@ def run_tool_loop(question: str, *, tools: Sequence[ToolSpec], llm: ToolCaller,
 
     for _ in range(max_steps):
         turn.steps += 1
+        if budget is not None:
+            # 调用**之前**检查：超限时这一次模型调用根本不发生（不是"先花了再说"）。
+            # 这里刻意放在 try 之外：异常必须上抛给调用方，而不是变成一条 note。
+            budget.check()
         try:
             turn.llm_calls += 1
             response = llm.choose(messages, schemas)
@@ -225,7 +280,18 @@ def run_tool_loop(question: str, *, tools: Sequence[ToolSpec], llm: ToolCaller,
             )
             return turn
 
-        turn.cost_usd += _as_float(response.get("cost_usd"))
+        cost, priced = _cost_of(response)
+        turn.cost_usd += cost
+        if budget is not None:
+            # 账本写不进去（磁盘满/权限）时异常同样上抛：与 `/ask` 路径一致，
+            # 不为"保住这次回答"而把一次真实花费记丢。
+            budget.record(cost, priced=priced)
+        if not priced:
+            turn.unpriced_calls += 1
+            turn.notes.append(
+                f"第 {turn.llm_calls} 次调用的成本**算不出来**（litellm 价格表里没有这个"
+                "模型）：已按预算的保守上限计入，**不是免费**"
+            )
         content = _as_text(response.get("content"))
         calls = _parse_calls(response.get("tool_calls"), step=turn.steps)
 
@@ -462,6 +528,9 @@ def _as_float(value: object) -> float:
     供应商适配器不一定上报成本，上报了也不一定给对，还可能给成 JSON 字符串（`"0.0012"`）。
     能转就转、转不动按 0 处理：成本统计不该因为一个脏字段把整轮问答搞崩，也不该悄悄丢掉
     一个本来能用的数字。
+
+    注意"转不动按 0"**不等于**"当成免费"：是不是这次真的拿到了价，由 `cost_priced`
+    单独表达（见 `_cost_of`）。数字兜底与语义兜底是两件事。
     """
     if isinstance(value, bool) or not isinstance(value, (int, float, str)):
         return 0.0
@@ -469,3 +538,14 @@ def _as_float(value: object) -> float:
         return float(value)
     except ValueError:
         return 0.0
+
+
+def _cost_of(response: dict[str, Any]) -> tuple[float, bool]:
+    """从响应里取 `(cost_usd, cost_priced)`。
+
+    只有调用方**显式**报 `cost_priced=False` 才算"算不出价"。字段缺失按已定价处理：
+    打桩实现与第三方 `ToolCaller` 只会给 `cost_usd`（甚至什么都不给），
+    把"没这个字段"当成"未定价"会把它们一律按保守上限计费。
+    """
+    priced = response.get("cost_priced", True) is not False
+    return _as_float(response.get("cost_usd")), priced

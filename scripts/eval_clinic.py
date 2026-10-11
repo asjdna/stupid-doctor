@@ -6,6 +6,10 @@
     python scripts/eval_clinic.py --write-baseline
 
 退出码：0 通过 / 1 参数错误 / 2 闸门不通过 / 3 前置条件不满足。
+
+`--json` **只影响输出格式**：退出码照样由 `--gate` / `--write-baseline` 决定
+（它**不**绕过闸门），人类可读的旁白改道 stderr，stdout 留给纯 JSON——
+与 `evaluation/harness.run_eval` 的 `emit()` 同一约定、同一理由。
 """
 from __future__ import annotations
 
@@ -32,8 +36,25 @@ BASELINE = REPO_ROOT / "data" / "eval" / "clinic_baseline.json"
 # 门限：红线召回容差为 0（安全属性），误报率上限见 evaluation/clinic.py
 GAITE_FP_TOLERANCE = 0.05      # 相对基线允许的误报率上升幅度
 
+TRIAGE_RED_NOTE = """为什么分诊现在是红的：**这不是本次改动引入的回归，而是冻结基线里本来就记着 0 分**。
+  · data/eval/clinic_baseline.json 的 triage.accuracy = 0.0（hit 0 / total 5、evaluated=true）；
+  · 根因是受限卡片语料与症状词典两套词汇不重合（证据键覆盖率 1/6，详见 SECURITY.md S-4）；
+  · 基线是冻结的、**不允许为了让闸门变绿而改**（改基线 = 把红灯涂成绿灯）；
+  · 要让它变绿只有一条路：真的把分诊做对（补口语->体征映射或换语料），而不是放宽门限。
+  门限取值理由见 src/kubedocs/evaluation/clinic.py 的 DEFAULT_TRIAGE_MIN_ACCURACY。"""
 
-def _triage_candidates() -> Any:
+
+def _emit(text: str, *, json_mode: bool) -> None:
+    """人类可读的旁白：`--json` 时改道 **stderr**，stdout 留给机器可读的纯 JSON。
+
+    与 `evaluation/harness.run_eval` 的 `emit()` 同一约定：否则
+    `python scripts/eval_clinic.py --gate --json | jq` 会被旁白打断。
+    非 `--json` 时输出位置**逐字不变**（仍在 stdout）。
+    """
+    print(text, file=sys.stderr if json_mode else sys.stdout)
+
+
+def _triage_candidates(*, json_mode: bool = False) -> Any:
     """构造"文本 -> 候选分数"。没有语料就返回 None（指标标为未评测）。"""
     try:
         from kubedocs.agent import hypothesis
@@ -42,11 +63,12 @@ def _triage_candidates() -> Any:
 
         links = ClinicPack().triage_links()
     except FileNotFoundError as e:
-        print(f"（分诊指标未评测：{e.args[0].splitlines()[0]}）")
+        _emit(f"（分诊指标未评测：{e.args[0].splitlines()[0]}）", json_mode=json_mode)
         return None
     if not links:
-        print("（分诊指标未评测：症状-科室关联表为空）")
+        _emit("（分诊指标未评测：症状-科室关联表为空）", json_mode=json_mode)
         return None
+
 
     def candidates_for(text: str) -> dict[str, float] | None:
         return None      # 占位：见下方按用例逐一计算
@@ -77,12 +99,14 @@ def main(argv: list[str] | None = None) -> int:
             report.booking_wrong.append(
                 f"{case.id} 期望 {case.expect_booking}：{case.text}")
 
-    # 分诊（依赖受限语料；缺语料时 evaluated=False，不算失败）
+    # 分诊（依赖受限语料；缺语料时 evaluated=False，闸门**不通过**）
     triage_cases = [c for c in cases if c.expect_department]
-    built = _triage_candidates()
+    built = _triage_candidates(json_mode=args.json)
     if built is not None:
         links, extract_evidence, hypothesis, _ = built
-        triage_total, triage_hit, evaluated, missed = 0, 0, True, []
+        # `evaluated` 与 `evaluation/clinic.evaluate_triage()` 保持同一口径：
+        # 有语料但一条分诊用例都没有，同样是"没测"，不该记成"评测过了"。
+        triage_total, triage_hit, evaluated, missed = 0, 0, bool(triage_cases), []
         cov_num: int = 0
         cov_den: int = 0
         for case in triage_cases:
@@ -138,7 +162,7 @@ def main(argv: list[str] | None = None) -> int:
         payload = {"schema": 1, "metrics": report.to_json()}
         Path(args.baseline).write_text(
             json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
-        print(f"\n已写入基线：{args.baseline}")
+        _emit(f"\n已写入基线：{args.baseline}", json_mode=args.json)
         return 0
 
     if not args.gate:
@@ -153,14 +177,17 @@ def main(argv: list[str] | None = None) -> int:
         if delta > GAITE_FP_TOLERANCE:
             fails.append(f"红线误报率相对基线上升 {delta:.2%}（上限 {GAITE_FP_TOLERANCE:.0%}）")
     else:
-        print("（没有基线文件；跳过基线比较）")
+        _emit("（没有基线文件；跳过基线比较）", json_mode=args.json)
 
     for f in fails:
-        print(("  ✗ " if not f.startswith("  ") else "") + f)
+        _emit(("  ✗ " if not f.startswith("  ") else "") + f, json_mode=args.json)
+    if any("分诊" in f and not f.startswith("  ") for f in fails):
+        # 闸门变红时把"为什么红"一并打出来，省得读的人以为是自己这次改坏的。
+        _emit("\n" + TRIAGE_RED_NOTE, json_mode=args.json)
     if fails:
-        print("\n闸门：不通过")
+        _emit("\n闸门：不通过", json_mode=args.json)
         return 2
-    print("\n闸门：通过")
+    _emit("\n闸门：通过", json_mode=args.json)
     return 0
 
 

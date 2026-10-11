@@ -1,7 +1,11 @@
 """clinic 评测测试：闸门必须**能失败**。
 
 一个永远通过的闸门等于没有闸门。这里除了验证真实金标集的指标，还专门构造
-"该失败"的场景（漏报一条红线、误报率超限），断言闸门真的会红。
+"该失败"的场景（漏报一条红线、误报率超限、**分诊 0 分或未评测**），断言闸门真的会红。
+
+分诊那一组是补一次真实缺陷：`gate_failures()` 原先只查红线，于是
+`clinic_baseline.json` 里 `triage.accuracy = 0.0`（hit 0 / total 5）也照样通过。
+"质量闸门不看质量指标"正是这组用例要钉死的形态。
 """
 from __future__ import annotations
 
@@ -9,6 +13,7 @@ import pytest
 
 from kubedocs.config import repo_root
 from kubedocs.evaluation.clinic import (
+    DEFAULT_TRIAGE_MIN_ACCURACY,
     ClinicCase,
     ClinicReport,
     evaluate_redline,
@@ -18,6 +23,15 @@ from kubedocs.evaluation.clinic import (
 )
 
 GOLD = repo_root() / "data" / "eval" / "clinic_gold.jsonl"
+
+
+def _clean_report(**overrides: object) -> ClinicReport:
+    """红线干净 + 分诊达标的报告；`overrides` 用来逐项构造"该红"的场景。"""
+    base: dict[str, object] = {"redline_tp": 5, "redline_tn": 5,
+                               "triage_total": 5, "triage_hit": 3,
+                               "triage_evaluated": True}
+    base.update(overrides)
+    return ClinicReport(**base)  # type: ignore[arg-type]
 
 
 @pytest.fixture
@@ -66,7 +80,58 @@ class TestRedlineMetrics:
         assert any("误报率" in f for f in fails)
 
     def test_gate_passes_on_a_clean_report(self):
-        assert gate_failures(ClinicReport(redline_tp=5, redline_tn=5)) == []
+        """红线干净 **且** 分诊达标才是真的干净（两项都进闸门）。"""
+        assert gate_failures(_clean_report()) == []
+
+
+class TestTriageIsInTheGate:
+    """分诊必须真的能挡住闸门——这是缺陷回归组（原先 `gate_failures` 只看红线）。
+
+    真实证据（复核过）：`data/eval/clinic_baseline.json` 的 `triage.accuracy = 0.0`
+    （hit 0 / total 5、`evaluated=true`），修复前 `scripts/eval_clinic.py --gate`
+    仍然退出 0 并打印「闸门：通过」。
+    """
+
+    def test_zero_triage_accuracy_fails_the_gate(self):
+        """分诊 0 分（且评测过）⇒ 闸门必须红。"""
+        fails = gate_failures(_clean_report(triage_hit=0))
+        assert any("分诊准确率" in f for f in fails), fails
+        assert any("0.00%" in f for f in fails), fails
+
+    def test_unevaluated_triage_fails_the_gate(self):
+        """未评测 ⇒ 也必须红：否则"删掉语料"就成了让闸门变绿的手段。"""
+        fails = gate_failures(_clean_report(triage_evaluated=False, triage_hit=0))
+        assert any("分诊未评测" in f for f in fails), fails
+
+    def test_evaluated_without_any_comparable_case_fails_the_gate(self):
+        """`evaluated=True` 但一条可评测用例都没有 = 没测（口径与 evaluate_triage 一致）。"""
+        fails = gate_failures(_clean_report(triage_total=0, triage_hit=0))
+        assert any("分诊未评测" in f for f in fails), fails
+
+    def test_triage_passing_the_threshold_passes_the_gate(self):
+        """达标（含恰好等于门限）⇒ 通过。"""
+        assert gate_failures(_clean_report(triage_hit=3)) == []          # 3/5 = 0.60
+        assert gate_failures(_clean_report(triage_hit=5)) == []          # 5/5 = 1.00
+
+    def test_triage_just_below_the_threshold_fails(self):
+        """2/5 = 0.40 < 0.60 ⇒ 红。门限不是"必须 > 0"那条松线。"""
+        fails = gate_failures(_clean_report(triage_hit=2))
+        assert any("分诊准确率" in f and "40.00%" in f for f in fails), fails
+
+    def test_missed_triage_cases_are_listed(self):
+        """失败原因里要带上未命中的用例，否则"0 分"没法排查。"""
+        report = _clean_report(triage_hit=0,
+                               triage_missed=["t01 期望 呼吸内科，实际 []"])
+        fails = gate_failures(report)
+        assert any("t01" in f for f in fails), fails
+
+    def test_threshold_is_a_parameter(self):
+        """门限是具名参数：临时放宽（供历史报告复算）时行为随之改变。"""
+        zero = _clean_report(triage_hit=0)
+        assert gate_failures(zero, triage_min_accuracy=0.0) == []
+
+    def test_default_threshold_is_explicit(self):
+        assert 0.0 < DEFAULT_TRIAGE_MIN_ACCURACY <= 1.0
 
 
 class TestTriageMetricIsNotFaked:

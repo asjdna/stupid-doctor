@@ -28,7 +28,7 @@ python -m kubedocs.cli --hf-offline eval --gate   # 评测并卡闸门
 | 本地索引：SQLite + FTS5 + `sqlite-vec`（默认后端） | ✅ 已验证（含 FTS 一致性自检） |
 | 增量/幂等摄取（文档级 + 块级跳过） | ✅ 已验证（幂等复跑 0 变更 / 1.6 秒） |
 | 混合检索 + RRF 融合 + 单路消融 | ✅ 已验证（hybrid hit@10 = **0.84**） |
-| 带引用回答 + 拒答 + 预算上限 | ✅ 已验证（含真实 LLM 端到端） |
+| 带引用回答 + 拒答 + 预算上限 | ✅ 已验证（含真实 LLM 端到端；**日上限现在覆盖 `/ask` 与 `/chat` 两条路径**） |
 | 金标集（50 条）+ 指标 + 闸门 | ✅ 已验证（标注集自检 + 闸门能红） |
 | **P0 双域地基**：域协议 / 多域索引 / 中文归一化 | ✅ 已完成（k8s 域指标零回归） |
 | P1 医疗域资产迁移 | ✅ 已完成（三维门控 / 急诊红线 `domains/clinic/redline.py` / 号源库 `booking.py` · `sqlite_provider.py` / 知识卡片脚本 `scripts/clinic_build_cards.py`） |
@@ -119,7 +119,7 @@ flowchart TB
     subgraph ev["评测 evaluation/"]
         HARNESS["harness.py<br/>标注集自检 + 引用完整性 + 单路消融"]
         METRICS["metrics.py<br/>hit / recall / MRR / nDCG"]
-        CGATE["clinic.py<br/>红线硬闸门 + 分诊/挂号软指标"]
+        CGATE["clinic.py<br/>红线 + 分诊 硬闸门<br/>挂号软指标"]
         BASELINE["冻结基线<br/>data/eval/*.json"]
     end
 
@@ -144,6 +144,7 @@ flowchart TB
     CTX --> LLMC --> VC
     LLMC --> LLMLIB
     BUD -.->|"达上限即拒绝新调用"| LLMC
+    BUD -.->|"每次调用前 check / 后 record"| LOOP
     REDLINE -->|"未命中 · 有 LLM 密钥"| LOOP
     REDLINE -.->|"未命中 · 无密钥则降级"| GRAPH
     LOOP --> TOOLS
@@ -166,10 +167,16 @@ flowchart TB
   `LiteLLMClient` 走 `litellm.completion`；`agent/llm_tool_caller.py`
   则是自成一体的 `LiteLLMToolCaller`，自己 `import litellm`
   直接调用，**全文不 import `LiteLLMClient`**。所以图里两条边分别指向 litellm 库。
-  但**日预算闸门只挂在 `generate.py` 这条边上**——`/chat` 的工具循环不走它。
-  这条差异是有意的（图里用虚线画出来），原因见 `SECURITY.md` 的 S-2。
+  但**日预算**是**同一本账**：`generate.DailyBudget` 既挂在 `generate.py` 这条边上，
+  也被 `run_tool_loop(..., budget=...)` 在**每次模型调用之前**检查
+  （图里两条虚线都指向 `BUD`）。这一点**曾经是缺陷**：预算原先只挂在
+  `generate.py` 这条边上，`/chat` 的工具循环不走它、成本只被累加进一个随对象丢弃的
+  `self.cost` ⇒ `/chat` 没有日上限。修复记录（含"算不出价不许按 0 记"与跨进程边界）
+  见 `SECURITY.md` 的 S-2。
 - `/chat` 有两条路径：有密钥走工具循环（模型决定控制流），无密钥降级到确定性图；
   红线在两条路径里都是**进循环之前**的确定性判定。
+  `thread_id` 的**属主绑定**（首见即绑定 `patient_id`，换属主 ⇒ 409）与
+  **LRU 上界**也在这一层（`api/threads.py`，见 `SECURITY.md` 的 S-3）。
 
 ```
    本机（当前，零外部依赖）                             生产形态（同一套业务代码）
@@ -416,6 +423,19 @@ python -m kubedocs.cli --provider hashing ingest --limit-files 100
 - [x] 混合检索 + RRF + 单路消融（里程碑 3）
 - [x] 带引用回答 + 拒答 + 预算上限（里程碑 4）
 - [x] 金标集 + 指标 + 自检 + 基线闸门（里程碑 5）
+- [x] clinic 闸门**纳入分诊**（`evaluation/clinic.py` 的 `gate_failures()`：
+      分诊**未评测**或**低于 60%** 都判失败）。⚠️ 因此
+      `python scripts/eval_clinic.py --gate` 现在**退出码 2（闸门不通过）**，
+      而修复前是 0——**这是预期结果，不是回归**：`data/eval/clinic_baseline.json`
+      里本来就记着 `triage.accuracy = 0.0`（hit 0 / total 5），
+      这条红只是把"分诊不可用"从文档里挪到退出码上。
+      **基线不许为了让闸门变绿而改**；要变绿只能真的把分诊做对
+      （根因与取舍见 [`SECURITY.md`](SECURITY.md) 的 S-4）。
+      注意 `--json` **不**绕过闸门（退出码只由 `--gate` 决定）。
+- [x] `/chat` 的两条安全缺口修复：工具循环接上**同一本日预算账**
+      （每次模型调用前 `check()`；"算不出价"按保守上限计入而不是按 0 记）
+      + `thread_id` **属主绑定**（换 `patient_id` 复用同一 id ⇒ 409）与 **LRU 上界**
+      （见 [`SECURITY.md`](SECURITY.md) 的 S-2 / S-3）
 - [x] LangGraph Agent（`agent/kernel.py` 的图 + `agent/tool_loop.py` 的工具循环：
       模型自选工具、检索不足可改查重试）（里程碑 6）
 - [x] FastAPI `/healthz` `/domains` `/tools` `/search` `/ask`（JSON）`/chat`（SSE）

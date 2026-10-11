@@ -575,3 +575,111 @@ class TestInvalidHistoryIsRejectedNotSilentlyDropped:
                           history=[{"role": "user", "content": "ok"},
                                    {"role": "system", "content": "不行"}])
 
+
+# ===========================================================================
+# 预算闸门（`budget=`）：缺陷回归组
+#
+# 缺陷形态（SECURITY.md S-2）：`/chat` 的工具循环里，成本只被 `LiteLLMToolCaller`
+# 累加到 `self.cost`、从不与预算比较，而 caller 每轮新建 ⇒ `/chat` 的花费没有上限。
+# 现在的契约：**每次调用模型之前 check()、之后 record()**；check() 抛出的异常
+# **原样上抛**（不许被"LLM 是外部服务"那个 except 降级成一条 note——note 在 /chat
+# 的响应里根本到不了调用方）。
+# ===========================================================================
+class BudgetExceeded(Exception):
+    """打桩用的"超限"异常：循环**不认识**这个类型，必须照样上抛。"""
+
+
+class StubBudget:
+    """只数调用次数与金额的假闸门（`SpendGuard` 是鸭子类型）。"""
+
+    def __init__(self, *, limit: float = 1.0, fail_after: int | None = None) -> None:
+        self.limit = limit
+        self.fail_after = fail_after
+        self.checks = 0
+        self.records: list[tuple[float, bool]] = []
+
+    def check(self, estimated_usd: float = 0.0) -> None:
+        if self.fail_after is not None and self.checks >= self.fail_after:
+            raise BudgetExceeded(f"已达上限（第 {self.checks} 次检查）")
+        self.checks += 1
+
+    def record(self, usd: float, *, priced: bool = True) -> float:
+        self.records.append((usd, priced))
+        return sum(u for u, _ in self.records)
+
+
+class TestBudgetGateInTheLoop:
+    def test_budget_is_checked_before_every_model_call(self) -> None:
+        """两轮对话 = 两次调用 = 两次检查；检查次数与调用次数同步。"""
+        budget = StubBudget()
+        llm = StubLLM(call("search_docs", query="q"), answer("答"))
+        run_tool_loop("问", tools=[spec_of("search_docs", Recorder())], llm=llm,
+                      budget=budget)
+        assert len(llm.messages) == 2
+        assert budget.checks == 2
+
+    def test_default_is_no_budget_check(self) -> None:
+        """不给 `budget=` 时行为与从前逐字相同（打桩循环、离线自检不受影响）。"""
+        llm = StubLLM(answer("答"))
+        turn = run_tool_loop("问", tools=[spec_of("search_docs", Recorder())], llm=llm)
+        assert turn.answer == "答"
+
+    def test_over_budget_stops_calling_the_model(self) -> None:
+        """**关键断言**：超限之后一次模型调用都不发生（不是"先花了再拒"）。"""
+        budget = StubBudget(fail_after=1)
+        llm = StubLLM(call("search_docs", query="q"), answer("答"), answer("多余的"))
+
+        with pytest.raises(BudgetExceeded):
+            run_tool_loop("问", tools=[spec_of("search_docs", Recorder())], llm=llm,
+                          budget=budget)
+
+        assert len(llm.messages) == 1, "第二次调用前就该被预算拦住"
+        assert budget.checks == 1
+
+    def test_budget_exceeded_is_not_swallowed_into_a_note(self) -> None:
+        """超限异常必须上抛，不能变成 `turn.notes` 里的一句（`/chat` 看不到 notes）。"""
+        llm = StubLLM(answer("答"))
+        with pytest.raises(BudgetExceeded):
+            run_tool_loop("问", tools=[spec_of("search_docs", Recorder())], llm=llm,
+                          budget=StubBudget(fail_after=0))
+        assert llm.messages == []
+
+    def test_cost_is_recorded_after_each_call(self) -> None:
+        """调用之后按响应里的 `cost_usd` 累计（两轮 = 两笔账）。"""
+        budget = StubBudget()
+        first = call("search_docs", query="q")
+        first["cost_usd"] = 0.25
+        second = answer("答")
+        second["cost_usd"] = 0.5
+        llm = StubLLM(first, second)
+
+        turn = run_tool_loop("问", tools=[spec_of("search_docs", Recorder())], llm=llm,
+                             budget=budget)
+
+        assert len(llm.messages) == 2
+        assert budget.records == [(0.25, True), (0.5, True)]
+        assert turn.cost_usd == pytest.approx(0.75)
+
+    def test_unpriced_cost_is_reported_and_not_treated_as_free(self) -> None:
+        """`cost_priced=False` ⇒ 闸门按**未定价**记账，并计入 `turn.unpriced_calls`。"""
+        budget = StubBudget()
+        llm = StubLLM({"content": "答", "tool_calls": [], "cost_usd": 0.0,
+                       "cost_priced": False})
+        turn = run_tool_loop("问", tools=[spec_of("search_docs", Recorder())], llm=llm,
+                             budget=budget)
+
+        assert budget.records == [(0.0, False)], "未定价的调用必须带 priced=False 交给闸门"
+        assert turn.unpriced_calls == 1
+        assert any("算不出来" in n for n in turn.notes)
+        assert turn.cost_usd == 0.0          # 上报的数字仍是 0，但语义由 priced 区分
+
+    def test_priced_zero_is_not_counted_as_unpriced(self) -> None:
+        """真免费（本地模型定价就是 0）与"算不出价"必须分得开。"""
+        budget = StubBudget()
+        llm = StubLLM({"content": "答", "tool_calls": [], "cost_usd": 0.0,
+                       "cost_priced": True})
+        turn = run_tool_loop("问", tools=[spec_of("search_docs", Recorder())], llm=llm,
+                             budget=budget)
+        assert budget.records == [(0.0, True)]
+        assert turn.unpriced_calls == 0
+

@@ -60,55 +60,87 @@
 **部署者必须做的**：把服务放在反向代理 / API 网关之后，由网关做认证与授权；
 或者在 `create_app()` 里自己加一层 `Depends` 校验。本仓库**不提供**开箱可用的认证。
 
-### S-2 `/chat` 路径没有 LLM 成本上限（严重，未修复）
+### S-2 `/chat` 路径的 LLM 成本上限（**已修复**，残留一条多副本限制）
 
-仓库里**有**成本闸门，但它只覆盖一条路径：
+修复前：仓库里**有**成本闸门，但它只覆盖一条路径：
 
-- `generate.DailyBudget`（`generate.py:199-240`）在 `Answerer.answer()` 里
-  `check()`（`generate.py:367`），默认上限 `llm_daily_budget_usd = 5.0`
-  （`config.py` 的 `Settings.llm_daily_budget_usd`）。这条路径 = CLI `ask` 与 `POST /ask`。
+- `generate.DailyBudget` 在 `Answerer.answer()` 里 `check()`，这条路径 = CLI `ask` 与
+  `POST /ask`；
 - `POST /chat` 走 `agent/clinic_react.py` → `agent/llm_tool_caller.py`：
-  `LiteLLMToolCaller` 只**累加** `self.cost`（`llm_tool_caller.py:35-36, 62-67`），
-  **从不与 `llm_daily_budget_usd` 比较**；而 `ClinicReactRuntime.turn()` 每一轮都
-  新建一个 caller（`clinic_react.py:108`），累加值随对象一起丢弃。
+  `LiteLLMToolCaller` 只**累加** `self.cost`，**从不与 `llm_daily_budget_usd` 比较**；
+  而 `ClinicReactRuntime.turn()` 每一轮都新建一个 caller，累加值随对象一起丢弃。
+  ⇒ `/chat` 的花费**没有日上限**。
 
-⇒ `/chat` 的花费**没有日上限**，唯一的上界是"每轮最多 5 次 LLM 轮次"
-（`clinic_react.py:115-116` 的 `max_steps=5`，语义见 `tool_loop.py:118-125`）
-乘以"请求数无上限"（见 S-3）。匿名 + 无速率限制 + 无成本闸门，三者叠加就是
-"陌生人可以用你的密钥烧钱"。
+**现在的形态（逐条对应修法）**：
 
-**另外两个即使在 `/ask` 上也成立的性质**（如实说明，避免读者高估这个闸门）：
+- **闸门接进工具循环**：`run_tool_loop(..., budget=...)` 在**每次调用模型之前**
+  `budget.check()`、**调用之后** `budget.record(...)`（`tool_loop.py` 的
+  `SpendGuard` 协议）。超限时那一次模型调用**根本不发生**，
+  异常**原样上抛**（不落进循环里那个"LLM 是外部服务"的 `except`，
+  也不变成一条 note——`/chat` 的响应里看不到 notes）。
+  预算对象由 `ClinicReactRuntime` 持有（长寿命），
+  与 CLI `ask` / `POST /ask` **共用同一个** `llm_spend.json`：两条路径算同一个钱包。
+- **算不出价不许按 0 记**：`completion_cost()` 对未登记模型会抛异常
+  （实测 litellm 1.102.1：`Exception: This model isn't mapped yet`），
+  原先把它吞掉并按 0 记 ⇒ 账本永远是 0 ⇒ 闸门永远不触发。
+  现在 `LLMResult.cost_priced` / `ToolCaller` 返回的 `cost_priced=False` 明确表达
+  "这次算不出价"，`DailyBudget.record(priced=False)` 按
+  `UNPRICED_CALL_FALLBACK_USD`（默认 **$0.25**，取值推导见该常量）**保守计入**，
+  并单独计数（`unpriced_calls_today()` / `DailyBudget` 文件里的 `<日期>:unpriced_calls`）、
+  打一条 warning，`/chat` 还在 SSE 的 `message` 事件里回 `unpriced_llm_calls`。
+  "真免费"（本地模型定价就是 0）与"算不出价"是两件事，前者仍是 `cost_priced=True`
+  （实测 `ollama/llama3` → `0.0`）。可用 `KUBEDOCS_LLM_UNPRICED_CALL_USD=0` 关掉罚金
+  （仍计数）。
+- **无锁读改写**：**进程内已原子**（`threading.Lock`，按文件路径注册——同一个账本被
+  `Answerer` 与工具循环各构造一次，各自一把锁等于没锁）。
+  **跨进程仍未原子**，如实留作限制：多 worker / 多副本时真实上限仍是
+  `副本数 × 日预算`。不修的取舍写在 `DailyBudget` 的 docstring 里
+  （跨进程锁要按平台分叉导入，或引入"崩溃后锁文件残留 = 闸门永久拒绝一切调用"这种
+  **比丢一次计费严重得多**的失败形态；换 SQLite 则要放弃账本"人可读、可手改、可审计"）。
+  当前部署形态是单进程（`uvicorn kubedocs.api.app:app`，无 `--workers`）。
 
-- 它是**日累计**上限，不是并发上限：`DailyBudget` 是"读 JSON → 加 → 写 JSON"
-  （`generate.py:206-240`），**没有加锁**。多进程 / 多副本时各写各的，
-  互相看不见 ⇒ 实际总花费上限是 `副本数 × 5 美元`。
-- 成本依赖 `litellm.completion_cost()`；未知模型算不出价时按 0 记
-  （`generate.py:316-319`），此时**闸门不会累加、也就永远拦不住**。
+**仍然没解决的部分（别高估这个闸门）**：`/chat` 依然**没有速率限制**（见 S-3），
+所以"日上限"只限制总花费，不限制一个匿名调用者把预算在几分钟内烧完。
+真正的配额要等认证/限流那一批，或在网关层做。
 
-### S-3 无速率限制；`/chat` 会话状态无界增长（内存耗尽，未修复）
+### S-3 无速率限制（未修复）；`/chat` 会话状态的属主与上界（**已修复**）
 
 全仓没有任何限流/并发上限代码（`slowapi`、令牌桶、信号量、队列都不存在）。
+这条**没修**，也不在本次范围内（认证/限流是下一批）。
 
-`/chat` 的会话历史挂在进程内存里，键是**客户端提供的 `thread_id`**：
+`/chat` 的会话历史挂在进程内存里，键是**客户端提供的 `thread_id`**。
+修复前它有两个性质，现在各自被封掉：
 
-- `api/app.py:383` `app.state.clinic_history = {}`；
-- `api/app.py:390-395` 每轮把该 `thread_id` 的最近 8 条消息写回去。
+- ~~**没有属主校验**~~（**已修复**）：`api/app.py` 原先直接拿 `thread_id` 当
+  `app.state.clinic_history` 的键，于是猜到/复用别人的 `thread_id` 就能续聊别人的会话
+  （历史里是别人的主诉、科室、甚至挂号动作）。
+  现在 `thread_id` **首见即绑定 `patient_id`**（`api/threads.py` 的 `ThreadStore.claim`），
+  换一个 `patient_id` 用同一个 `thread_id` ⇒ **409** + 可读原因；
+  **不静默当新会话、也不静默接到别人的历史上**。属主判定放在**端点里**
+  （`api/app.py` 的 `chat()`，响应头还没发出，所以能给真正的 4xx），
+  因此工具循环路径与确定性图路径受同一道检查。
+  `owner_of` / 拒绝理由都**不回显属主是谁**（否则拒绝本身就成了一次身份探测）。
+- ~~**没有上界**~~（**已修复**）：现在是 LRU 有界表
+  （`MAX_THREADS=256` 个会话 × 每会话 8 条消息，逐字沿用原先的 `[-8:]` 口径）。
+  选"条数上界"而不是 TTL 的理由：要防的是内存无界增长，条数界是**确定性**的，
+  TTL 不是（一阵突发流量能在任何 TTL 到期前塞进任意多个线程）。
+  见 `api/threads.py`。
 
-`thread_id` 只受长度限制（`schemas.py:159-160`，`max_length=64`），**数量不限**、
-无 TTL、无淘汰。攻击者用不同 `thread_id` 反复调用即可让这个 dict 持续增长。
+**诚实边界（这条绑定不是认证）**：属主 = `patient_id`，而它的默认值是 `"anon"`
+（`api/schemas.py`）。所以所有**不传** `patient_id` 的匿名客户端共享同一个属主桶，
+它们之间仍然只靠 `thread_id` 的随机性（32 位十六进制）隔离。
+这条绑定挡的是**误撞 / 复用别人的 thread_id**（以及"后端把两个患者悄悄合成一个会话"），
+挡不住有意的身份伪造——真正的"这是谁"必须由网关层解决（见 S-1）。
 
-同一条性质在图路径上也成立：无 LLM 密钥时 `/chat` 回退到确定性图
-（`api/app.py:399-429`），而 `_get_clinic_agent()` 构造 agent 时**没有传 checkpointer**
-（`api/app.py:303`），于是 `kernel.py:229` 的默认分支生效——
-`g.compile(checkpointer=checkpointer or InMemorySaver())`，状态同样只在内存里，
-且同样按 `thread_id` 无界累积。
-
-`thread_id` 由调用方**自带**这一点还有第二个后果：谁都能"续聊"到别人的会话上
-（猜到/复用同一个 id 即可），**没有任何属主校验**。
+同一条"无界"性质在**图路径**上仍然部分成立，如实记下：无 LLM 密钥时 `/chat` 回退到
+确定性图，而 `_get_clinic_agent()` 构造 agent 时**没有传 checkpointer**，
+于是 `kernel.py` 的默认分支生效（`InMemorySaver()`）——那份状态同样只在内存里、
+同样按 `thread_id` 累积。**属主校验对它有效**（校验在端点里），
+但**淘汰对它无效**（那是一份独立的 checkpointer 表，本次没有动它）。
 
 **输入体积本身是有界的**（这部分做得对，如实记录）：`q ≤ 300`、`top_k ∈ [1,20]`、
 `message ≤ 2000`、`thread_id ≤ 64`、`extra="forbid"`（`api/schemas.py:126-169`）。
-所以暴涨的是**键的数量**，不是单个请求的体积。
+所以原先暴涨的是**键的数量**，不是单个请求的体积；现在键的数量也有上界了。
 
 ### S-4 分诊（症状 → 科室）指标实测为 0（质量缺口，医疗域特有）
 
@@ -140,11 +172,27 @@
 的说法，那是错的、复现不出来，不要引用它。**）
 
 评测器对这件事的处理是**诚实**的：缺语料时 `evaluate_triage()` 返回
-`evaluated=False`（`evaluation/clinic.py:158-175`），而不是把"答不出来"计成 0 分。
+`evaluated=False`（`evaluation/clinic.py`），而不是把"答不出来"计成 0 分。
 
-**但必须知道的第二件事**：闸门**不看**分诊。`gate_failures()`（`evaluation/clinic.py:178-195`）
-只检查红线漏报与红线误报率——分诊 0 分**不会让闸门变红**。
-所以"`make check` 绿 / 闸门通过"**不等于"分诊可用"**。
+**第二件事（已修复，行为反转了，别按旧文档推理）**：闸门现在**看**分诊。
+原先 `gate_failures()` 只检查红线漏报与红线误报率——分诊 0 分**不会让闸门变红**，
+所以"闸门通过"**不等于"分诊可用"**。现在：
+
+- 分诊**未评测**（`evaluated=False`，或评测了却没有一条可评测用例）⇒ **闸门失败**
+  （否则"删掉语料"会变成让闸门变绿的手段）；
+- 分诊准确率 **< 60%**（`DEFAULT_TRIAGE_MIN_ACCURACY`，取值理由见该常量的说明：
+  候选科室实测 40 个、随机 top-3 上界 7.5%，0.60 是它的 8 倍；在 5 条用例上等价于
+  "至少答对 3 条"）⇒ **闸门失败**。
+
+**⇒ 所以 `python scripts/eval_clinic.py --gate` 现在**（修复后实测）
+**退出码 2、打印「闸门：不通过」**，而修复前是退出码 0 + 「闸门：通过」。
+**这个红是预期的、也是对的**：`data/eval/clinic_baseline.json` 里本来就记着
+`triage.accuracy = 0.0`——红色只是把一个一直存在的事实（分诊不可用）
+暴露到退出码上，不是本次改动引入的回归。
+
+**基线不许为了让闸门变绿而改**（那是本项目明令禁止的"把红灯涂成绿灯"）。
+要变绿只有一条路：真的把分诊做对——补"口语主诉 → 临床体征"的映射层，或换一份
+与症状词典词汇重合的语料。这件事仍然在**未做**清单里（见第 6 节）。
 
 **红线的 1.0 也不要高估**：那是自建规则表在自建用例上的成绩，规则与用例同一作者、
 同一时期（`data/eval/clinic_gold.jsonl` 26 条），**不是独立临床验证**，
@@ -213,8 +261,13 @@
    提交前请自己再确认一次（`git status --short` 里不应出现 `.env`）。
    `docker-compose.yml:48-49` 用 `env_file: .env` 把密钥注入 api 容器——它不会被打印，
    但会出现在 `docker inspect` 的输出里，共享宿主机的场合要注意。
-4. **钱包护栏自己加**：`KUBEDOCS_LLM_DAILY_BUDGET_USD` 只覆盖 `/ask` 与 CLI `ask`（S-2）。
-   要么给 `/chat` 也接上同一条闸门，要么在网关层做配额。
+4. **钱包护栏**：`KUBEDOCS_LLM_DAILY_BUDGET_USD` 现在覆盖 `/ask`、CLI `ask` **和
+   `/chat` 的工具循环**（S-2 已修复）。但仍有两条要你自己加：
+   - **速率限制不在本项目里**（S-3），日上限只限制总额、不限制烧得多快；
+   - **多副本下上限会变成 `副本数 × 预算`**（S-2 的残留限制），
+     多副本部署要么在网关层做配额，要么把账本换成共享存储。
+   `KUBEDOCS_LLM_UNPRICED_CALL_USD` 控制"模型算不出价"时每次的保守计入金额
+   （默认 0.25 美元；置 0 = 不计金额但**仍然计数**）。
 5. **离线 / 在线的差别**（这决定了"没有密钥能不能用"）：
    - **完全离线可用**：单测、检索、评测、闸门、索引体检。嵌入用
      `KUBEDOCS_EMBEDDING_PROVIDER=hashing`（确定性哈希，仅供管道自检，
@@ -258,5 +311,10 @@
 - 分诊链路的"接上真实卡片语料后能到多少分"**未测**：
   `data/clinic/cards.json` 存在（31,592 张卡），但 `triage.accuracy=0.0` 这份基线
   对应的运行环境与语料版本没有留档，**不能断言"有了语料就一定好"**。
+- **分诊闸门现在是红的（预期）**：`scripts/eval_clinic.py --gate` 退出码 2，
+  因为冻结基线里就记着 `triage.accuracy = 0.0`。这条红**没有被"修绿"**，
+  也不该被修绿——只把"分诊不可用"暴露到了退出码上（见 S-4）。
+- **多副本下的 LLM 花费上限未验证**：跨进程账本仍未原子（S-2），
+  当前部署形态是单进程所以不生效，但**没有实测过多副本**。
 - 依赖的 PyPI 可达性与 CVE 状态**未测**。
 - 没有做过任何渗透测试、模糊测试或负载测试。
