@@ -11,7 +11,7 @@
 
 ## 属主 = `patient_id`
 
-请求体里与"人"绑定的标识就是 `patient_id`（`api/schemas.py:161`，默认 `"anon"`）；
+请求体里与"人"绑定的标识就是 `patient_id`（`api/schemas.py:160`，默认 `"anon"`）；
 本批**不新增认证字段**（认证/限流是下一批，见 SECURITY.md 的 S-1）。
 
 诚实边界，别高估这条绑定：

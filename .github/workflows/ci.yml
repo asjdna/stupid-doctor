@@ -55,6 +55,15 @@ jobs:
         run: ruff format --check .
       - name: mypy（阻塞）
         run: mypy src scripts
+      # 文档里的 `文件:行号` 引用必须**指着它自己声称的东西**，而不只是"文件存在、行号不越界"。
+      # 这不是假想问题：SECURITY.md 的 37 处引用里已有 24 处失效——行号仍然"合法"（没越界），
+      # 位置却偏了 −1 ~ +171 行，指到了别的函数上。主要位移来自 e1307cd 的重写，fcd7a55 的
+      # 全量重排又叠加了 ±1 ~ +25（连只被格式化过的文件也漂了：`config.py:34` → 35、
+      # `api/schemas.py:161` → 160）。
+      # 脚本做内容级校验（引用所在那句散文里的符号名必须出现在锚点范围内）；机器判断不了的
+      # 引用必须逐条登记在脚本内的白名单里并写明理由，运行时会打印条数。
+      - name: 文档锚点校验（阻塞）
+        run: python scripts/check_doc_refs.py
 
   pipeline:
     name: 全链路自检（全量语料 + 哈希向量，不下载模型）
@@ -62,7 +71,7 @@ jobs:
     timeout-minutes: 30
     needs: [quality]
     env:
-      KUBEDOCS_ENV: ci
+      # `KUBEDOCS_ENV: ci` 曾在这里，但那个字段没有任何行为读它（假开关，已从 config.py 删掉）。
       KUBEDOCS_EMBEDDING_PROVIDER: hashing
     steps:
       - uses: actions/checkout@v4

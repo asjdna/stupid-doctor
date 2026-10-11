@@ -28,7 +28,7 @@ RUN = $(PY)
 # 受限网络下模型下载源与离线加载（模型已缓存后必须离线，否则联网校验会挂死）
 HF := --hf-endpoint https://hf-mirror.com
 
-.PHONY: help install check lint type test lock corpus cstats ingest ingest-hash search stats \
+.PHONY: help install check lint type refs test lock corpus cstats ingest ingest-hash search stats \
         gold eval eval-baseline up down logs clean
 
 # help 也用 $(PY) -c 实现，与 clean 同一手法、同一理由：
@@ -50,7 +50,7 @@ install:  ## 建 venv 并安装（含 dev 依赖）
 	python -m venv --system-site-packages .venv
 	$(PY) -m pip install -e ".[dev]"
 
-check: lint type test  ## 跑完所有静态闸门（与 CI 等价）
+check: lint type test refs  ## 跑完所有静态闸门（与 CI 等价）
 	@echo "所有闸门通过"
 
 lint:  ## ruff（阻塞）
@@ -58,6 +58,13 @@ lint:  ## ruff（阻塞）
 
 type:  ## mypy（阻塞）
 	$(RUN) -m mypy src scripts
+
+# 文档里的 `文件:行号` 引用必须指着它自己声称的东西（内容级校验，不只是"行号不越界"）。
+# 与 ci.yml 的 quality job 里那一步是同一条命令：本地与 CI 不能是两道不同的门。
+# 目标名**不能叫 `docs`**：仓库里有一个同名目录，make 会认为"已是最新"而什么都不跑——
+# 实测 `mingw32-make docs` 输出 `'docs' is up to date.`、退出码 0（假绿）。
+refs:  ## 文档锚点校验（阻塞）
+	$(RUN) scripts/check_doc_refs.py
 
 # 只跑 tests/unit（本仓库 tests/ 下只有 unit，等价于全量），不加载模型。
 # **不要在这里再叠加 `-q`**：pyproject.toml 的 addopts 已经是 `-q --strict-markers`，

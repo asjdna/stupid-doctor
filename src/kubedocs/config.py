@@ -76,12 +76,11 @@ class Settings(BaseSettings):
     )
 
     # ---------- 应用 ----------
-    # ⚠️ `env`（`KUBEDOCS_ENV`）目前**只被声明和校验**（Literal：非法值启动即报错），
-    # 没有任何行为读它。原来的 `is_prod` 属性全仓零引用（`grep -rn is_prod` 只剩
-    # 它自己和一条只为它写的测试），是个"看起来能切环境"的假开关，已删除。
-    # 需要环境相关行为时，请**先接上真实分支**再让这个字段参与判断；在那之前不要
-    # 再派生任何 is_prod/is_ci 之类的属性——假开关比缺配置更糟。
-    env: Literal["local", "ci", "prod"] = "local"
+    # 这里曾有一个 `env`（`KUBEDOCS_ENV`，Literal: local/ci/prod）字段与派生属性 `is_prod`，
+    # 两者都是**假开关**：全仓没有任何一行代码读它们，只做声明与校验，却让 CI 里的
+    # `KUBEDOCS_ENV: ci` 看起来在起作用。已删除（连同 `.env.example` 与 `ci.yml` 里的设置）。
+    # 纪律：配置项要**先接上真实分支**再声明。需要环境相关行为时，写清楚哪个分支读它、
+    # 怎么验证；在那之前不要新增 is_prod / is_ci / env 之类的派生字段——假开关比缺配置更糟。
     log_level: str = "INFO"
     api_port: int = 8080
 

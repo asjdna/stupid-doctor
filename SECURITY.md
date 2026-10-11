@@ -19,7 +19,7 @@
 
 - 上游 Kubernetes 官方文档的**内容**本身（由 `scripts/fetch_corpus.py` 拉取，非本项目产出）；
 - clinic 域的知识卡片语料（第三方派生数据集，上游标注"仅用于学术研究"，
-  见 `.gitignore:41-42`，**不入库**）；
+  见 `.gitignore:53-54`，**不入库**）；
 - 基础镜像与第三方依赖自身的漏洞（`Dockerfile` 用的是 `python:3.10-slim`、
   `pgvector/pgvector:pg16`、`redis:7.4-alpine`）。
 
@@ -36,7 +36,7 @@
 ### S-1 全部 HTTP 端点无认证、无鉴权（严重，未修复）
 
 `src/kubedocs/api/app.py` 的 7 个端点全部没有认证：`GET /healthz`、`GET /domains`、
-`GET /tools`、`POST /search`、`POST /ask`、`POST /chat`、`GET /`（`api/app.py:562-638`）。
+`GET /tools`、`POST /search`、`POST /ask`、`POST /chat`、`GET /`（`api/app.py:602-696`）。
 
 代码可核的"没有"：全仓 `src/` 下搜不到 `add_middleware` / `@app.middleware` /
 `CORSMiddleware` / `TrustedHostMiddleware`，也搜不到任何 `Depends(...)` 形式的
@@ -53,7 +53,7 @@
 | `GET /tools`、`GET /domains` | 泄露内部工具与域的清单（自省信息） |
 
 **当前缓解到什么程度**：`/chat` 的挂号工具用进程内替身号源
-（`MockAppointmentProvider`，`api/app.py:299-302`、`domains/clinic/mock.py`），
+（`MockAppointmentProvider`，`api/app.py:317-320`、`domains/clinic/mock.py`），
 所以现在被占用的只是内存里的假号源，不是真实 HIS。换成真实号源库后这条立刻变成
 "任何人都能替别人取号"。
 
@@ -139,7 +139,7 @@
 但**淘汰对它无效**（那是一份独立的 checkpointer 表，本次没有动它）。
 
 **输入体积本身是有界的**（这部分做得对，如实记录）：`q ≤ 300`、`top_k ∈ [1,20]`、
-`message ≤ 2000`、`thread_id ≤ 64`、`extra="forbid"`（`api/schemas.py:126-169`）。
+`message ≤ 2000`、`thread_id ≤ 64`、`extra="forbid"`（`api/schemas.py:125-168`）。
 所以原先暴涨的是**键的数量**，不是单个请求的体积；现在键的数量也有上界了。
 
 ### S-4 分诊（症状 → 科室）指标实测为 0（质量缺口，医疗域特有）
@@ -162,7 +162,7 @@
 
 - 知识卡片 `data/clinic/cards.json` 共 **31,592** 张
   （symptom 12,577 / disease 14,726 / drug 4,289）；
-- 但 `data/clinic/` 被 `.gitignore:41-42` 排除，**仓库不携带**，全新克隆的机器上
+- 但 `data/clinic/` 被 `.gitignore:53-54` 排除，**仓库不携带**，全新克隆的机器上
   这个文件根本不存在；
 - 症状词典 `src/kubedocs/domains/clinic/data/symptom_dict.py` 去重后只有 **172** 个词项
   （28 个标准症状名 + 144 个口语变体去重成 146，加 24 个部位词，再加
@@ -200,17 +200,17 @@
 
 ### S-5 提示词注入与工具滥用（中等，部分缓解）
 
-- 检索到的片段与工具返回结果都被**直接拼进提示词**（`generate.py:363-365`、
-  `tool_loop.py:182-183`）。语料来自 kubernetes.io（受信度较高），
+- 检索到的片段与工具返回结果都被**直接拼进提示词**（`generate.py:534-536`、
+  `tool_loop.py:322-327`）。语料来自 kubernetes.io（受信度较高），
   但 clinic 卡片是第三方派生数据。
 - `/chat` 的控制流由模型决定（`tool_loop.py` 全文）。副作用工具的执行闸门是
-  `_confirm_side_effect()`（`tool_loop.py:257-280`）：**默认拒绝**，只有 `confirm`
+  `_confirm_side_effect()`（`tool_loop.py:409-435`）：**默认拒绝**，只有 `confirm`
   回调点头才放行。而 `/chat` 传入的回调是
-  `(lambda _call: True) if user_asked_to_book else None`（`clinic_react.py:117`）——
+  `(lambda _call: True) if user_asked_to_book else None`（`clinic_react.py:211`）——
   也就是说，**只要用户这一轮的原文里出现挂号意图，闸门对该轮所有副作用工具全开**。
   这道闸门防的是"模型自作主张"，**不防**"调用方未经授权"（见 S-1）。
-- 已缓解的部分：工具参数逐个走 pydantic 校验（`tool_loop.py:223-227`），
-  工具名必须命中注册表，未知工具名会把可用列表回灌给模型（`tool_loop.py:245-254`）；
+- 已缓解的部分：工具参数逐个走 pydantic 校验（`tool_loop.py:373-378`），
+  工具名必须命中注册表，未知工具名会把可用列表回灌给模型（`tool_loop.py:397-405`）；
   工具执行体（号源三件套 / 检索）不接受任意 URL 或文件路径，因此**没有 SSRF 或
   任意文件读取面**；模型输出只当文本用，**没有** `eval` / `exec` / shell 调用
   （全仓无 `subprocess` / `shell=True` / `pickle` / `yaml.load` 使用）。
@@ -237,14 +237,14 @@
 
 | 面 | 现状 | 代码出处 |
 |---|---|---|
-| FTS5 `MATCH` 表达式注入 | 只抽取 `\w+` 词元并逐个双引号短语化，用户输入 `pod -limit` / `"` 不再改变语法、不再 500 | `store/sqlite_store.py:123-143`（含对应单测） |
-| 引用越界（模型编 `[99]`） | 越界标记被**剥除**并记入诊断；回答里一个引用都没有也会被标记 | `generate.py:170-191` |
-| 检索为空却调 LLM | 直接拒答，**不调用模型**（可断言：单测断言打桩 LLM 一次都没被调用） | `generate.py:347-352` |
-| 请求体越界 / 未知字段 | pydantic 校验，越界 422、`extra="forbid"` | `api/schemas.py:126-169` |
-| 工具同名冲突 | 注册表按名索引，重名直接报错而不是静默覆盖 | `tool_loop.py:129-135` |
-| 副作用工具默认行为 | **默认拒绝执行**，不是默认执行后再回滚 | `tool_loop.py:257-267` |
-| 空索引 / 索引损坏 | 不返回 500、不泄露 traceback：记 `index_error` 并返回 200 + 说明 | `api/app.py:118-133, 225-234` |
-| 容器内权限 | api 以非 root（`USER app`，uid 10001）运行 | `Dockerfile:35, 45` |
+| FTS5 `MATCH` 表达式注入 | 只抽取 `\w+` 词元并逐个双引号短语化，用户输入 `pod -limit` / `"` 不再改变语法、不再 500 | `store/textquery.py:92-112`（含对应单测） |
+| 引用越界（模型编 `[99]`） | 越界标记被**剥除**并记入诊断；回答里一个引用都没有也会被标记 | `generate.py:193-214` |
+| 检索为空却调 LLM | 直接拒答，**不调用模型**（可断言：单测断言打桩 LLM 一次都没被调用） | `generate.py:509-514` |
+| 请求体越界 / 未知字段 | pydantic 校验，越界 422、`extra="forbid"` | `api/schemas.py:125-168` |
+| 工具同名冲突 | 注册表按名索引，重名直接报错而不是静默覆盖 | `tool_loop.py:250-256` |
+| 副作用工具默认行为 | **默认拒绝执行**，不是默认执行后再回滚 | `tool_loop.py:409-423` |
+| 空索引 / 索引损坏 | 不返回 500、不泄露 traceback：记 `index_error` 并返回 200 + 说明 | `api/app.py:129-145, 241-252` |
+| 容器内权限 | api 以非 root（`USER app`，uid 10001）运行 | `Dockerfile:50, 60` |
 
 ---
 
@@ -252,10 +252,10 @@
 
 1. **不要把它直接暴露到公网。** 先补认证（S-1），再考虑任何形式的对外服务。
 2. **密钥必须由环境显式提供**，且只放在 `.env` 或容器环境变量里：
-   - 密钥读取路径是 `os.environ`（`generate.py:260-269` 的 `required_api_key_env()` /
+   - 密钥读取路径是 `os.environ`（`generate.py:404-417` 的 `required_api_key_env()` /
      `has_api_key()`）；`.env` 由 `config.load_env_file()` 导入 `os.environ`，
-     **真实环境变量优先、`.env` 不覆盖已有值**（`config.py:34-62`，`override=False` 的语义）。
-   - `.env` 里**留空的键等于未设置**（`config.py:58-60`）：这防止 `.env.example` 里成片的
+     **真实环境变量优先、`.env` 不覆盖已有值**（`config.py:35-63`，`override=False` 的语义）。
+   - `.env` 里**留空的键等于未设置**（`config.py:59-61`）：这防止 `.env.example` 里成片的
      `KEY=` 把"没有密钥"伪装成"有密钥"。
 3. **`.env` 永不入库。** 它已被 `.gitignore:1-4`（`.env` / `.env.*` / `!.env.example`）覆盖；
    提交前请自己再确认一次（`git status --short` 里不应出现 `.env`）。
@@ -276,11 +276,11 @@
      拉模型，之后置 `KUBEDOCS_HF_OFFLINE=true`（模型已缓存时联网校验会**挂死** >10 分钟，
      README「环境约束」一节有实测）。
    - **只有"生成回答"需要外网**：没有密钥时 `/ask` 返回检索结果 + 降级说明、
-     `/chat` 回退到确定性图（红线与挂号仍可用），都不会崩（`api/app.py:601-614, 399-429`）。
+     `/chat` 回退到确定性图（红线与挂号仍可用），都不会崩（`api/app.py:644-661, 432-461`）。
 6. **数据合规**：`data/clinic/` 的知识卡片不入库、且上游标注"仅用于学术研究"。
    要用在真实问诊场景，**先自己解决该数据集的授权**，本仓库不代为授权。
 7. **公网部署前至少替换**：`docker-compose.yml:16` 的 Postgres 口令
-   （`kubedocs/kubedocs`）、`:84-85` 的 `NEXTAUTH_SECRET` / `SALT` 占位值。
+   （`kubedocs/kubedocs`）、`:89-90` 的 `NEXTAUTH_SECRET` / `SALT` 占位值。
    compose 把 `5432` / `6379` / `8080` 直接映射到宿主机（`:21-22, 35-36, 54-55`），
    其中 Redis **没有设密码**。
 
