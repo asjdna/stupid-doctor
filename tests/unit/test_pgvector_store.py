@@ -31,13 +31,49 @@ import psycopg
 import pytest
 
 from kubedocs.config import Settings
-from kubedocs.store.base import MissingVectorError, Store, Vector
+from kubedocs.store.base import MissingVectorError, Store, StoreError, Vector
 from kubedocs.store.pgvector_store import PgVectorStore, probe
 from kubedocs.store.sqlite_vec_store import SqliteVecStore
 from tests.unit.store_seed import DIM, make_seed, vec
 
 _DSN = Settings().database_url
 _PG_OK, _PG_WHY = probe(_DSN, timeout=3.0)
+
+
+def _pg_search_available() -> bool:
+    """这个实例能不能真上 BM25（**判据与 store 一致**：真的 `CREATE EXTENSION` 一次）。
+
+    只看 `pg_available_extensions` 是不够的：pg_search 是 preload 型扩展，
+    扩展文件在、`shared_preload_libraries` 里没有它时 `CREATE EXTENSION` 会失败。
+    """
+    if not _PG_OK:
+        return False
+    try:
+        with psycopg.connect(_DSN, connect_timeout=5) as conn:
+            row = conn.execute("SELECT 1 FROM pg_available_extensions WHERE name = 'pg_search'").fetchone()
+            if row is None:
+                return False
+            with conn.transaction():  # 嵌套 = SAVEPOINT，失败不毒化外层
+                conn.execute("CREATE EXTENSION IF NOT EXISTS pg_search")
+        return True
+    except Exception:  # noqa: BLE001 - 探测就是要把失败转成"不可用"
+        return False
+
+
+_PG_SEARCH_OK = _pg_search_available()
+
+
+def _fts_is_healthy(store: PgVectorStore) -> bool:
+    """`verify_fts()` 的三态契约：BM25 在位 = `ok`；降级 = `DEGRADED:` 开头（不是 `ok`）。
+
+    ⚠️ 不能把两条都写成"返回 ok"：降级时**必须**返回非 ok，否则
+    `cli stats --verify` 会对一个跑 `ts_rank` 的库说"一切正常"（见 ADR-0004 第十节）。
+    """
+    got = store.verify_fts()
+    if store.fts_engine == "pg_search":
+        return got == "ok"
+    return got.startswith("DEGRADED")
+
 
 pytestmark = [
     pytest.mark.integration,
@@ -111,8 +147,77 @@ def test_schema_ddl_creates_tables_indexes_and_extension(pg: PgVectorStore) -> N
     assert {"documents", "chunks", "meta"} <= tables
     assert {"idx_chunks_tsv", "idx_chunks_embedding", "idx_chunks_doc", "idx_chunks_hash"} <= indexes
     assert has_ext is not None, "pgvector 扩展必须已启用"
-    assert pg.verify_fts() == "ok"
+    # BM25 索引**只在 pg_search 可用时**才建（见 ADR-0004 第十节）：
+    # 扩展装不上时不建索引是刻意的——那时关键字路走带 DEGRADED 标记的 ts_rank，
+    # 而不是"建一个用不上的索引"或"假装一切正常"。
+    if _PG_SEARCH_OK:
+        assert "idx_chunks_bm25" in indexes
+    else:
+        assert "idx_chunks_bm25" not in indexes
+    assert _fts_is_healthy(pg), f"verify_fts() = {pg.verify_fts()!r}（引擎 {pg.fts_engine}）"
     assert pg.verify_hnsw() == "ok"
+
+
+def test_fts_engine_is_detected_and_recorded(pg: PgVectorStore) -> None:
+    """引擎判定必须留下痕迹：`meta.fts_engine` + `verify_fts()` 两处都要对上。
+
+    这是"不许静默假装"那条纪律的**可执行版本**：库里没有 pg_search 时，
+    降级必须写进元信息、并被自检报成 `DEGRADED`（不是 `ok`）。
+    """
+    label = pg.meta_dump().get("fts_engine", "")
+    if _PG_SEARCH_OK:
+        assert pg.fts_engine == "pg_search"
+        assert label.startswith("pg_search-bm25"), label
+        assert pg.verify_fts() == "ok"
+    else:
+        assert pg.fts_engine == "ts_rank"
+        assert label.startswith("ts_rank-DEGRADED"), label
+        assert pg.verify_fts().startswith("DEGRADED")
+
+
+def test_bm25_index_definition(pg: PgVectorStore) -> None:
+    """BM25 索引的**结构**必须真的落进索引定义，而不是只写在常量里。
+
+    钉三件事：访问方法 `paradedb`、分词器（`chinese_compatible` + `stemmer=english`）、
+    以及表达式字段的 `alias=`（不带它建不出索引，见 ADR-0004 第十节）。
+    """
+    if not _PG_SEARCH_OK:
+        pytest.skip("这个 Postgres 没有可用的 pg_search：BM25 索引这一路未验证")
+    with psycopg.connect(_DSN) as conn:
+        row = conn.execute(
+            "SELECT indexdef FROM pg_indexes WHERE schemaname = %s AND indexname = 'idx_chunks_bm25'",
+            (pg.schema,),
+        ).fetchone()
+    assert row is not None, "缺少 BM25 索引 idx_chunks_bm25"
+    ddl = row[0]
+    assert "USING paradedb" in ddl
+    assert "pdb.chinese_compatible" in ddl and "stemmer=english" in ddl
+    assert "alias=fts_text" in ddl
+    # 三个字段都必须在同一个表达式里（单字段拼接，理由见 ADR-0004 第十节）
+    for col in ("title", "breadcrumb", "body_normalized"):
+        assert col in ddl, f"BM25 索引里没有 {col}"
+
+
+def test_explicit_fts_engine_modes(schema: str) -> None:
+    """显式指定引擎时的两种语义：要 BM25 而装不上 → 报错；显式要 ts_rank → 允许但带标记。"""
+    kwargs = {
+        "schema": schema,
+        "dim": DIM,
+        "embedding_model": "hashing-test",
+        "domain": schema,
+        "pool_min": 1,
+        "pool_max": 2,
+    }
+    if _PG_SEARCH_OK:
+        legacy = PgVectorStore(_DSN, fts_engine="ts_rank", **kwargs)
+        try:
+            assert legacy.fts_engine == "ts_rank"
+            assert legacy.verify_fts().startswith("DEGRADED")
+        finally:
+            legacy.close()
+    else:
+        with pytest.raises(StoreError):
+            PgVectorStore(_DSN, fts_engine="pg_search", **kwargs)
 
 
 def test_tsv_is_a_generated_column(pg: PgVectorStore) -> None:
@@ -193,7 +298,13 @@ def test_hnsw_matches_exact_search_on_small_index(pg: PgVectorStore) -> None:
 
 
 def test_keyword_hit_set_matches_sqlite(pg: PgVectorStore, tmp_path: Path) -> None:
-    """全文路只保证**命中集合**一致，排序允许不同（`ts_rank` vs BM25，见 ADR-0004）。"""
+    """全文路只保证**命中集合**一致，排序允许不同。
+
+    SQLite 用 FTS5 的 `bm25()`，pgvector 用 pg_search（tantivy）的 BM25——**两份独立实现**，
+    分词器也不同（`porter unicode61` vs `chinese_compatible('stemmer=english')`），
+    所以"相同命中集合下名次可能不同"是真实差异，不是 bug（见 ADR-0004 第十节）。
+    降级到 `ts_rank` 时这条断言同样成立（命中集合由同一套词元规则决定）。
+    """
     _seed_pg(pg)
     sqlite_store = SqliteVecStore(
         db_path=tmp_path / "k.db", vector_path=tmp_path / "k.npy", dim=DIM, embedding_model="hashing-test"
@@ -273,7 +384,7 @@ def test_rebuild_delete_and_missing_vector(pg: PgVectorStore) -> None:
     assert pg.dense_search(vec(a=1.0), 5) == []
     _seed_pg(pg)
     assert pg.stats().n_chunks == 5
-    assert pg.verify_fts() == "ok"
+    assert _fts_is_healthy(pg), f"verify_fts() = {pg.verify_fts()!r}（引擎 {pg.fts_engine}）"
 
 
 def test_existing_hash_to_vector_roundtrip(pg: PgVectorStore) -> None:

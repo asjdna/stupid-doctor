@@ -73,8 +73,9 @@ python scripts/check_doc_refs.py
 
 **单元测试绝不能联网、不能花钱**：`tests/` 用哈希向量与打桩 LLM。
 唯一需要外部进程的是 `tests/unit/test_pgvector_store.py`（12 条）：它要一条真实
-Postgres——CI 用 `pgvector/pgvector:pg16` service 起它（见 `ci.yml` 的 quality job，
-同一条 service 也让 `test_store_contract.py` 的 `pgvector` 参数真正出现），
+Postgres——CI 用 `paradedb/paradedb:0.26.1-pg16` service 起它（**必须是带 `pg_search` 的镜像**，
+否则关键字路降级成 `ts_rank`、这几条用例测的就不是产品路；见 `ci.yml` 的 quality job 与
+ADR-0004 第十节。同一条 service 也让 `test_store_contract.py` 的 `pgvector` 参数真正出现），
 本地没起库时整个文件 skip 并把探测到的错误写进 `reason`（`-rs` 能看到）。
 如果你要写一个"真的调模型/真的加载模型"的测试，标 `@pytest.mark.slow`
 （`pyproject.toml` 的 markers 已声明 `integration` 与 `slow`，且开了 `--strict-markers`，

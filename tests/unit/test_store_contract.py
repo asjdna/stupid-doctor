@@ -15,10 +15,13 @@
 
 ## 谁"允许差异"，差在哪（不是含糊过去）
 
-- `pgvector` 的全文路用 `ts_rank`，SQLite 用 FTS5 的 `bm25()`。**两者不同源**：
-  BM25 含 IDF 与文档长度归一化，`ts_rank` 没有。所以相同命中集合下的**排序可能不同**，
-  这是真实差异，不是 bug。因此对 pgvector 断言的是**命中集合相同**，
+- `pgvector` 的全文路用 **pg_search（ParadeDB）的 BM25**，SQLite 用 FTS5 的 `bm25()`。
+  两边**都是 BM25**（都含 IDF 与文档长度归一化），但是两份独立实现、分词器也不同
+  （`pdb.chinese_compatible('stemmer=english')` vs `porter unicode61`），
+  所以相同命中集合下的**排序仍可能不同**。因此对 pgvector 断言的是**命中集合相同**，
   而排序的精确一致只对共用 FTS5 的三个后端断言。
+  （2026-10-11 之前 pgvector 用的是 `ts_rank`——那个**不是** BM25，hybrid hit@10 会掉到 0.74；
+  换掉之后 0.86 ≥ 冻结基线 0.84，见 ADR-0004 第十节。）
 - `pgvector` / `milvus` 的向量路是 **HNSW 近似索引**，理论上允许给出与精确检索不同的
   top-k。在本文件的 5 块小索引上它们与精确检索一致（另有一组 `dense_search_exact()`
   对拍用例）；大索引上的召回率是**另一个问题**，结论与实测见 ADR-0005 第五节。
@@ -210,8 +213,8 @@ def test_keyword_ranking_matches_sqlite_reference(seeded: Store, backend: str) -
     """契约第 3 条。
 
     两个 SQLite 后端共用同一份 FTS5 索引，排序必须逐字节相同；
-    pgvector 用 `ts_rank`（无 IDF / 无长度归一化），只断言**命中集合**相同，
-    排序差异是已知且已记录的（见模块文档与 ADR-0004）。
+    pgvector 用 pg_search 的 BM25（与 FTS5 的 `bm25()` 是两份独立实现、分词器也不同），
+    只断言**命中集合**相同，排序差异是已知且已记录的（见模块文档与 ADR-0004 第十节）。
     """
     got = seeded.keyword_search("kubelet", 5)
     if backend == "pgvector":
@@ -352,7 +355,12 @@ def test_rebuild_from_scratch_clears_everything(seeded: Store) -> None:
     seeded.upsert_docs(seed.docs, seed.chunks, seed.vectors)
     seeded.finalize()
     assert seeded.stats().n_chunks == 5
-    assert seeded.verify_fts() == "ok"
+    # 全文自检的**三态**契约（`ok` / `DEGRADED: ...` / `FAIL: ...`）：
+    # 这里只要求"索引本身没坏"，不要求刚好等于 "ok"——`DEGRADED` 是合法的第三种结果
+    # （库里没有 pg_search 时关键字路降级到 ts_rank），把它读成 FAIL 会掩盖真实状态。
+    # 详见 ADR-0004 第十节与 test_pgvector_store.py 的 `_fts_is_healthy`。
+    fts = seeded.verify_fts()
+    assert fts == "ok" or fts.startswith("DEGRADED"), fts
 
 
 def test_existing_hash_to_vector_reuses_vectors(seeded: Store) -> None:

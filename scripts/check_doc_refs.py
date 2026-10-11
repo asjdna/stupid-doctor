@@ -243,7 +243,7 @@ WHITELIST: dict[tuple[str, int, str], White] = {
         reason="表格行：正文（『默认拒绝执行』）没有反引号符号名",
         expect="_confirm_side_effect",
     ),
-    ("SECURITY.md", 284, ":21-22, 35-36, 54-55"): White(
+    ("SECURITY.md", 284, ":54-55, 68-69, 87-88"): White(
         reason="第 284-285 行的反引号只有端口号（`5432` / `6379` / `8080`，抽不出标识符）与这个锚点",
         expect="6379",
     ),

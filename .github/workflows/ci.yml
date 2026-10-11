@@ -43,9 +43,15 @@ jobs:
     #     （不是 skip，是"悄悄消失"，见该文件顶部注释）——那 18 条用例同样以这条 service 为前提；
     #   · probe() 只要求"连得上 + pg_available_extensions 里有 vector"，扩展本身由
     #     PgVectorStore._ensure_schema() 建（service 的 POSTGRES_USER 在官方镜像里是超级用户）。
+    #   · **镜像必须是带 pg_search 的那个**（2026-10-11 换）：pgvector 后端的关键字路已从
+    #     ts_rank 换成 pg_search 的真 BM25，不带 pg_search 的镜像会让 _setup_fts() 走
+    #     DEGRADED 分支——那样这 30 条 pgvector 用例测的是降级路，不是产品路。
+    #     这里**不需要**额外的 -c：service 每次都是全新 initdb，而 ParadeDB 镜像的
+    #     postgresql.conf.sample 里已经写了 `shared_preload_libraries='pg_search,...'`（实测）。
+    #     沿用已有数据目录的场景（compose 里那份）才必须显式传，见 docker-compose.yml。
     services:
       postgres:
-        image: pgvector/pgvector:pg16
+        image: paradedb/paradedb:0.26.1-pg16
         env:
           POSTGRES_USER: kubedocs
           POSTGRES_PASSWORD: kubedocs

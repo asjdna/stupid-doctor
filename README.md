@@ -48,7 +48,7 @@ python -m kubedocs.cli --hf-offline eval --gate   # 评测并卡闸门
 
 | 部件 | 本项目选择 | 理由 |
 |---|---|---|
-| 全文检索 | **SQLite FTS5**（带 `bm25()` 排序 + 列权重） | 标准库自带、零运维；能力与"用 Postgres 全文检索"等价 |
+| 全文检索 | **SQLite FTS5**（默认后端，带 `bm25()` 排序 + 列权重）；生产 pgvector 侧是 **ParadeDB `pg_search` 的真 BM25**（`USING paradedb` + `pdb.score()`） | 标准库自带、零运维；Postgres 核心只有 `ts_rank`（**无 IDF、无长度归一化，不是 BM25**），实测它把 hybrid hit@10 从 0.84 拉到 0.74，换 `pg_search` 后是 0.86（见 [`docs/adr/0004-向量存储后端.md`](docs/adr/0004-向量存储后端.md) 第十节） |
 | 向量检索 | **sqlite-vec**（默认；`sqlite`+numpy 与 `pgvector` 也在同一协议下） | 同一 `Store` 协议下换实现只改配置（`KUBEDOCS_STORE`）。vec0 换来的是"向量与块行同事务、可增删、不常驻内存"，**不是延迟**——它比 numpy 暴力内积慢约 11 倍（实测见 [`docs/adr/0004-向量存储后端.md`](docs/adr/0004-向量存储后端.md)） |
 | 多路融合 | **RRF**（自实现，约 20 行） | 免标定、跨语料稳定，与 OpenSearch 内置策略同源 |
 | 嵌入 | 本地 BGE-small-en（可切 API） | 医疗/企业语料常不允许出境；本地可离线复现，CI 不吃密钥 |
@@ -400,8 +400,9 @@ python -m kubedocs.cli --provider hashing ingest --limit-files 100
 - **闸门全部阻塞**：`ruff`（含 S/B/SIM 规则）、`mypy`（`disallow_untyped_defs`）、`pytest`、
   `scripts/check_doc_refs.py`，外加 `ci.yml` 的 `gate` job（真实模型 + 冻结基线，指标退化即红）
 - **测试分层**：`tests/unit`（用哈希向量、不加载模型、不联网，秒级；其中
-  `test_pgvector_store.py` 要一条真实 Postgres，CI 用 `pgvector/pgvector:pg16` service 真跑它，
-  本地没起库时整个文件 skip）
+  `test_pgvector_store.py` 要一条真实 Postgres，CI 用 `paradedb/paradedb:0.26.1-pg16`
+  service 真跑它——**必须是带 `pg_search` 的镜像**，否则那 30 条 pgvector 用例测到的是
+  降级路；本地没起库时整个文件 skip）
 - **确定性**：融合同分按 key 定序、向量条带按 chunk_id 定序——否则评测会随进程抖动
 - **失败模式**：向量路不可用 → 降级为纯全文检索并**记录原因**（不静默降级）；
   精排不可用 → 保持 RRF 顺序并记录；零向量 → 直接拒绝写入而不是让它永远排最后
@@ -445,13 +446,19 @@ python -m kubedocs.cli --provider hashing ingest --limit-files 100
       + 前端演示页 `data/web/index.html`（里程碑 7）
 - [ ] OTel/Prometheus 指标导出与 `/metrics`：里程碑 6/7 里**唯一还没落地**的观测部分
 - [x] pgvector 生产实现（`store/pgvector_store.py`，同一 `Store` 协议）（里程碑 8 的实现部分）
-- [ ] pgvector 的**检索质量对齐**：对照评测已实测并落盘
-      （`data/eval/store_bench/eval_pgvector.json`、`latency_pgvector_ef{100,200,400}.json`、
-      `eval_pgvector_attrib.json`、`eval_pgvector_gate_raw.txt`），结论是
-      **hybrid hit@10 0.84 → 0.74、recall 0.76 → 0.68**，根因是 Postgres 核心没有 BM25
-      （与 HNSW 无关，四组对照见 [`docs/adr/0004-向量存储后端.md`](docs/adr/0004-向量存储后端.md) 第五节），
-      所以 `cli eval --store pgvector --gate` 目前**不通过**（退出码 2）。
-      待决策项（装 ParadeDB 引真 BM25 / 跨引擎混用 / 另立基线）见该 ADR 第九节
+- [x] pgvector 的**检索质量对齐**（2026-10-11）：关键字路从 `ts_rank` 换成 ParadeDB
+      `pg_search` 的真 BM25（`USING paradedb` + `pdb.score()`），镜像从
+      `pgvector/pgvector:pg16` 换成 `paradedb/paradedb:0.26.1-pg16`（**仍是 PG16**，
+      已有数据目录原地上机、实测 18861 块一块不少）。结果：
+      `cli --store pgvector eval --top-k 10 --gate` **退出码 0**、
+      hybrid hit@10 **0.8600**（冻结基线 0.8400）、recall 0.7900、MRR 0.5377、nDCG 0.5710，
+      bm25-only hit@10 0.5400 → 0.7000，hybrid p50 120.1 → 72.6 ms。
+      关键字路 `EXPLAIN` 从 **42/50 条 `Seq Scan`（p50 49.98 ms）** 变成
+      **0/50（p50 8.82 ms）**。实现细节、结构对照矩阵、踩到的坑、中文与降级语义见
+      [`docs/adr/0004-向量存储后端.md`](docs/adr/0004-向量存储后端.md) 第十节。
+      ⚠️ 默认 DSN（127.0.0.1:5432）上那个容器还是旧镜像，所以不设
+      `KUBEDOCS_DATABASE_URL` 时它会走**带 `DEGRADED` 标记**的降级路（退出码 2）；
+      换镜像的命令与前置检查写在 `docker-compose.yml` 的 db 服务注释里
 - [ ] 精排（cross-encoder）用真实模型实测收益（里程碑 9）
 - [ ] 嵌入量化/ONNX 提速 + k6 压测 + P95/成本 SLO（里程碑 10）
 - [ ] Docker 全栈实测（受限于本机 Docker Hub 不可达）

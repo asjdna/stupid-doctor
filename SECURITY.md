@@ -21,7 +21,7 @@
 - clinic 域的知识卡片语料（第三方派生数据集，上游标注"仅用于学术研究"，
   见 `.gitignore:53-54`，**不入库**）；
 - 基础镜像与第三方依赖自身的漏洞（`Dockerfile` 用的是 `python:3.10-slim`、
-  `pgvector/pgvector:pg16`、`redis:7.4-alpine`）。
+  数据库用 `paradedb/paradedb:0.26.1-pg16`（PG16 + pgvector + pg_search）、`redis:7.4-alpine`）。
 
 **信任边界**：本项目**没有**认证层，因此当前的真实边界是**网络位置**——
 能连到 8080 端口的人就是"合法调用方"。见缺口 S-1。
@@ -259,7 +259,7 @@
      `KEY=` 把"没有密钥"伪装成"有密钥"。
 3. **`.env` 永不入库。** 它已被 `.gitignore:1-4`（`.env` / `.env.*` / `!.env.example`）覆盖；
    提交前请自己再确认一次（`git status --short` 里不应出现 `.env`）。
-   `docker-compose.yml:48-49` 用 `env_file: .env` 把密钥注入 api 容器——它不会被打印，
+   `docker-compose.yml:81-82` 用 `env_file: .env` 把密钥注入 api 容器——它不会被打印，
    但会出现在 `docker inspect` 的输出里，共享宿主机的场合要注意。
 4. **钱包护栏**：`KUBEDOCS_LLM_DAILY_BUDGET_USD` 现在覆盖 `/ask`、CLI `ask` **和
    `/chat` 的工具循环**（S-2 已修复）。但仍有两条要你自己加：
@@ -279,9 +279,9 @@
      `/chat` 回退到确定性图（红线与挂号仍可用），都不会崩（`api/app.py:644-661, 432-461`）。
 6. **数据合规**：`data/clinic/` 的知识卡片不入库、且上游标注"仅用于学术研究"。
    要用在真实问诊场景，**先自己解决该数据集的授权**，本仓库不代为授权。
-7. **公网部署前至少替换**：`docker-compose.yml:16` 的 Postgres 口令
-   （`kubedocs/kubedocs`）、`:89-90` 的 `NEXTAUTH_SECRET` / `SALT` 占位值。
-   compose 把 `5432` / `6379` / `8080` 直接映射到宿主机（`:21-22, 35-36, 54-55`），
+7. **公网部署前至少替换**：`docker-compose.yml:47` 的 Postgres 口令
+   （`kubedocs/kubedocs`）、`:122-123` 的 `NEXTAUTH_SECRET` / `SALT` 占位值。
+   compose 把 `5432` / `6379` / `8080` 直接映射到宿主机（`:54-55, 68-69, 87-88`），
    其中 Redis **没有设密码**。
 
 ---

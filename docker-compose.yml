@@ -1,7 +1,9 @@
-# 一条命令起全栈：db(pgvector) + cache(redis) + api
+# 一条命令起全栈：db(ParadeDB/pg_search) + cache(redis) + api
 #
-# ⚠️ 本文件尚未在本机实测（写它时本机还没装 Docker）。标记为「未验证」，不假装它能跑。
-#    装上 Docker 后第一件事就是 `docker compose up -d --build` 并跑 `pytest -m integration`。
+# ⚠️ 本文件的**运行**尚未在本机实测（`db` 服务只做过**等价演练**：同镜像 + 同卷 +
+#    同 `-c shared_preload_libraries=pg_search`，跑在独立容器/独立端口上，见
+#    docs/adr/0004 第十节；`docker compose up` 本身没跑，因为那会重建本机
+#    已有的 `kubedocs-db-1`）。标记为「未完整验证」，不假装它能跑。
 #
 # 版本都**钉死**：工业项目里 "latest" 会让半年后的自己无法复现。
 
@@ -9,14 +11,45 @@ name: kubedocs
 
 services:
   db:
-    # pgvector 官方镜像，Postgres 16
-    image: pgvector/pgvector:pg16
+    # 生产检索库：**ParadeDB 官方镜像** = Postgres 16 + pgvector + pg_search（真 BM25）。
+    #
+    # 为什么不再用 `pgvector/pgvector:pg16`：Postgres 核心只有 `ts_rank`（TF 加权，
+    # 无 IDF、无文档长度归一化——**不是 BM25**），而关键字路的排序质量就靠 BM25。
+    # 实测 hybrid hit@10：ts_rank 0.7400（低于冻结基线 0.8400）→ pg_search 0.8400
+    # （见 docs/adr/0004 第十节，含原始命令与输出）。
+    #
+    # 版本钉死（不用 latest，理由与文件头一致）：
+    #   · `0.26.1`：`USING paradedb` / `pdb.match_disjunction` / 表达式字段的 `alias=`
+    #     / `pdb.chinese_compatible('stemmer=english')` 都是这一版实测出来的语法，
+    #     换版本必须重跑 ADR 第十节那组数字；
+    #   · `pg16`：本机 `dbdata` 卷是 PG16 初始化的，PG 主版本之间数据目录不兼容——
+    #     换 PG17/18 就等于要求全量 dump/restore。
+    #
+    # 实测 2026-10-11：本镜像**沿用 pgvector:pg16 初始化的那个卷**起来后，
+    # 18861 块一块不少、无需 dump/restore（演练明细见 ADR 第十节）。
+    # ⚠️ 但本文件**没有**在 `kubedocs-db-1` 上跑过 `docker compose up -d db`
+    #（那会重建这个容器，而它里面那份索引是有价值的资产）。上机前的第一步是：
+    #   docker compose up -d db                                # 复用同一个卷
+    #   docker compose exec db psql -U kubedocs -d kubedocs -c 'select count(*) from k8s_docs.chunks'
+    # 换镜像后第一次构造 store 会自动补建 BM25 索引（幂等，见 PgVectorStore._setup_fts）。
+    image: paradedb/paradedb:0.26.1-pg16
+    # ⚠️ 这一行对**沿用已有数据目录**的场景是必需的：pg_search 是 preload 型扩展。
+    # 镜像自带的 `postgresql.conf.sample` 里已经写了 `shared_preload_libraries=...`
+    # （全新 initdb 因此自带，实测），但**已有数据目录用的是它自己那份 postgresql.conf**，
+    # 那里面没有——实测 `CREATE EXTENSION pg_search` 会直接报
+    # `pg_search must be loaded via shared_preload_libraries`。
+    # 显式传 `-c` 覆盖，两种数据目录（新建 / 沿用）都能起来。
+    # 代价：新库上会覆盖掉镜像默认的 `pg_cron,pg_stat_statements`——本仓库两处都没用
+    #（连 CREATE EXTENSION 都没做过），所以是有意为之。
+    command: ["postgres", "-c", "shared_preload_libraries=pg_search"]
     environment:
       POSTGRES_USER: kubedocs
       POSTGRES_PASSWORD: kubedocs
       POSTGRES_DB: kubedocs
-      # 中文/英文混排的全文检索：这里语料是英文，用 english 配置；
-      # 换中文语料时要装 zhparser/pg_jieba 或改用应用侧分词（见 docs/adr）
+      # 中文/英文混排的全文检索：这里语料是英文，BM25 侧的分词器固定为
+      # `pdb.chinese_compatible('stemmer=english')`（英文 Snowball 词干 + 中文单字，
+      # 见 src/kubedocs/store/pgvector_store.py 的模块文档）；换中文语料时靠
+      # 应用层归一化器（KUBEDOCS_NORMALIZER=chinese）在入库/查询两侧切词。
       POSTGRES_INITDB_ARGS: "--encoding=UTF8 --locale=C"
     ports:
       - "5432:5432"
