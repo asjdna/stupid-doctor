@@ -215,6 +215,18 @@ def check_gate(base: dict, current: dict, *, allow_drift: bool) -> list[str]:
             f"嵌入模型变了（{base.get('embedding_model')} -> {current['embedding_model']}），向量空间不可比"
         )
         return fails
+    # top_k 必须与基线一致，否则就是拿 hit@k 去比基线的 hit@10。而且方向不对称：
+    # hit 随 k 单调上升，于是「把 --top-k 改大」就能让闸门变绿，把真实的指标退化盖过去
+    # （实测 `--top-k 20 --gate` 曾以 hit@20=0.9000 通过了绑定 top_k=10 的基线）。
+    # 基线里存了 top_k，这里必须校验，不能只在下面拼错误信息时引用它。
+    b_top_k = int(base.get("top_k", 0))
+    c_top_k = int(current["top_k"])
+    if b_top_k and b_top_k != c_top_k:
+        fails.append(
+            f"top_k 不一致（基线 top_k={b_top_k}，本次 top_k={c_top_k}）："
+            f"hit@k 的 k 不同则指标不可比，请用与基线一致的 --top-k"
+        )
+        return fails
     b_chunks = int(base.get("n_chunks", 0))
     c_chunks = int(current["n_chunks"])
     if b_chunks and abs(c_chunks - b_chunks) / b_chunks > CORPUS_DRIFT_TOL:

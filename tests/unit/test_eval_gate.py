@@ -166,6 +166,16 @@ class TestGate:
         fails = _hard(check_gate(_base(), _current(embedding_model="m2"), allow_drift=False))
         assert any("嵌入模型变了" in f for f in fails)
 
+    def test_top_k_change_refuses_comparison(self):
+        """拿 hit@20 去比基线的 hit@10 会**变绿**（hit 随 k 单调上升），
+        等于给了「把 --top-k 改大以掩盖退化」这条后门——必须拒绝。"""
+        fails = _hard(check_gate(_base(), _current(top_k=20), allow_drift=False))
+        assert any("top_k 不一致" in f for f in fails)
+
+    def test_same_top_k_still_passes(self):
+        """上一条不能把正常路径一起打死。"""
+        assert _hard(check_gate(_base(), _current(top_k=10), allow_drift=False)) == []
+
     def test_corpus_drift_refused_by_default(self):
         fails = _hard(check_gate(_base(), _current(n_chunks=2000), allow_drift=False))
         assert any("索引规模变化" in f for f in fails)
