@@ -28,6 +28,8 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Protocol, runtime_checkable
 
 if TYPE_CHECKING:  # 只用于类型标注，避免 domains → store/retrieval 的循环导入
+    from collections.abc import Callable
+
     from kubedocs.config import Settings
     from kubedocs.embed import Embedder
     from kubedocs.ingest import IngestReport
@@ -48,6 +50,14 @@ class DomainPack(Protocol):
     normalizer_name: str
     """该域使用的归一化器名（`identity` / `chinese`）。必须与域内语言一致。"""
 
+    embedding_model: str
+    """该域使用的嵌入模型标识。写进索引元信息，也是换域时必须一起换的东西。"""
+
+    embedding_dim: int
+    """该域嵌入向量的维度。**必须与 `embedding_model` 的实际输出一致**：
+    英文 bge-small-en-v1.5 是 384 维，中文 bge-small-zh-v1.5 是 512 维。
+    两者混用不会报错，只会让向量矩阵与查询向量乘不上——所以这里显式声明。"""
+
     def corpus_root(self, settings: Settings) -> Path:
         """该域的语料根目录。"""
 
@@ -59,9 +69,14 @@ class DomainPack(Protocol):
         *,
         rebuild: bool = False,
         limit_files: int | None = None,
-        progress: object = None,
+        batch_files: int = 60,
+        progress: Callable[[str], None] | None = None,
     ) -> IngestReport:
-        """把该域语料灌入索引。返回摄取报告（内核据此打印统计）。"""
+        """把该域语料灌入索引。返回摄取报告（内核据此打印统计）。
+
+        `batch_files` 的含义由域自己解释（k8s 域是"每批提交的文件数"，
+        clinic 域是"每次编码的卡片数"）——内核只负责把它传下去。
+        """
 
     def retriever(self, store: Store, embedder: Embedder, settings: Settings) -> HybridRetriever:
         """构造该域的检索器。域不同，检索器内部配置可以不同。"""
@@ -108,6 +123,8 @@ class DomainRegistry:
                 "name": p.name,
                 "description": p.description,
                 "normalizer": p.normalizer_name,
+                "embedding_model": p.embedding_model,
+                "embedding_dim": p.embedding_dim,
                 "eval_sets": [str(x) for x in p.eval_sets()],
             }
             for p in (cls._packs[n] for n in cls.names())

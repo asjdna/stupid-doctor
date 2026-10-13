@@ -25,8 +25,11 @@ endif
 # POSIX 用法不受影响：Linux/macOS 上 $(OS) != Windows_NT，PY 取 `.venv/bin/python`，
 # 与原先回退链最终命中的是同一个文件（旧写法只是靠“第一条命令必然失败”绕到它）。
 RUN = $(PY)
-# 受限网络下模型下载源与离线加载（模型已缓存后必须离线，否则联网校验会挂死）
-HF := --hf-endpoint https://hf-mirror.com
+# 受限网络下模型下载源与离线加载。
+# `--hf-offline` 是**必需**的，不是可选优化：README「环境约束」实测"已缓存模型的联网校验
+# 会**挂死 >10 分钟**"，而离线载入 0.8s。此前 eval / ingest / search 只带了 `--hf-endpoint`，
+# 于是照着 Makefile 跑会在本机卡住——Makefile 与 README 的命令因此是不一致的。
+HF := --hf-endpoint https://hf-mirror.com --hf-offline
 
 .PHONY: help install check lint fmt type refs test lock corpus cstats ingest ingest-hash search stats \
         gold eval eval-baseline up down logs clean

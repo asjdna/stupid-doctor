@@ -80,12 +80,39 @@ def strip_html(body: str) -> str:
     return "\n".join(out)
 
 
+def _fence_open_at(text: str, offset: int) -> bool:
+    """`offset` 处是否处于代码围栏内部（按行统计围栏标记的奇偶）。
+
+    只看 offset 之前的行：`offset` 正好落在某个围栏行的开头时，那一行还没生效，
+    所以"从一个围栏行开头开始的块"是合法的（它带着完整的 ```）。
+    """
+    in_fence = False
+    pos = 0
+    for line in text.splitlines(keepends=True):
+        if pos >= offset:
+            break
+        if _CODE_FENCE_RE.match(line):
+            in_fence = not in_fence
+        pos += len(line)
+    return in_fence
+
+
 def _safe_overlap_tail(block: str, overlap: int) -> str:
     """取块尾用于重叠，**并对齐到安全边界**。
 
     按字符硬切会出现 `"...rip between"`、`"delete deployment -l app=redis"` 这种
     从词中间、甚至从代码块中间开始的块（真实语料实测）。这里优先对齐到最近的换行，
     其次空格；都对不齐就放弃重叠（少一点上下文，好过给出半截代码）。
+
+    ## 为什么还要判"是否在代码围栏内部"
+
+    只对齐换行/空格**不够**：围栏内的 YAML 每行都是合法断点，于是尾巴可能整段是代码，
+    下一块就以半截 `verbs:` / `- apiGroups:` 开头（开头的 ``` 留在上一块里）。
+    实测全量语料：**18861 块里有 581 块（3.08%）围栏标记数为奇数**；把 overlap 设为 0
+    只剩 2 块（正是源文档自身围栏不配对的那 2 篇）——即 579 块是重叠尾段造出来的。
+
+    这与本模块开头写的不变量直接冲突（"永不切进代码围栏内部"），
+    所以这里把"围栏内"也当作不安全的断点：**宁可放弃重叠**。
     """
     if overlap <= 0 or not block:
         return ""
@@ -93,7 +120,11 @@ def _safe_overlap_tail(block: str, overlap: int) -> str:
     for sep in ("\n", " "):
         idx = tail.find(sep)
         if idx != -1 and idx < len(tail) - 1:
-            return tail[idx + 1 :]
+            start = len(block) - overlap + idx + 1
+            if _fence_open_at(block, start):
+                # 断点落在代码块内部：换下一个候选边界再试；都落在围栏里就放弃重叠。
+                continue
+            return block[start:]
     return ""
 
 

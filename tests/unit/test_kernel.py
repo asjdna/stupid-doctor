@@ -25,6 +25,16 @@ def _book_intent(text: str) -> bool:
     return any(w in text for w in BOOK_WORDS)
 
 
+def _confirm_intent(text: str) -> bool:
+    """打桩的"用户确认了挂号"判定。
+
+    内核测试刻意不 import 域包（域包有自己的词表与否定判定），所以这里只要
+    一个"同意/不同意"的最小实现，用来验证**控制流**：
+    没有确认就绝不能走到 `book` 节点。
+    """
+    return any(w in text for w in ("确认", "是", "好", "嗯"))
+
+
 def _evidence(
     symptom: str, *, present: bool = True, source: EvidenceSource = EvidenceSource.VOLUNTEERED
 ) -> SymptomEvidence:
@@ -44,6 +54,7 @@ def _deps(**over: Any) -> ClinicDeps:
         answer=lambda q, state: {"text": "打桩回答 [1]", "citations": [{"index": 1}]},
         book=lambda state: {"ticket_no": "T1", "queue_no": 1, "department": "心内科"},
         wants_booking=_book_intent,
+        confirm_booking=_confirm_intent,
         wants_emergency_care=lambda text: "120" in text,
         emergency_advice=lambda word: f"请立即拨打120（{word}）",
         emergency_menu=lambda word: f"情况紧急（{word}）：① 120 ② 继续",
@@ -94,6 +105,46 @@ class TestRedLineForcedEdge:
         state = agent.start("我最近有点累", thread_id="t1")
         assert state["red_line"] is None
         assert state["status"] != "emergency"
+
+    def test_red_line_is_checked_again_on_resume_turns(self):
+        """**续答轮也要过红线**：用户完全可能在回答追问时才说出胸痛。
+
+        缺陷形态（修复前）：`node_redline` 只看首轮的 `question`，而 resume 轮
+        被直接送回 `observe`——于是"我现在胸痛，喘不上气"写在追问的回答里
+        永远不会触发急诊分支，而文档宣称"红线在两条路径里都是进循环之前的确定性判定"。
+        """
+        agent = ClinicAgent(
+            _deps(
+                check_red_line=lambda text: _FakeHit() if "胸痛" in text else None,
+                next_question=lambda s, st: "有没有发热？",
+            )
+        )
+        agent.start("我有点不舒服", thread_id="t1")
+        assert agent.pending_question(thread_id="t1") == "有没有发热？"
+        # 红线症状出现在**回答**里
+        state = agent.resume("我现在胸痛，喘不上气", thread_id="t1")
+        assert state["red_line"] is not None, "续答轮说出的红线症状没有被识别"
+        assert state["status"] == "emergency"
+        assert "120" in state["answer"]["text"]
+
+    def test_red_line_on_resume_keeps_the_new_symptoms_as_evidence(self):
+        """转急诊不能丢掉这一轮说出的症状——病历要留下。"""
+        seen: list[str] = []
+
+        def observe(text: str, state: dict) -> list[SymptomEvidence]:
+            seen.append(text)
+            return [_evidence("胸痛")]
+
+        agent = ClinicAgent(
+            _deps(
+                observe=observe,
+                check_red_line=lambda text: _FakeHit() if "胸痛" in text else None,
+                next_question=lambda s, st: "有没有发热？",
+            )
+        )
+        agent.start("我有点不舒服", thread_id="t1")
+        agent.resume("胸痛", thread_id="t1")
+        assert seen[-1] == "胸痛", "红线命中时 observe 用的是首轮原话，而不是这一轮的输入"
 
 
 # ===========================================================================
@@ -175,15 +226,39 @@ class TestBoundedQuestioning:
 
 
 # ===========================================================================
-# 挂号分支
+# 挂号分支：**意图成立不等于可以下单**
 # ===========================================================================
 class TestBookingBranch:
-    def test_user_requesting_booking_goes_to_book_node(self):
+    def test_booking_requires_an_explicit_confirmation(self):
+        """关键词命中只证明"提到了挂号"，占号还要一次独立确认。
+
+        缺陷形态（修复前）：`wants_booking` 命中就直接进 `book`，
+        于是"我不想挂号"也会占掉一个真实号源。
+        """
         agent = ClinicAgent(_deps())
         state = agent.start("帮我挂个号", thread_id="t1")
-        assert state["status"] == "done"
-        assert state["ticket"]["ticket_no"] == "T1"
-        assert state["stop_reason"] == "已挂号"
+        # 第一步**必须停在确认**，而不是已经出了票
+        assert state["ticket"] == {}
+        assert "确认" in (agent.pending_question(thread_id="t1") or "")
+        # 明确同意后才真的下单
+        done = agent.resume("确认", thread_id="t1")
+        assert done["status"] == "done"
+        assert done["ticket"]["ticket_no"] == "T1"
+        assert done["stop_reason"] == "已挂号"
+
+    def test_declining_the_confirmation_books_nothing(self):
+        agent = ClinicAgent(_deps())
+        agent.start("帮我挂个号", thread_id="t1")
+        state = agent.resume("不用了，我不想挂号", thread_id="t1")
+        assert state["ticket"] == {}, "用户拒绝了确认却仍然占了号"
+        assert state["status"] != "booking"
+
+    def test_confirmation_callback_absent_means_no_booking(self):
+        """没接确认回调 = 不挂号。副作用工具的默认行为必须是拒绝。"""
+        agent = ClinicAgent(_deps(confirm_booking=lambda text: False))
+        agent.start("帮我挂个号", thread_id="t1")
+        state = agent.resume("确认", thread_id="t1")
+        assert state["ticket"] == {}
 
     def test_booking_is_not_triggered_by_unrelated_text(self):
         called: list[int] = []
@@ -192,6 +267,20 @@ class TestBookingBranch:
         )
         agent.start("我最近有点累", thread_id="t1")
         assert called == []
+
+    def test_negative_booking_intent_never_reaches_confirmation(self):
+        """用户否认挂号时，连确认这一步都不该出现（更不该占号）。"""
+        called: list[int] = []
+        agent = ClinicAgent(
+            _deps(
+                wants_booking=lambda text: False,
+                book=lambda state: called.append(1) or {},
+                next_question=lambda s, st: None,
+            )
+        )
+        state = agent.start("帮我挂个号", thread_id="t1")
+        assert called == []
+        assert state["ticket"] == {}
 
     @pytest.mark.parametrize("text", ["帮我挂号", "帮我挂个号", "我想预约", "能不能取号"])
     def test_booking_intent_variants_all_trigger(self, text):
@@ -202,7 +291,9 @@ class TestBookingBranch:
         """
         assert _book_intent(text) is True
         agent = ClinicAgent(_deps())
-        assert agent.start(text, thread_id="t1")["ticket"]["ticket_no"] == "T1"
+        agent.start(text, thread_id="t1")
+        assert "确认" in (agent.pending_question(thread_id="t1") or "")
+        assert agent.resume("确认", thread_id="t1")["ticket"]["ticket_no"] == "T1"
 
     def test_naive_substring_matching_would_miss_the_variant(self):
         """反证：只写「挂号」一个词就会漏掉「挂个号」——把这条固定住，防止有人"简化"词表。"""

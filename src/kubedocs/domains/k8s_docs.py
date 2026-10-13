@@ -8,12 +8,16 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from kubedocs.config import Settings
 from kubedocs.embed import Embedder
 from kubedocs.ingest import IngestReport, ingest
 from kubedocs.retrieve.hybrid import HybridRetriever
 from kubedocs.store.base import Store
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
 
 GOLD = Path("data/eval/retrieval_gold.jsonl")
 
@@ -23,6 +27,8 @@ class K8sDocsPack:
     description = "Kubernetes 官方文档检索问答：集群概念、kubectl 用法、资源清单字段、运维操作（英文语料）"
     # 英文：FTS5 的 porter + unicode61 已经够用，不需要预分词
     normalizer_name = "identity"
+    embedding_model = "BAAI/bge-small-en-v1.5"
+    embedding_dim = 384
 
     def corpus_root(self, settings: Settings) -> Path:
         return settings.corpus_path
@@ -35,9 +41,18 @@ class K8sDocsPack:
         *,
         rebuild: bool = False,
         limit_files: int | None = None,
-        progress: object = None,
+        batch_files: int = 60,
+        progress: Callable[[str], None] | None = None,
     ) -> IngestReport:
-        return ingest(store, embedder, settings, rebuild=rebuild, limit_files=limit_files, progress=progress)  # type: ignore[arg-type]
+        return ingest(
+            store,
+            embedder,
+            settings,
+            rebuild=rebuild,
+            limit_files=limit_files,
+            batch_files=batch_files,
+            progress=progress,
+        )
 
     def retriever(self, store: Store, embedder: Embedder, settings: Settings) -> HybridRetriever:
         return HybridRetriever(store, embedder, settings)

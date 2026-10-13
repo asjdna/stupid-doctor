@@ -96,7 +96,8 @@ jobs:
       # 是两道不同的门（前者管规则，后者管排版），必须都在。
       # 行尾由 pyproject 的 `[tool.ruff.format] line-ending = "lf"` 定死，
       # 保证 Windows 开发机与 ubuntu runner 判定一致。
-      # 注意：`make check` 里**没有**这一步（见 CONTRIBUTING 第 2 节的表）。
+      # 注意：`make check` 里**也有**这一步（`check: lint fmt type test refs` 里的 `fmt`），
+      # 见 CONTRIBUTING 第 2 节的表。这行注释原先写的是"没有"，与 Makefile 已经不一致。
       - name: ruff format --check（阻塞）
         run: ruff format --check .
       - name: mypy（阻塞）
@@ -204,10 +205,12 @@ jobs:
       # 1.9 万块重灌一遍（分钟级 → 十分钟级），而它验证的是"镜像完整性"、与质量闸门无关。
       # 生产后端的**契约**已由 quality job 里那 30 条 pgvector 用例覆盖（test_pgvector_store.py
       # 12 条 + test_store_contract.py 的 pgvector 参数 18 条）。pgvector 的**指标**对照冻结基线
-      # 是已知且刻意保留的红（README 里程碑 8 / ADR-0004 第 9 节），不能塞进这个 job 假装通过。
+      # **已经不是红的**：2026-10-11 关键字路换成 pg_search 真 BM25 后 hit@10 = 0.8600、退出码 0
+      # （ADR-0004 第十节）。这里仍然**不**把 pgvector 灌进这个 job——那要给本 job 再起一条
+      # Postgres service 并每次重灌 1.9 万块，而它验证的是镜像完整性、与质量闸门无关。
       - name: 质量闸门（指标退化 → 退出码 2 → CI 红）
         # 比 hit@10 / mrr@10（容差各 0.02），并拒绝跨标注集/跨模型/跨语料的比较。
         # 本机实测（同一份冻结索引）：`eval --top-k 10 --gate` → hybrid hit@10 = 0.8400，退出码 0。
-        # 负例（闸门真的会红）：`eval --top-k 10 --gate --store pgvector` → hit@10 0.8400 → 0.7400，
-        # 退出码 2。
+        # 负例（闸门真的会红）：`eval --top-k 20 --gate`（拿 hit@20 去比基线的 hit@10）→ 退出码 2；
+        # 缺字段的旧格式基线（没有 top_k）同样退出码 2——**缺字段不等于"不用比"**。
         run: python -m kubedocs.cli eval --top-k 10 --gate

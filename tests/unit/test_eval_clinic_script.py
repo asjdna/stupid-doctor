@@ -46,12 +46,16 @@ def script() -> ModuleType:
 
 @pytest.fixture
 def gold(tmp_path: Path) -> Path:
-    """最小金标集：一条正常话（红线不触发）+ 一条分诊用例。
+    """最小金标集：一条红线正例 + 一条正常话 + 一条分诊用例。
 
-    只用两条，是为了把被验证的东西锁在"闸门判据"上，而不是语料规模上。
+    只用三条，是为了把被验证的东西锁在"闸门判据"上，而不是语料规模上。
+    **红线正例必须存在**：分红线的召回是安全属性（容差 0），
+    一个没有正例的用例集根本没检验它——`gate_failures()` 因此把"红线未评测"
+    也判为失败（见 `TestRedLineMustBeEvaluated`）。
     """
     path = tmp_path / "gold.jsonl"
     path.write_text(
+        '{"id": "r1", "kind": "red_line", "text": "我现在胸痛", "expect_red_line": true}\n'
         '{"id": "s1", "kind": "safe_normal", "text": "今天天气不错", "expect_red_line": false}\n'
         '{"id": "t1", "kind": "triage_department", "text": "我咳嗽", "expect_department": "呼吸内科"}\n',
         encoding="utf-8",
@@ -134,3 +138,66 @@ class TestJsonDoesNotBypassTheGate:
         captured = capsys.readouterr()
         assert "闸门：不通过" in captured.out
         assert captured.err == ""
+
+
+class TestRedLineMustBeEvaluated:
+    """**空集不得满足安全闸门**（缺陷回归）。
+
+    缺陷形态：`redline_recall` 在分母为 0 时返回 **1.0**，于是删掉用例集里
+    全部 `expect_red_line=true` 的用例之后，输出是
+    「红线召回 100.00% (TP=0 FN=0)」——一个"没有检验任何红线"的运行拿到了安全通过。
+    """
+
+    def _negative_only_gold(self, tmp_path: Path) -> Path:
+        path = tmp_path / "no-redline.jsonl"
+        path.write_text(
+            '{"id": "s1", "kind": "safe_normal", "text": "今天天气不错", "expect_red_line": false}\n'
+            '{"id": "t1", "kind": "triage_department", "text": "我咳嗽", "expect_department": "呼吸内科"}\n',
+            encoding="utf-8",
+        )
+        return path
+
+    def test_no_positive_case_fails_the_gate(self, script, tmp_path, monkeypatch, capsys):
+        _stub_triage(script, monkeypatch, top="呼吸内科")  # 分诊满分，排除它的干扰
+        gold = self._negative_only_gold(tmp_path)
+        code = _run(script, gold, tmp_path, "--gate")
+
+        out = capsys.readouterr().out
+        assert code == 2, "没有红线正例的运行不该通过安全闸门"
+        assert "红线未评测" in out
+
+    def test_recall_is_none_when_the_denominator_is_empty(self):
+        from kubedocs.evaluation.clinic import ClinicCase, evaluate_redline
+
+        cases = [ClinicCase(id="s1", kind="safe_normal", text="今天天气不错", expect_red_line=False)]
+        report = evaluate_redline(cases)
+        assert report.redline_recall is None, "空分母必须返回 None，而不是伪装成 100%"
+
+
+class TestBaselineIsBoundToTheGoldSet:
+    """clinic 基线也必须绑定金标指纹（此前只存指标，换尺子无人察觉）。"""
+
+    def test_baseline_records_the_gold_hash_and_case_count(self, script, gold, tmp_path):
+        code = int(
+            script.main(["--gold", str(gold), "--baseline", str(tmp_path / "b.json"), "--write-baseline"])
+        )
+        assert code == 0
+        payload = json.loads((tmp_path / "b.json").read_text(encoding="utf-8"))
+        assert payload["gold_sha256"], "基线没有金标指纹"
+        assert payload["n_cases"] == 2, "红线用例数（1 正 + 1 负）应被记进基线"
+
+    def test_changed_gold_is_refused_not_silently_compared(self, script, gold, tmp_path, monkeypatch, capsys):
+        baseline = tmp_path / "b.json"
+        script.main(["--gold", str(gold), "--baseline", str(baseline), "--write-baseline"])
+
+        # 改掉一把"尺子"（换掉那条正常话）后，闸门必须拒绝比较
+        changed = tmp_path / "changed.jsonl"
+        changed.write_text(
+            gold.read_text(encoding="utf-8").replace("今天天气不错", "今天天气很好"),
+            encoding="utf-8",
+        )
+        _stub_triage(script, monkeypatch, top="呼吸内科")
+        code = int(script.main(["--gold", str(changed), "--baseline", str(baseline), "--gate"]))
+        out = capsys.readouterr().out
+        assert code == 2
+        assert "标注集已变更" in out

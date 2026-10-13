@@ -32,12 +32,14 @@ import os
 import re
 import threading
 import time
-from collections.abc import Sequence
+from collections.abc import Iterator, Sequence
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Protocol
 
 from kubedocs.config import Settings
+from kubedocs.observability import observe_llm_call
 from kubedocs.retrieve.hybrid import HybridRetriever, SearchResult
 from kubedocs.store.base import ChunkHit
 
@@ -54,7 +56,11 @@ SYSTEM_PROMPT = """你是一个 Kubernetes 官方文档助手。严格遵循以�
 5. 回答用与提问相同的语言，简洁分点，不要复述全部原文。"""
 
 _CONTEXT_HEADER_RE = re.compile(r"^\[[^\]]*\]\s*\n+")
-_MARKER_RE = re.compile(r"\[(\d{1,3})\]")
+# 引用标记 `[n]`。位数**不设上限**：`\d{1,3}` 会漏掉 `[1234]`，
+# 而漏掉就意味着一个打不开的引用**静默留在回答里**（实测：`[1234]` 既不被剥除，
+# 也不触发"没有任何引用"的告警）。这里的判据只有"是否 ≤ 提供的段数"，
+# 所以正则不该替我们提前截断。
+_MARKER_RE = re.compile(r"\[(\d+)\]")
 
 
 # --------------------------------------------------------------------------- 数据结构
@@ -272,14 +278,57 @@ def _lock_for(path: Path) -> threading.Lock:
         return lock
 
 
+_SPEND_PENDING: dict[str, float] = {}
+"""在途调用已预留的金额（按账本路径）。用来把"正在花但还没记上"的钱算进已用量。"""
+
+
+def _pending_for(path: Path) -> float:
+    key = str(path.resolve()) if path.is_absolute() else str(path)
+    with _SPEND_LOCKS_GUARD:
+        return _SPEND_PENDING.get(key, 0.0)
+
+
+def _add_pending(path: Path, delta: float) -> None:
+    key = str(path.resolve()) if path.is_absolute() else str(path)
+    with _SPEND_LOCKS_GUARD:
+        _SPEND_PENDING[key] = max(0.0, _SPEND_PENDING.get(key, 0.0) + delta)
+
+
+def _atomic_replace(tmp: Path, dest: Path) -> None:
+    """`os.replace` 的 Windows 友好版本。
+
+    **为什么不能直接调 `os.replace`**：Windows 上若目标文件此刻正被**任何**其他
+    句柄打开（另一个进程在读、编辑器打开着、杀毒软件在扫描），替换会以
+    `PermissionError` 失败——POSIX 没有这个语义（那里 rename 对已打开文件是安全的）。
+    本项目的开发机是 Windows（`Makefile` 里专门处理过 cmd 与 venv 路径），
+    所以这里重试几次；仍然失败则退回"直接重写"，并在日志里说清楚
+    （退路不是原子的，但比让一次记账直接抛异常更好）。
+    """
+    for attempt in range(5):
+        try:
+            os.replace(tmp, dest)
+            return
+        except PermissionError:
+            time.sleep(0.01 * (attempt + 1))
+    logger.warning("原子替换 %s 失败（目标被占用？）：退回直接重写", dest)
+    dest.write_text(tmp.read_text(encoding="utf-8"), encoding="utf-8")
+    tmp.unlink(missing_ok=True)
+
+
 class DailyBudget:
     """按天累计 LLM 花费，落盘成一个小 JSON 文件（可读、可手改、可审计）。
 
     ## 并发边界（如实写清，别高估这个闸门）
 
     - **进程内是原子的**：读-改-写整段持 `threading.Lock`（按文件路径注册）。
-      FastAPI 的同步端点跑在线程池里，所以"两个并发请求同时读同一个文件、
-      各自加完再写回"这种丢更新是真实存在的场景，这把锁挡的就是它。
+      注意"读"也包括在内——只给写加锁是不够的：`record()` 曾经用
+      `write_text`（先截断再写），并发读者会读到空文件 ⇒ `JSONDecodeError`
+      ⇒ 当作"今天没花过" ⇒ **闸门放行**（fail-open）。现在写入是
+      `tmp` + `os.replace` 的原子替换，读取也在锁内，这条路走不通了。
+    - **`check()` 与 `record()` 之间的窗口要预留**：两个方法各是一个临界区，
+      N 个并发请求会在 spent 还没变时全部通过 `check()`，然后各自 `record()`，
+      上限被冲过 N 倍。所以调用方应当用 `reserve()`（见它的说明），
+      它把"在途调用"按保守金额计入本次判断。
     - **跨进程不是原子的**：多 worker / 多副本各持自己的锁、各写各的，
       互相看不见 ⇒ 真实上限是 `副本数 × 日预算`。**没有修**，理由是取舍可核：
       · 跨进程锁要按平台分叉导入（`fcntl.flock` / `msvcrt.locking`），或用
@@ -294,19 +343,29 @@ class DailyBudget:
     """
 
     def __init__(
-        self, path: Path, limit_usd: float, unpriced_usd: float = UNPRICED_CALL_FALLBACK_USD
+        self,
+        path: Path,
+        limit_usd: float,
+        unpriced_usd: float = UNPRICED_CALL_FALLBACK_USD,
+        reserve_usd: float | None = None,
     ) -> None:
         self.path = path
         self.limit = limit_usd
         self.unpriced_usd = unpriced_usd
+        # 预留金额默认取"算不出价"的保守上限：调用前不知道真实花费，
+        # 用一个偏高的常数比用 0 安全（用 0 预留等于没预留）。
+        self.reserve_usd = unpriced_usd if reserve_usd is None else reserve_usd
 
     def _load(self) -> dict[str, float]:
+        """读账本。**调用方必须已持 `_lock_for(self.path)`**（见类文档）。"""
         if not self.path.exists():
             return {}
         try:
             data: dict[str, float] = json.loads(self.path.read_text(encoding="utf-8"))
         except (json.JSONDecodeError, OSError):
-            # 文件坏了不该让服务整体不可用；保守做法是当作"今天没花过"
+            # 文件被外部改坏（不是并发写：并发写已由原子替换消除）不该让服务整体不可用；
+            # 保守做法是当作"今天没花过"，同时留下 warning 以便被发现。
+            logger.warning("LLM 账本 %s 无法解析，本次按 0 计（请检查该文件）", self.path)
             return {}
         out: dict[str, float] = {}
         for key, value in data.items():
@@ -318,32 +377,66 @@ class DailyBudget:
         return out
 
     def spent_today(self) -> float:
-        return float(self._load().get(self._today(), 0.0))
+        with _lock_for(self.path):
+            return float(self._load().get(self._today(), 0.0))
 
     def unpriced_calls_today(self) -> int:
         """今日"算不出价"的调用次数（其金额已按上限计入，这里只用于可见性）。"""
-        return int(self._load().get(self._today() + _UNPRICED_SUFFIX, 0.0))
+        with _lock_for(self.path):
+            return int(self._load().get(self._today() + _UNPRICED_SUFFIX, 0.0))
+
+    def pending_usd(self) -> float:
+        """当前在途（已预留、尚未记账）的金额。"""
+        return _pending_for(self.path)
 
     def check(self, estimated_usd: float = 0.0) -> None:
         """到达上限即拒绝**新的**调用（不是等超了才拒）。
 
         边界写清楚：「已达上限」用 `>=`，「加上本次预估会超」用 `>`。
         否则 spent 恰好等于 limit 时会放行一次调用，实际花掉的钱就超过上限了。
+        判断里还包含**在途预留**（`pending_usd()`），否则并发请求会一起冲过上限。
         """
+        with _lock_for(self.path):
+            self._check_locked(estimated_usd)
+
+    def _check_locked(self, estimated_usd: float) -> None:
         if self.limit <= 0:
             return
-        spent = self.spent_today()
-        if spent >= self.limit or spent + estimated_usd > self.limit:
-            unpriced = self.unpriced_calls_today()
+        spent = float(self._load().get(self._today(), 0.0))
+        pending = _pending_for(self.path)
+        used = spent + pending
+        if used >= self.limit or used + estimated_usd > self.limit:
+            unpriced = int(self._load().get(self._today() + _UNPRICED_SUFFIX, 0.0))
             tail = (
                 f"；今天另有 {unpriced} 次调用算不出价，已按每次 ${self.unpriced_usd:.2f} 的上限保守计入"
                 if unpriced
                 else ""
             )
+            inflight = f"（含在途预留 ${pending:.4f}）" if pending else ""
             raise BudgetExceeded(
-                f"今日 LLM 花费 ${spent:.4f} 已达上限 ${self.limit:.2f}"
+                f"今日 LLM 花费 ${spent:.4f}{inflight} 已达上限 ${self.limit:.2f}"
                 f"（本次预估还需 ${estimated_usd:.4f}）{tail}"
             )
+
+    @contextmanager
+    def reserve(self, estimated_usd: float | None = None) -> Iterator[None]:
+        """为一次模型调用**预留**额度：进入时检查并占住，退出时释放。
+
+        存在的理由：`check()` 与 `record()` 是两个独立的临界区。
+        实测反例——上限 1.0、3 个线程在 spent=0 时**全部**通过 `check()`，
+        随后两次 `record(0.6)` ⇒ spent=1.2，上限被冲过。
+        预留把"在途调用"也算作已用量，这条路径就堵住了。
+
+        预留额不知道真实花费，所以按 `reserve_usd`（默认 = 算不出价的上限）保守占额。
+        """
+        amount = self.reserve_usd if estimated_usd is None else estimated_usd
+        with _lock_for(self.path):
+            self._check_locked(amount)
+        _add_pending(self.path, amount)
+        try:
+            yield
+        finally:
+            _add_pending(self.path, -amount)
 
     def record(self, usd: float, *, priced: bool = True) -> float:
         """记一次调用，返回今天新的累计值。
@@ -370,7 +463,11 @@ class DailyBudget:
                 )
             payload[today] = new_total = round(data.get(today, 0.0) + charge, 6)
             self.path.parent.mkdir(parents=True, exist_ok=True)
-            self.path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+            # **原子替换**：`write_text` 会先截断，并发读者可能读到空文件，
+            # 而空文件被当作"今天没花过" ⇒ 闸门 fail-open（实测复现过）。
+            tmp = self.path.with_name(self.path.name + ".tmp")
+            tmp.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+            _atomic_replace(tmp, self.path)
             return new_total
 
     @staticmethod
@@ -494,7 +591,7 @@ class Answerer:
         self.llm = llm
         self.settings = settings
         self.budget = budget or DailyBudget(
-            settings.index_path / "llm_spend.json",
+            settings.llm_spend_path,
             settings.llm_daily_budget_usd,
             unpriced_usd=settings.llm_unpriced_call_usd,
         )
@@ -535,14 +632,25 @@ class Answerer:
             f"【文档片段】\n{context}\n\n【问题】\n{question}\n\n请依据上面的片段作答，并带上 [编号] 引用。"
         )
         try:
-            self.budget.check()
+            # 用 `reserve()` 而不是 `check()`：预留把"这次在途调用"按保守金额算进已用量，
+            # 否则并发请求会在 spent 还没变时一起通过检查、再各自记账，把上限冲过 N 倍。
+            # 记账也放在预留区间内，让"预留 → 记账"之间没有新的空隙。
+            with self.budget.reserve():
+                result = self.llm.complete(SYSTEM_PROMPT, user)
+                # 定价为 0 的调用不必写文件（没有账要记）；但**算不出价**的必须记——
+                # 否则"未知 = 免费"这条缺陷就从这个判断里溜回来了。
+                if result.cost_usd or not result.cost_priced:
+                    self.budget.record(result.cost_usd, priced=result.cost_priced)
+                # 指标与账本同步更新：账本是事实来源，指标是可被抓取的视图。
+                observe_llm_call(
+                    cost_usd=result.cost_usd,
+                    priced=result.cost_priced,
+                    budget_usd=self.settings.llm_daily_budget_usd,
+                )
         except BudgetExceeded as e:
             ans.refused = True
             ans.refusal_reason = str(e)
             return ans
-
-        try:
-            result = self.llm.complete(SYSTEM_PROMPT, user)
         except LLMUnavailable as e:
             ans.refused = True
             ans.refusal_reason = str(e)
@@ -562,10 +670,6 @@ class Answerer:
         ans.completion_tokens = result.completion_tokens
         ans.cost_usd = result.cost_usd
         ans.degraded.extend(problems)
-        # 定价为 0 的调用不必写文件（没有账要记）；但**算不出价**的必须记——
-        # 否则"未知 = 免费"这条缺陷就从这个判断里溜回来了。
-        if result.cost_usd or not result.cost_priced:
-            self.budget.record(result.cost_usd, priced=result.cost_priced)
         if not result.cost_priced:
             ans.degraded.append(
                 "这次调用**算不出价**（litellm 价格表里没有这个模型）：已按保守上限计入"

@@ -124,14 +124,17 @@ class ClinicReactRuntime:
         self.service = service
         self.retriever = retriever
         self.guard = RiskGuard()
-        # 预算闸门与 CLI `ask` / `POST /ask` **共用同一个花费文件**（同一个域目录下的
-        # llm_spend.json）：两条路径算的是同一个钱包，各记各的账等于给了两份额度。
+        # 预算闸门与 CLI `ask` / `POST /ask` **共用同一个花费文件**：
+        # 两条路径算的是同一个钱包，各记各的账等于给了两份额度。
+        # 路径来自 `settings.llm_spend_path`（**全局一份**，不在域目录下）——
+        # 曾经写成 `settings.index_path / "llm_spend.json"`，于是账本跟着域走：
+        # 切换 `domain` 就能把上限翻成"N 本账"，而 clinic 会话的花费被记进 k8s_docs 目录。
         # 这里是长寿命对象（`api/app.py` 缓存它），所以闸门状态跨请求有效——
         # 曾经每轮新建的是 caller（成本随之丢弃），见 SECURITY.md 的 S-2。
         from kubedocs.generate import DailyBudget
 
         self.budget = DailyBudget(
-            settings.index_path / "llm_spend.json",
+            settings.llm_spend_path,
             settings.llm_daily_budget_usd,
             unpriced_usd=settings.llm_unpriced_call_usd,
         )
@@ -157,8 +160,19 @@ class ClinicReactRuntime:
 
         return has_api_key(self.settings.llm_model)
 
-    def turn(self, message: str, *, history: list[dict[str, Any]] | None = None) -> ClinicTurn:
-        """跑一轮。**红线先判**，命中则不进循环。"""
+    def turn(
+        self,
+        message: str,
+        *,
+        history: list[dict[str, Any]] | None = None,
+        patient_id: str = "anon",
+    ) -> ClinicTurn:
+        """跑一轮。**红线先判**，命中则不进循环。
+
+        `patient_id` 是**调用方**给的（HTTP 层从请求里取），经 `context=` 注入到
+        工具执行体。它不进工具 schema，所以模型无法伪造"这是谁"——
+        此前 `book_appointment` 拿不到它，所有号都记在 `"anon"` 名下（实测确认）。
+        """
         hit = self.guard.check(message)
         if hit is not None:
             # 红线命中：确定性返回，LLM 无权参与
@@ -209,6 +223,7 @@ class ClinicReactRuntime:
             history=history,
             budget=self.budget,
             confirm=(lambda _call: True) if user_asked_to_book else None,
+            context={"patient_id": patient_id},
         )
         return ClinicTurn(
             text=turn.answer or "（模型没有给出内容，请再说一次或换个说法）",

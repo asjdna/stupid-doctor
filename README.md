@@ -32,8 +32,10 @@ python -m kubedocs.cli --hf-offline eval --gate   # 评测并卡闸门
 | 金标集（50 条）+ 指标 + 闸门 | ✅ 已验证（标注集自检 + 闸门能红） |
 | **P0 双域地基**：域协议 / 多域索引 / 中文归一化 | ✅ 已完成（k8s 域指标零回归） |
 | P1 医疗域资产迁移 | ✅ 已完成（三维门控 / 急诊红线 `domains/clinic/redline.py` / 号源库 `booking.py` · `sqlite_provider.py` / 知识卡片脚本 `scripts/clinic_build_cards.py`） |
+| **clinic 检索轨真正接通** | ✅ 已验证（`DomainPack` 自报语料/归一化/嵌入，`ingest` 走 `pack.build_index()`）：`--domain clinic` 自动用 **jieba 分词 + `bge-small-zh-v1.5`（512 维）**，全量 **31,592 块**已建成，`verify_fts()`/`verify_vec()` 均 ok，中文查询真实命中。**此前 `--domain` 只换索引目录**，语料/归一化/嵌入仍是 k8s 默认值 |
+| 观测：`/metrics` + OTel + `log_level` 生效 | ✅ 已完成（`src/kubedocs/observability.py`）；`otel_enable` 默认关，显式打开才导出 |
 | P2 agent 内核（图 / 工具 / 持久化 / 中断） | ✅ 已完成（`agent/` 13 个模块：LangGraph `StateGraph` + 工具循环 + `InMemorySaver` + `interrupt` 续跑；单测在闸门内） |
-| P5 FastAPI + 对话前端 | ✅ 已完成（`api/app.py` 6 个 API 端点 + `data/web/index.html` + `scripts/smoke_api.py` 冒烟） |
+| P5 FastAPI + 对话前端 | ✅ 已完成（`api/app.py` **8 个**端点：`/healthz` `/metrics` `/domains` `/tools` `/search` `/ask` `/chat` `/`，+ `data/web/index.html` + `scripts/smoke_api.py` 冒烟） |
 | `docker compose up` 全栈 | ⚠️ **文件已写，本机 Docker Hub 不可达，未实测** |
 
 > 本项目坚持一件事：**没跑过的就不写"已完成"**。
@@ -160,21 +162,28 @@ flowchart TB
 
 - `Store` 协议**不止一个实现**：`sqlite-vec`（默认，`store/sqlite_vec_store.py`）、
   `sqlite`（`store/sqlite_store.py`，SQLite + FTS5 + numpy 向量）、`pgvector`
-  （`store/pgvector_store.py`，Postgres）都在，后端名以 `store/__init__.py` 的
-  `BACKENDS` 与 `config.py` 的 `store` 字段为单一出口（默认值 `"sqlite-vec"`）。
-  图里只画一个存储框，是为了突出"换实现只改配置"这条唯一耦合点，**不是"只有一个实现"**。
+  （`store/pgvector_store.py`，Postgres）、`milvus`（`store/milvus_store.py`，
+  SQLite FTS5 + Milvus Lite 本地文件里的 **HNSW**——四个后端里**唯一真正提供 ANN 的嵌入式实现**）
+  都在，后端名以 `store/__init__.py` 的 `BACKENDS` 与 `config.py` 的 `store` 字段为单一出口
+  （默认值 `"sqlite-vec"`）。图里只画一个存储框，是为了突出"换实现只改配置"这条唯一耦合点，
+  **不是"只有一个实现"**；第四种（milvus）的选型与实测见 `docs/adr/0005-milvus-后端.md`
+  （含一个反直觉的实测结论：3000 块量级下 HNSW 与精确检索**逐位相同**、单查询 ~0.7s，
+  比 `sqlite-vec` 慢得多——它换来的是"ANN 选项"，不是"更快"）。
 - **两条 LLM 路径共用的是 `litellm` 这个库，不是同一个客户端类**：`generate.py` 里的
   `LiteLLMClient` 走 `litellm.completion`；`agent/llm_tool_caller.py`
   则是自成一体的 `LiteLLMToolCaller`，自己 `import litellm`
   直接调用，**全文不 import `LiteLLMClient`**。所以图里两条边分别指向 litellm 库。
-  但**日预算**是**同一本账**：`generate.DailyBudget` 既挂在 `generate.py` 这条边上，
+  但**日预算**是**同一本账**：账本路径是 `Settings.llm_spend_path`（`config.py`，
+  **全局一份，不在域目录下**），`generate.DailyBudget` 既挂在 `generate.py` 这条边上，
   也被 `run_tool_loop(..., budget=...)` 在**每次模型调用之前**检查
   （图里两条虚线都指向 `BUD`）。这一点**曾经是缺陷**：预算原先只挂在
   `generate.py` 这条边上，`/chat` 的工具循环不走它、成本只被累加进一个随对象丢弃的
-  `self.cost` ⇒ `/chat` 没有日上限。修复记录（含"算不出价不许按 0 记"与跨进程边界）
-  见 `SECURITY.md` 的 S-2。
+  `self.cost` ⇒ `/chat` 没有日上限。修复记录（含"算不出价不许按 0 记"、**按域分账**曾把
+  上限翻成 N 份、以及跨进程边界）见 `SECURITY.md` 的 S-2。
 - `/chat` 有两条路径：有密钥走工具循环（模型决定控制流），无密钥降级到确定性图；
-  红线在两条路径里都是**进循环之前**的确定性判定。
+  红线在两条路径里都是**进循环之前**的确定性判定，而且**每一轮**都判——
+  此前续答轮被直接送回 `observe`，用户在回答追问时才说出"胸痛"**不会**转急诊。
+  挂号也**必须先确认**才占号（关键词命中 ≠ 同意占用号源）。
   `thread_id` 的**属主绑定**（首见即绑定 `patient_id`，换属主 ⇒ 409）与
   **LRU 上界**也在这一层（`api/threads.py`，见 `SECURITY.md` 的 S-3）。
 
@@ -268,20 +277,26 @@ python -m kubedocs.cli --provider hashing ingest --limit-files 100
 | 项 | 值 |
 |---|---|
 | 文件 / 体积 | 1720 篇 markdown / 16.2 MB（与 GitHub 树接口预测**完全一致**） |
-| 块数 | 18861 |
-| 块长 中位 / p95 | 764 / 1621 字符 |
-| 含代码块的块 | 16.3% |
+| 块数 | **18811**（本次修掉"重叠尾段切进代码围栏"之后的值；修前 18861） |
+| 块长 中位 / p95 | 759 / 1621 字符 |
+| 含代码块的块 | 15.1% |
 | 非法引用 URL | **0** |
-| 内容逐字重复块 | **1.12%**（见下） |
-| 切块吞吐 | ~1085 文件/s |
+| 内容逐字重复块 | **1.12%**（211 块，见下） |
+| 切块吞吐 | ~589 文件/s（2.9s / 1720 篇） |
 
-**体检驱动的三次修正**（都在真实语料上量化过）：
+> **关于 `18861` 与 `18811` 这两个数**：ADR-0002 / 0003 / 0004 里写的 `18861` 是它们
+> **各自当时的实测留档**，按本项目的纪律**不追改历史**（那等于篡改记录）。差异来源只有一个：
+> 本次修掉了"重叠尾段切进代码围栏"，块数因此从 18861 变成 **18811**。
+> 两者对应的检索指标**逐位相同**（hybrid hit@10 都是 0.8400），所以那些 ADR 的结论仍然成立。
+
+**体检驱动的四次修正**（都在真实语料上量化过）：
 
 | 问题 | 修法 | 效果 |
 |---|---|---|
-| API reference 的 HTML 表格原样入库（占语料 59%） | `strip_html`：剥标记留文字、表格转可读行、**不碰代码围栏** | p95 块长 2125 → 1540 |
+| API reference 的 HTML 表格原样入库（占语料 59%） | `strip_html`：剥标记留文字、表格转可读行、**不碰代码围栏** | p95 块长 2125 → 1540（加"文档标题 › 面包屑"上下文头后为 1621，见上一行表） |
 | 重叠按字符硬切，产生 `...rip between` 这类半截块 | 重叠对齐到词/行边界，对不齐就放弃重叠 | 消除词中断块 |
 | 模板化小节跨文档同形 → **30.7% 逐字重复块** | 块首加「文档标题 › 面包屑」上下文头 | 重复 **30.7% → 1.12%** |
+| **重叠尾段落在代码围栏内部**：块首变成半截 YAML（开头的 ``` 留在上一块里），与"永不切进代码围栏内部"直接冲突 | `_safe_overlap_tail` 判断点是否在围栏内，在内则**放弃重叠** | 围栏数为奇数的块 **581 → 25**（−95.7%）；块数 18861 → 18811；**检索指标逐位不变**（hybrid hit@10 修前修后都是 0.8400）。残留 25 块分布在 15 篇文档，形态是块内围栏数 3/5（多段代码交错），与本次修的"块首落在围栏内"不是同一形态 |
 
 ### 嵌入吞吐（决定全量摄取时长，i7-13700H / 14 核 / 纯 CPU torch 2.11）
 
@@ -301,21 +316,37 @@ python -m kubedocs.cli --provider hashing ingest --limit-files 100
 
 | 项 | 值 |
 |---|---|
-| 扫描 / 变更 / 未变 | 1720 / 1680 / 40（40 是冒烟跑已建的） |
-| 写入块数 | 18308（索引合计 **18861**，与切块器预测**逐块一致**） |
-| 编码 / 复用向量 | 18096 / 179（复用来自跨篇同内容块） |
-| 空文档 | 64 |
-| **超长被截断** | **480 块（2.5%）** —— 尾部内容在向量路上检索不到，但全文路仍可命中 |
-| 总耗时 | 2062s（34.4 分钟） |
-| FTS 一致性自检 | ok |
+| 扫描 / 变更 / 未变 | 1720 / 1720 / 0（本次是 `--rebuild` 全量重建） |
+| 写入块数 | **18811**（与切块器预测**逐块一致**） |
+| 编码 / 复用向量 | 18600 / 158（复用来自跨篇同内容块） |
+| 空文档 | **65** |
+| **超长被截断** | **482 块（2.6%）** —— 尾部内容在向量路上检索不到，但全文路仍可命中 |
+| 总耗时 | 3427.6s（57.1 分钟；本轮重建期间机器上还有并发任务，吞吐约 5 块/s，低于下表的 9.4 块/s） |
+| FTS / 向量一致性自检 | 都是 ok |
 
 ### 检索质量与延迟（50 条标注，`eval`，`top_k=10`）
 
 | 模式 | hit@10 | recall | MRR | nDCG | p50 | p95 |
 |---|---|---|---|---|---|---|
-| **hybrid（FTS5+向量+RRF）** | **0.84** | 0.76 | **0.5205** | 0.5464 | **61 ms** | **76 ms** |
-| dense-only | 0.78 | 0.71 | 0.4253 | 0.4759 | 43 ms | 46 ms |
-| bm25-only | 0.70 | 0.63 | 0.3787 | 0.4357 | 19 ms | 35 ms |
+| **hybrid（FTS5+向量+RRF）** | **0.8400** | 0.76 | **0.5205** | 0.5469 | **107.8 ms** | **228.1 ms** |
+| dense-only | 0.7800 | 0.71 | 0.4346 | 0.4818 | 78.5 ms | 197.7 ms |
+| bm25-only | 0.7200 | 0.66 | 0.3822 | 0.4467 | 18.1 ms | 35.1 ms |
+
+> ⚠️ **口径（两个"变了"与一个"没变"）**：
+> 1. **指标逐位复现**：hybrid 的 hit / recall / MRR 与修切块器之前**完全相同**（0.8400 / 0.76 / 0.5205），
+>    nDCG 只差 +0.0005；bm25 与 dense 的 recall/MRR 略有上升。也就是说"修掉半截代码块"这件事
+>    **没有让检索变好或变差**——这是一次纯质量中性的可维护性修复。
+> 2. **延迟数字变了，且原因不在这次改动**：上表是本次（2026-10-12）在本机的实测；
+>    更早冻结的基线里 hybrid p50/p95 是 **61 / 76 ms**。但**在我动手改任何代码之前**、
+>    用当时的原始代码与原始索引测，得到的就已经是 **146.5 / 244.9 ms**——
+>    也就是说这组延迟在当前机器状态下**本来就复现不出来**。
+>    证据方向很明确：bm25-only 的延迟与基线几乎一致（18.1 vs 18.9 ms），
+>    只有**向量路**慢约 2×（78.5 vs 43.1 ms），而向量路的代码在这次改动里没被动过。
+>    没有证据表明是本次改动造成的；也**没有**把原因查清（可能是本机负载/热状态/页缓存），
+>    所以这里把两个数字都留着，不拿一个去覆盖另一个。
+> 3. `n_chunks` 从 18861 变成 18811（−0.27%），所以基线已按 CONTRIBUTING 第 5 节的纪律
+>    重新冻结（`eval --write-baseline`）；**金标指纹没有变**（`gold_sha256` 仍是
+>    `3eee2503682df8ca`）——变的只是索引规模，不是尺子。
 
 > 延迟是在 P0 里**顺带修掉一个一直存在的缺陷**之后的数字：`keyword_search` 原先在 FTS 上
 > 直接 `JOIN chunks` 取 `chunk_id`，导致执行计划变成"把 9000 多行命中全连上再排序"。
@@ -333,13 +364,17 @@ python -m kubedocs.cli --provider hashing ingest --limit-files 100
 | concept（"一个 Pod 会经历哪些阶段"） | 20 | 0.7500 | 0.4975 |
 
 **混合检索确实有效**：比最好的单路（向量）高 6pp，比全文路高 14pp。分类型看原因很清楚——
-向量路在 paraphrase 上明显更强（0.47 vs 全文 0.60 反过来），而两者融合后 paraphrase 达到 0.80，
+**全文路在 paraphrase 上更强**（0.60 vs 向量 0.47），而**向量路在 concept 上更强**（0.90 vs 0.60）——
+两条路各有一段强项，这才是"加一路"的理由；而两者融合后 paraphrase 达到 0.80，
 **高于任何单路**（0.60 / 0.47）。这正是加一路的意义。
 
 **但有一个反向发现，如实记录**：concept 类里 **dense-only（0.90）反而高于 hybrid（0.75）**。
-即在这 20 条概念型提问上，全文路带进来的是噪声而非信号，RRF 把 3 条本来排第一的正确答案
-挤出了前 10。这与"混合一定更好"的直觉相反，也说明**统一权重不是最优**——
-候选改进是"问题里出现标识符才启用全文路"或按类型调权。但 20 条样本的 95% 置信区间约 ±11pp，
+即在这 20 条概念型提问上，全文路带进来的是噪声而非信号。逐路复查（hybrid 漏 5 条、dense 漏 2 条）：
+净 −3 是 **4 失 1 得**，而那 4 条的 dense 名次分别是 **6 / 2 / 9 / 10 —— 没有一条是第 1 位**。
+（早先写成"3 条本来排第一被挤出前 10"，那个说法不成立。）这与"混合一定更好"的直觉相反，也说明**统一权重不是最优**——
+候选改进是"问题里出现标识符才启用全文路"或按类型调权。但口径要说准：`1.96·√(0.84·0.16/50) ≈ ±10pp`
+是**50 条整体**的置信区间；套到这 20 条子集上应为 **±19pp**（早先误写成"20 条样本 ±11pp"）。
+无论用哪个数，差距都还不够支撑改默认参数——
 **这个差距还不足以支撑改默认参数**，所以先记录、不改（见
 [`docs/检索与评测口径.md`](docs/检索与评测口径.md) 第五节）。
 
@@ -444,7 +479,10 @@ python -m kubedocs.cli --provider hashing ingest --limit-files 100
       模型自选工具、检索不足可改查重试）（里程碑 6）
 - [x] FastAPI `/healthz` `/domains` `/tools` `/search` `/ask`（JSON）`/chat`（SSE）
       + 前端演示页 `data/web/index.html`（里程碑 7）
-- [ ] OTel/Prometheus 指标导出与 `/metrics`：里程碑 6/7 里**唯一还没落地**的观测部分
+- [x] OTel/Prometheus 指标导出与 `/metrics`（本次落地）：`src/kubedocs/observability.py`
+      建真实 `TracerProvider`（console / otlp）、Prometheus 计数器与直方图，`/metrics` 暴露文本格式指标，
+      `log_level` 也真正设到 root logger。**`otel_enable` 默认关**——console 导出器会往 stdout 打 span，
+      在测试与库场景里是噪声（实测 pytest 下会因为 capsys 关掉 stdout 而报错），要观测时显式打开
 - [x] pgvector 生产实现（`store/pgvector_store.py`，同一 `Store` 协议）（里程碑 8 的实现部分）
 - [x] pgvector 的**检索质量对齐**（2026-10-11）：关键字路从 `ts_rank` 换成 ParadeDB
       `pg_search` 的真 BM25（`USING paradedb` + `pdb.score()`），镜像从
@@ -456,9 +494,11 @@ python -m kubedocs.cli --provider hashing ingest --limit-files 100
       关键字路 `EXPLAIN` 从 **42/50 条 `Seq Scan`（p50 49.98 ms）** 变成
       **0/50（p50 8.82 ms）**。实现细节、结构对照矩阵、踩到的坑、中文与降级语义见
       [`docs/adr/0004-向量存储后端.md`](docs/adr/0004-向量存储后端.md) 第十节。
-      ⚠️ 默认 DSN（127.0.0.1:5432）上那个容器还是旧镜像，所以不设
-      `KUBEDOCS_DATABASE_URL` 时它会走**带 `DEGRADED` 标记**的降级路（退出码 2）；
-      换镜像的命令与前置检查写在 `docker-compose.yml` 的 db 服务注释里
+      **本机复测（2026-10-12）**：默认 DSN 上的容器已经是 ParadeDB 镜像，
+      `--store pgvector eval --gate` 退出码 0、hit@10 0.8600、`verify_fts()` 无 DEGRADED。
+      早先这里写的是"默认 DSN 还是旧镜像 ⇒ 走 DEGRADED ⇒ 退出码 2"，那已经过时。
+      （同一次复测期间 Docker 守护进程随后被停掉，pgvector 的**集成测试**因此转为 skip，
+      见 SECURITY.md 第 6 节。）
 - [ ] 精排（cross-encoder）用真实模型实测收益（里程碑 9）
 - [ ] 嵌入量化/ONNX 提速 + k6 压测 + P95/成本 SLO（里程碑 10）
 - [ ] Docker 全栈实测（受限于本机 Docker Hub 不可达）

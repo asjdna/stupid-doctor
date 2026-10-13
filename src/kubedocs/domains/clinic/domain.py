@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+from collections.abc import Callable
 from pathlib import Path
 
 from kubedocs.chunker import source_url_for
@@ -58,7 +59,10 @@ def cards_to_inputs(
         if not text:
             continue
         doc_id = f"{kind}/{key}"
-        url = source_url_for(f"clinic/{kind}/{key}.md", "https://kubedocs.local/clinic/")
+        # 注意前缀里已经带了 `/clinic/`，路径里就**不要**再写一遍——
+        # 此前写成 `f"clinic/{kind}/{key}.md"`，引用 URL 会变成
+        # `https://kubedocs.local/clinic/clinic/disease/xxx/`（多一层）。
+        url = source_url_for(f"{kind}/{key}.md", "https://kubedocs.local/clinic/")
         digest = hashlib.blake2b(text.encode("utf-8"), digest_size=8).hexdigest()
         docs.append(
             DocInput(doc_id=doc_id, rel_path=f"{doc_id}.md", title=key, source_url=url, content_hash=digest)
@@ -88,6 +92,11 @@ class ClinicPack:
     )
     # 中文必须预分词，否则 FTS5 的 unicode61 只能按标点切分（见 normalize.py）
     normalizer_name = "chinese"
+    # 中文语义向量必须用中文模型：bge-small-en 对中文只会退化成噪声。
+    # 注意维度不同（zh 是 512、en 是 384）——所以它必须随域一起切换，
+    # 否则 clinic 索引里的向量矩阵与查询向量乘不上。
+    embedding_model = "BAAI/bge-small-zh-v1.5"
+    embedding_dim = 512
 
     def __init__(self, *, batch: int = 512) -> None:
         self.batch = batch
@@ -116,13 +125,16 @@ class ClinicPack:
         *,
         rebuild: bool = False,
         limit_files: int | None = None,
-        progress: object = None,
+        batch_files: int = 512,
+        progress: Callable[[str], None] | None = None,
     ) -> IngestReport:
         """把卡片灌入 clinic 域自己的索引。
 
         `limit_files` 在这里的含义是"只取前 N 张卡片"，便于冒烟与测试。
+        `batch_files` 是每次编码的卡片数（默认 512；实测 64~128 附近吞吐最好，
+        用 `--batch-files` 可调）。
         """
-        log = progress if callable(progress) else (lambda _m: None)
+        log: Callable[[str], None] = progress if progress is not None else (lambda _m: None)
         report = IngestReport()
         if rebuild:
             store.rebuild_from_scratch()
@@ -130,11 +142,12 @@ class ClinicPack:
         docs, chunks = cards_to_inputs(cards, limit=limit_files)
         report.files_scanned = len(cards) if limit_files is None else min(limit_files, len(cards))
         report.files_changed = len(docs)
-        log(f"卡片 {len(cards)} 张 -> 文档 {len(docs)} 篇 / 块 {len(chunks)} 个")
+        batch = max(1, int(batch_files))
+        log(f"卡片 {len(cards)} 张 -> 文档 {len(docs)} 篇 / 块 {len(chunks)} 个（编码批 {batch}）")
 
-        for start in range(0, len(chunks), self.batch):
+        for start in range(0, len(chunks), batch):
             part_docs = {d.doc_id: d for d in docs}
-            chunk_slice = chunks[start : start + self.batch]
+            chunk_slice = chunks[start : start + batch]
             ids = {c.doc_id for c in chunk_slice}
             texts = [c.body for c in chunk_slice]
             log(f"  编码 {start + len(texts)}/{len(chunks)} …")

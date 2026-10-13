@@ -95,7 +95,8 @@ class Settings(BaseSettings):
     # pgvector 了为什么数据还是旧的"变成一个没有任何日志的谜。
     store: Literal["sqlite-vec", "sqlite", "pgvector", "milvus"] = "sqlite-vec"
     database_url: str = "postgresql://kubedocs:kubedocs@127.0.0.1:5432/kubedocs"
-    redis_url: str = "redis://127.0.0.1:6379/0"
+    # 这里曾有 `redis_url`（以及 pyproject 的 `redis` 依赖、compose 的 redis 服务）：
+    # 全仓没有任何一行代码用它，属于"假开关"，已删除。要加缓存/限流时再连真实分支。
     db_pool_min: int = 1
     db_pool_max: int = 10
     # pgvector HNSW 建索引参数（理由见 ADR-0004：m 决定图的出边数，
@@ -205,11 +206,21 @@ class Settings(BaseSettings):
     llm_unpriced_call_usd: float = Field(default=0.25, ge=0.0)
 
     # ---------- 可观测 ----------
-    otel_enable: bool = True
+    # 这三个字段**都有真实分支**（见 `observability.py`），不是声明了没人读的开关：
+    #   · log_level     -> configure_logging() 设 root logger 级别
+    #   · otel_enable   -> setup_tracing() 建 TracerProvider
+    #   · otel_exporter -> console / otlp 分流（`none` = 不装 processor）
+    # `otel_enable` **默认关**：console 导出器会往 stdout 打 span，在测试与库场景里
+    # 是噪声（实测 pytest 下会因为 capsys 关掉 stdout 而抛
+    # `ValueError: I/O operation on closed file`）。要观测时显式打开——
+    # 打开后它真的导出，而不是像此前那样"设了没反应"。
+    # /metrics 与这个开关无关：Prometheus 指标始终可用。
+    #
+    # 此前这里还并排着 `langfuse_host/public_key/secret_key` 与存储段的 `redis_url`，
+    # 四个都没有任何读者——正是本文件另一处注释里明令禁止的"假开关"，
+    # 已删除（连同 `redis` 依赖与 compose 里没人连的 redis 服务）。
+    otel_enable: bool = False
     otel_exporter: Literal["console", "otlp", "none"] = "console"
-    langfuse_host: str = ""
-    langfuse_public_key: str = ""
-    langfuse_secret_key: str = ""
 
     # ---------- 数据 ----------
     corpus_dir: str = "data/raw/k8s-docs"
@@ -251,6 +262,22 @@ class Settings(BaseSettings):
         共用一个库文件只会让"换域时忘了换表"这类错误无从发现。
         """
         return self.index_root / self.domain
+
+    @property
+    def llm_spend_path(self) -> Path:
+        """LLM 花费账本的位置：**全局一份**，不在域目录下。
+
+        为什么不做成 `<index_dir>/<domain>/llm_spend.json`（曾经就是这样）：
+        预算是"这份部署今天还能花多少"的约束，与"用哪个域的语料"无关。
+        按域分账有两个实测后果，都真实发生过：
+        1. 匿名调用方只要在请求里切换 `domain`，就能把日上限翻成 `域数 × 预算`；
+        2. clinic 会话的花费被记进 **k8s_docs** 目录（`/chat` 用的是应用默认域的
+           `index_path`），审计 `data/index/clinic/` 的人看不到那笔钱。
+
+        所以账本锚在 `index_root` 上，路径只有一个真相源，两个 LLM 路径
+        （`generate.Answerer` 与 `agent/clinic_react`）都从这里取。
+        """
+        return self.index_root / "llm_spend.json"
 
     @property
     def effective_embedding_model(self) -> str:

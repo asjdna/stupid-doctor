@@ -435,7 +435,7 @@ class TestChatThreadOwnership:
 class TestChatBudget:
     def _exhaust(self, settings: Settings) -> None:
         """把当日花费写成远超上限：模拟"今天已经花完了"。"""
-        path = settings.index_path / "llm_spend.json"
+        path = settings.llm_spend_path
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(json.dumps({time.strftime("%Y-%m-%d"): 99.0}), encoding="utf-8")
 

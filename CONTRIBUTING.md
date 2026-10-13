@@ -11,7 +11,8 @@
 ## 1. 开发环境
 
 需要 **Python ≥ 3.10**（`pyproject.toml` 的 `requires-python`）。仓库**不要求** Docker：
-默认存储是嵌入式 SQLite + numpy，不需要任何外部进程。
+默认存储是嵌入式 `sqlite-vec`（SQLite + FTS5 全文 + vec0 向量表），不需要任何外部进程。
+（`sqlite` 是保留作对照的旧实现：numpy 暴力内积 + `.npy` 侧车矩阵。）
 
 ```bash
 python -m venv .venv
@@ -138,10 +139,10 @@ P8：用例工厂 + 样本扩到 46 条 —— 多跳被**有统计意义地**�
    因为冻结基线里就记着 `triage.accuracy = 0.0`。
    **这条红不要"修"**：既不许改基线，也不许放宽门限——那是把红灯涂成绿灯。
    汇报时必须把"闸门红的原因是有据可查的既有缺口"说清楚（见 `SECURITY.md` S-4）。
-   同理，**pgvector 后端**上的 `cli eval --store pgvector --gate` 也是红的
-   （冻结基线的口径是 sqlite/sqlite-vec，而 pgvector 的 hybrid hit@10 是 0.74 而非 0.84），
-   而**默认后端**的 `cli eval --gate` 是**绿的**（本机实测 hit@10 = 0.8400、退出码 0）。
-   理由与四条候选路径见 ADR-0004 第五、九节。
+   同理，**pgvector 后端**的 `cli eval --store pgvector --gate` 曾经是红的（hybrid hit@10 0.74
+   而非 0.84）。**这一条已在 2026-10-11 修好**：关键字路换成 ParadeDB `pg_search` 真 BM25 之后
+   hit@10 = 0.8600、`--gate` 退出码 **0**，所以它现在**不再是红的**（见 ADR-0004 第十节）。
+   而**默认后端**的 `cli eval --gate` 一直是绿的（本机实测 hit@10 = 0.8400、退出码 0）。
 5. **没有实测就不要写数字。** 宁可写"未验证"，这一条比任何格式要求都重要。
 
 ---

@@ -231,8 +231,11 @@ class TestBudgetIsWiredIntoTheToolLoop:
         assert rt.budget.limit == 1.5
         assert rt.budget.unpriced_usd == 0.4
         # 与 CLI `ask` / `POST /ask` 共用**同一个**花费文件：两条路径算的是同一个钱包，
-        # 各记各的账等于给了两份额度。
-        assert rt.budget.path == settings.index_path / "llm_spend.json"
+        # 各记各的账等于给了两份额度。路径是**全局一份**（不在域目录下）——
+        # 按域分账时，切换 domain 就能把日上限翻成 N 份（见 config.llm_spend_path）。
+        assert rt.budget.path == settings.llm_spend_path
+        assert rt.budget.path == settings.index_root / "llm_spend.json"
+        assert settings.domain not in str(rt.budget.path)
 
     def test_turn_hands_the_budget_to_the_loop_and_reports_the_cost(self, runtime, monkeypatch):
         from kubedocs.agent.tool_loop import AgentTurn

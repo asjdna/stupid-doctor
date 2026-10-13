@@ -1,5 +1,7 @@
 {
   "schema": 1,
+  "gold_sha256": "115b82ae96ed9c67",
+  "n_cases": 26,
   "metrics": {
     "n_cases": 26,
     "redline": {

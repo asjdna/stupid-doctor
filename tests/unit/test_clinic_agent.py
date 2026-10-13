@@ -101,6 +101,55 @@ class TestWiring:
         assert wants_booking("我最近有点累") is False
         assert len(BOOK_WORDS) >= 3
 
+    @pytest.mark.parametrize(
+        "text",
+        [
+            "我不想挂号",
+            "不要预约",
+            "不用取号",
+            "先别帮我挂号",
+            "别挂号",
+            "别帮我预约",
+            "不要帮我挂号",
+        ],
+    )
+    def test_negated_booking_intent_is_not_a_request(self, text):
+        """**挂号意图必须判否定**（缺陷回归）。
+
+        缺陷形态：`any(w in text for w in BOOK_WORDS)` 让"我不想挂号"命中「挂号」，
+        于是用户在**明确否认**的情况下被占掉一个号源（图路径实测出过票）。
+        """
+        assert wants_booking(text) is False, f"{text!r} 被判成了挂号请求"
+
+    @pytest.mark.parametrize("text", ["特别疼想挂号", "别的科能不能挂号"])
+    def test_imperative_negation_does_not_break_normal_phrases(self, text):
+        """补祈使否定「别」时不能误伤复合词：「特别」「别的」不是否定。
+
+        （注意用例必须**真的含挂号词**：`别的科的号能挂吗` 里没有「挂号」，
+        判 False 是对的，拿它当反例会得到一个假失败。）
+        """
+        assert wants_booking(text) is True, f"{text!r} 被误判为否定"
+
+    @pytest.mark.parametrize(
+        "text,expected",
+        [
+            ("确认", True),
+            ("是的", True),
+            ("好的", True),
+            ("嗯", True),
+            ("确认挂号", True),
+            ("不用了", False),
+            ("先不挂", False),
+            ("取消", False),
+            ("别确认", False),
+        ],
+    )
+    def test_confirm_booking_reads_consent(self, text, expected):
+        """确认判定同样要能识别否定：「不用了」不是同意。"""
+        from kubedocs.domains.clinic.pack import confirm_booking
+
+        assert confirm_booking(text) is expected
+
 
 # ===========================================================================
 # 紧急流程
@@ -204,7 +253,9 @@ class TestBookingFlowEndToEnd:
         """
         agent, wiring = _agent()
         agent.start("我咳嗽", thread_id="b1")
-        state = agent.resume("帮我挂号", thread_id="b1")
+        # 第一轮回答"帮我挂号" = 表达**意图** -> 停在确认；第二轮明确确认才下单
+        agent.resume("帮我挂号", thread_id="b1")
+        state = agent.resume("确认", thread_id="b1")
         ticket = state["ticket"]
         known = {d["name"] for d in wiring.service.departments()}  # type: ignore[union-attr]
         assert ticket.get("department") in known, f"挂到了非科室：{ticket}"
@@ -213,13 +264,24 @@ class TestBookingFlowEndToEnd:
         agent, wiring = _agent()
         agent.start("我咳嗽", thread_id="b2")
         agent.resume("帮我挂号", thread_id="b2")
+        agent.resume("确认", thread_id="b2")
         assert wiring.service is not None
         assert wiring.service.my_appointments("anon") != []
 
     def test_booking_without_any_candidate_reports_human_readable_error(self):
         """没有候选就挂不了号：必须给一句人话 + 可选科室，而不是抛异常。"""
         agent, _ = _agent()
-        state = agent.start("帮我挂号", thread_id="b3")
+        agent.start("帮我挂号", thread_id="b3")
+        state = agent.resume("确认", thread_id="b3")
         ticket = state["ticket"]
         assert "error" in ticket
         assert ticket["error"], "错误信息不能为空"
+
+    def test_declining_booking_intent_books_nothing(self):
+        """否认挂号时不该占号——本次修的真实缺陷（"我不想挂号"曾经也会下单）。"""
+        agent, wiring = _agent()
+        agent.start("我咳嗽", thread_id="b4")
+        state = agent.resume("我不想挂号", thread_id="b4")
+        assert state["ticket"] == {}, "用户否认挂号却仍然占了号"
+        assert wiring.service is not None
+        assert wiring.service.my_appointments("anon") == []

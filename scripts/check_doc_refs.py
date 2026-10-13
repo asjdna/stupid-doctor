@@ -179,80 +179,43 @@ class White:
 
 
 WHITELIST: dict[tuple[str, int, str], White] = {
+    # 本表在 SECURITY.md 重写后重新登记：只有"整句里除锚点外没有任何源码标识符"的引用
+    # 才会在这里，而且每条都带 `expect`（锚点漂走时它必须失败，白名单不是免死金牌）。
     ("SECURITY.md", 8, "Dockerfile:2"): White(
         reason="第 6-9 行是引用块，反引号里除这个锚点外只有文件名（`Dockerfile` / "
         "`.github/workflows/ci.yml`），没有可抽的符号名",
         expect="尚未在本机实测",
     ),
-    ("SECURITY.md", 8, "docker-compose.yml:3"): White(
+    ("SECURITY.md", 8, "docker-compose.yml:10"): White(
         reason="与上一条同一句（第 6-9 行），同样只有文件名",
         expect="尚未在本机实测",
     ),
-    ("SECURITY.md", 22, ".gitignore:53-54"): White(
-        reason="第 21-22 行在说 clinic 卡片语料不入库，反引号里只有这个锚点",
+    ("SECURITY.md", 27, ".gitignore:53-54"): White(
+        reason="这一句在说 clinic 卡片语料不入库，反引号里只有这个锚点",
         expect="clinic",
     ),
-    ("SECURITY.md", 152, "clinic_baseline.json:6-7"): White(
-        reason="markdown 表格行：单元格里只有数字与这个锚点，没有符号名",
+    ("SECURITY.md", 165, "clinic_baseline.json:8"): White(
+        reason="markdown 表格行：单元格里只有指标名与数字、以及这个锚点，没有源码符号",
         expect='"recall"',
     ),
-    ("SECURITY.md", 153, "clinic_baseline.json:7"): White(
+    ("SECURITY.md", 166, "clinic_baseline.json:9"): White(
         reason="同上（表格行，单元格里只有数字与锚点）",
         expect='"false_positive_rate"',
     ),
-    ("SECURITY.md", 154, "clinic_baseline.json:16-17"): White(
+    ("SECURITY.md", 167, "clinic_baseline.json:18"): White(
         reason="同上（表格行，单元格里只有数字与锚点）",
         expect='"accuracy"',
     ),
-    ("SECURITY.md", 203, "generate.py:534-536"): White(
-        reason="第 203-205 行那句只说『片段与工具返回结果直接拼进提示词』，括号里就是两个锚点，"
-        "没有任何符号名",
-        expect="【文档片段】",
+    ("SECURITY.md", 313, "docker-compose.yml:82"): White(
+        reason="这一句在说端口映射，反引号里只有端口号与这个锚点",
+        expect="8080:8080",
     ),
-    ("SECURITY.md", 204, "tool_loop.py:322-327"): White(
-        reason="与上一条同一句（第 203-205 行），同样没有符号名",
-        expect="_tool_message",
-    ),
-    ("SECURITY.md", 212, "tool_loop.py:373-378"): White(
-        reason="第 212-213 行只说『工具参数逐个走 pydantic 校验』，`pydantic` 不是本仓符号",
-        expect="model_validate",
-    ),
-    ("SECURITY.md", 213, "tool_loop.py:397-405"): White(
-        reason="与上一条同一句（第 212-213 行）：『命中注册表 / 回灌可用列表』没有反引号符号名",
-        expect="_lookup",
-    ),
-    ("SECURITY.md", 225, "docs/adr/0001-技术选型.md:19"): White(
-        reason="这一句的反引号符号是包名 `ragas` / `deepeval`，它们是『全仓没有任何 import』的宾语，"
-        "不是锚点目标的符号；拿它们去 ADR 第 19 行里找是本检查器的误报。锚点目标是那张表里的"
-        "『评测…Ragas 对照』行（『这两个包只被文档提到过』的唯一文档出处）",
-        expect="Ragas",
-    ),
-    ("SECURITY.md", 241, "generate.py:193-214"): White(
-        reason="表格行：正文唯一的反引号是举例用的越界标记 `[99]`，不是符号名",
-        expect="validate_citations",
-    ),
-    ("SECURITY.md", 242, "generate.py:509-514"): White(
-        reason="表格行：正文没有反引号符号名（『打桩 LLM』不是符号）",
-        expect="if not hits",
-    ),
-    ("SECURITY.md", 244, "tool_loop.py:250-256"): White(
-        reason="表格行：正文（『按名索引 / 重名报错』）没有反引号符号名",
-        expect="registry",
-    ),
-    ("SECURITY.md", 245, "tool_loop.py:409-423"): White(
-        reason="表格行：正文（『默认拒绝执行』）没有反引号符号名",
-        expect="_confirm_side_effect",
-    ),
-    ("SECURITY.md", 284, ":54-55, 68-69, 87-88"): White(
-        reason="第 284-285 行的反引号只有端口号（`5432` / `6379` / `8080`，抽不出标识符）与这个锚点",
-        expect="6379",
-    ),
-    ("SECURITY.md", 307, "Dockerfile:2"): White(
-        reason="第 306-308 行是『未验证事项』条目，反引号里只有两个文件名 + 两个锚点",
+    ("SECURITY.md", 337, "Dockerfile:2"): White(
+        reason="这一行是『未验证事项』条目，反引号里只有文件名 + 两个锚点",
         expect="尚未在本机实测",
     ),
-    ("SECURITY.md", 307, "docker-compose.yml:3"): White(
-        reason="与上一条同一句（第 306-308 行），同样只有文件名",
+    ("SECURITY.md", 337, "docker-compose.yml:10"): White(
+        reason="与上一条同一句，同样只有文件名",
         expect="尚未在本机实测",
     ),
 }
@@ -433,6 +396,119 @@ def _resolve_target(name: str, index: list[str]) -> tuple[str | None, str]:
     return None, f"目标文件有歧义（{name}）：{', '.join(sorted(hits)[:4])}"
 
 
+# 纯文件引用：反引号里的 `xxx.md`，或 markdown 链接 `[文字](xxx.md)`。
+#
+# ## 为什么要单独查它（这是本检查器此前的**整类盲区**）
+#
+# 上面的 `文件:行号` 校验要求"路径 + 冒号 + 数字"，于是**只写文件名的引用
+# 完全不进入校验**——README/ADR 里那种指向另一份 ADR 的引用正是这一类。
+# 实测后果：`docs/adr/0005-<名字>.md` 并不存在，而 12 处代码引用它，
+# 门禁一路绿灯（该缺口当时由 ADR-0004 自己记成"文档债"，现已补上该文件）。
+# 一个"引用了不存在的文件"却没人报警的文档体系，不能算被校验过。
+#
+# 只查 `.md`：其它后缀（`.py` / `.json` / `.yml`）在文档里常被当作**名字**提及，
+# 一律当引用会大面积误报；`.md` 才是这条纪律真正需要覆盖的那一类。
+#
+# ## 只查"看起来是本仓库路径"的 `.md`（精度优先）
+#
+# 第一版规则太宽，实测一次就抓出 11 处，其中**只有 1 处是真的**（其余是示例路径、
+# 跨仓路径、以及本文件自己的 docstring 示例）。宽规则会让这个门禁迅速变成噪声，
+# 而噪声门禁最后一定会被无视——那比没有门禁更糟。所以收紧成四条：
+#
+# 1. 含 `/`（裸文件名跳过：文档里 `_index.md` / `xxx.md` 这种"举个例子"太常见）；
+# 2. 不以 `/` 开头（`/content/en/docs/...` 那种是**上游语料**里的路径，不是本仓的）；
+# 3. 不含 `...` / `*` / `{}` / `<>`（省略号与通配是"示意"，不是引用）；
+# 4. **首段是已知的仓内顶层目录**（`docs/` / `src/` / `scripts/` / `tests/` /
+#    `.github/` / `docker/`）。这样 `concepts/foo.md`（k8s 文档里的示意路径）与
+#    `data/raw/OpenCMKG/README.md`（**另一个仓库**里的文件、且 `data/` 本就被 gitignore）
+#    都不会被误判。
+#
+# 代价写清楚：一个**裸文件名**形式的悬空引用（例如正文写 `README.md` 而它被删了）
+# 查不出来。这是刻意换来的精度，不是遗漏。
+_FILE_REF_RE = re.compile(r"(?<![\w./-])([A-Za-z0-9_./\-\u4e00-\u9fff]+\.md)")
+_MD_LINK_RE = re.compile(r"\]\(([^)\s]+?\.md)(?:#[^)\s]*)?\)")
+_FENCE_RE = re.compile(r"^\s*(```|~~~)")
+_CHECKED_ROOTS = ("docs/", "src/", "scripts/", "tests/", ".github/", "docker/")
+
+
+def _is_checkable_ref(name: str) -> bool:
+    """这个 `.md` 记号是否值得去查存在性（规则见上面那段注释）。"""
+    if name.startswith("/") or "/" not in name:
+        return False
+    if "..." in name or any(ch in name for ch in "*{}<>"):
+        return False
+    return name.startswith(_CHECKED_ROOTS)
+
+
+def collect_file_refs(doc: str, text: str) -> list[tuple[int, str, bool]]:
+    """收集 `(行号, 路径, 是否 markdown 链接)`。
+
+    跳过代码围栏内部：那里常常是"示例里的文件名"，不是本仓库的引用。
+    """
+    out: list[tuple[int, str, bool]] = []
+    in_fence = False
+    for lineno, line in enumerate(text.splitlines(), start=1):
+        if _FENCE_RE.match(line):
+            in_fence = not in_fence
+            continue
+        if in_fence:
+            continue
+        for m in _MD_LINK_RE.finditer(line):
+            out.append((lineno, m.group(1), True))
+        for token in _BACKTICK.findall(line):
+            if _ref_shape(token) is not None:
+                continue  # 已经由 `文件:行号` 那条路校验
+            if token.startswith(("http://", "https://")):
+                continue
+            found = _FILE_REF_RE.search(token)
+            if found:
+                out.append((lineno, found.group(1), False))
+    return out
+
+
+def _resolve_file_ref(raw: str, doc: str, index: list[str]) -> str | None:
+    """把文档里的 `.md` 路径解析成仓内路径；解析不出返回 None。
+
+    依次试：相对仓库根、相对**该文档所在目录**（markdown 链接的常见写法）、
+    以及"按路径后缀唯一匹配"。
+    """
+    # 注意用"去前缀"而不是 `lstrip("./")`：后者是**字符集**剥离，
+    # 会把 `.github/...` 开头的点也吃掉（实测踩过：`.github/PULL_REQUEST_TEMPLATE.md`
+    # 被解析成 `github/...` 然后报"不存在"）。
+    name = raw
+    while name.startswith("./"):
+        name = name[2:]
+    name = name.lstrip("/")
+    if name in index:
+        return name
+    doc_dir = str(Path(doc).parent).replace("\\", "/")
+    if doc_dir != ".":
+        joined = f"{doc_dir}/{name}"
+        if joined in index:
+            return joined
+    target, _ = _resolve_target(name, index)
+    return target
+
+
+def check_file_refs(root: Path, docs: list[str], index: list[str]) -> list[str]:
+    """校验全部纯 `.md` 引用指向的文件存在。返回失败描述列表。"""
+    failures: list[str] = []
+    for doc in docs:
+        path = root / doc
+        if not path.is_file():
+            continue
+        text = path.read_text(encoding="utf-8")
+        for lineno, raw, is_link in collect_file_refs(doc, text):
+            name = raw[2:] if raw.startswith("./") else raw
+            if not _is_checkable_ref(name):
+                continue
+            if _resolve_file_ref(raw, doc, index) is not None:
+                continue
+            kind = "markdown 链接" if is_link else "反引号引用"
+            failures.append(f"{doc}:{lineno} {kind} `{raw}`：仓内不存在这个文件")
+    return failures
+
+
 def collect_anchors(doc: str, text: str, index: list[str]) -> list[Anchor]:
     """从一份文档里收集全部引用。无文件名的续写引用沿用同段上文的目标文件。"""
     lines = text.splitlines()
@@ -596,7 +672,10 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     root = Path(args.root).resolve()
-    report = check_paths(root, _doc_files(root), window=args.window)
+    docs = _doc_files(root)
+    report = check_paths(root, docs, window=args.window)
+    # 第二类校验：纯 `.md` 文件引用（`文件:行号` 那条路看不见它们，见 collect_file_refs 的说明）。
+    file_failures = check_file_refs(root, docs, _walk_files(root))
 
     print(f"扫描文档   : {report.docs} 个文件（*.md + 源码/测试/脚本里的文档字符串）")
     print(f"引用处数   : {len(report.findings)}")
@@ -606,6 +685,8 @@ def main(argv: list[str] | None = None) -> int:
         print(f"  · {finding.detail}")
     for finding in report.failures:
         print(f"  ✗ {finding.detail}")
+    for failure in file_failures:
+        print(f"  ✗ {failure}")
 
     if args.verbose:
         print("\n逐条：")
@@ -614,8 +695,11 @@ def main(argv: list[str] | None = None) -> int:
             extra = f"命中 {finding.matched!r}" if finding.matched else ""
             print(f"  [{mark}] {finding.detail}  {extra}")
 
-    if report.failures:
-        print(f"\n结果：不通过（{len(report.failures)} 处引用没有被内容校验挡住）")
+    if report.failures or file_failures:
+        print(
+            f"\n结果：不通过（{len(report.failures)} 处行号锚点未被内容校验挡住，"
+            f"{len(file_failures)} 处引用的文件不存在）"
+        )
         return 1
     print("\n结果：通过")
     return 0

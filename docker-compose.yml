@@ -1,4 +1,11 @@
-# 一条命令起全栈：db(ParadeDB/pg_search) + cache(redis) + api
+# 一条命令起全栈：db(ParadeDB/pg_search) + api
+#
+# 这里曾有 `cache`(redis:7.4) 与 `langfuse`(profile obs) 两个服务，本次删除：
+#   · `cache`：pyproject 声明了 `redis` 依赖，但 **src/ scripts/ tests/ 里零处使用**
+#     （`Settings.redis_url` 也没有读者）——一个没人连的容器只是噪声；
+#   · `langfuse`：仓库没有任何 Langfuse 调用代码（也没有该依赖），
+#     而项目真正实现的观测路径是 **OTel（console/otlp）+ Prometheus `/metrics`**，
+#     它们都不需要这两个服务。
 #
 # ⚠️ 本文件的**运行**尚未在本机实测（`db` 服务只做过**等价演练**：同镜像 + 同卷 +
 #    同 `-c shared_preload_libraries=pg_search`，跑在独立容器/独立端口上，见
@@ -62,18 +69,6 @@ services:
       retries: 20
     restart: unless-stopped
 
-  cache:
-    image: redis:7.4-alpine
-    command: ["redis-server", "--save", "", "--appendonly", "no", "--maxmemory", "256mb", "--maxmemory-policy", "allkeys-lru"]
-    ports:
-      - "6379:6379"
-    healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
-      interval: 5s
-      timeout: 3s
-      retries: 20
-    restart: unless-stopped
-
   api:
     build:
       context: .
@@ -83,13 +78,10 @@ services:
     environment:
       # 容器内互访用服务名（.env 里的示例值就是按 compose 写的）
       KUBEDOCS_DATABASE_URL: postgresql://kubedocs:kubedocs@db:5432/kubedocs
-      KUBEDOCS_REDIS_URL: redis://cache:6379/0
     ports:
       - "8080:8080"
     depends_on:
       db:
-        condition: service_healthy
-      cache:
         condition: service_healthy
     volumes:
       # 语料与模型缓存持久化：否则每次重建容器都要重下 16MB 语料 + 模型
@@ -101,29 +93,6 @@ services:
       timeout: 5s
       retries: 12
       start_period: 40s
-    restart: unless-stopped
-
-  # 可选：自托管 Langfuse（LLM trace/评测看板）。
-  # 默认注释掉——它自己要一套 Postgres + ClickHouse，资源占用不小；
-  # 需要时 `docker compose --profile obs up -d`。
-  # 不启也不影响功能——但**不是**因为"本地 span + Prometheus 仍在"：本仓库
-  # **没有任何指标/追踪导出**。`prometheus-client` 与 `opentelemetry-*` 只声明在
-  # pyproject.toml（及 requirements.lock.txt）里，src/ scripts/ tests/ **零处 import**，
-  # 也**没有 `/metrics` 端点**（README 的 Roadmap 把"OTel/Prometheus 指标导出与 /metrics"
-  # 如实标成未完成）。换句话说：不启 Langfuse 什么观测都不会少，因为现在本来就没有。
-  langfuse:
-    image: langfuse/langfuse:2
-    profiles: ["obs"]
-    depends_on:
-      db:
-        condition: service_healthy
-    environment:
-      DATABASE_URL: postgresql://kubedocs:kubedocs@db:5432/kubedocs
-      NEXTAUTH_SECRET: change-me-in-prod
-      SALT: change-me-in-prod
-      NEXTAUTH_URL: http://localhost:3000
-    ports:
-      - "3000:3000"
     restart: unless-stopped
 
 volumes:

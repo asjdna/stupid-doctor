@@ -22,7 +22,9 @@ dependencies = [
     # 存储
     "psycopg[binary,pool]>=3.2",   # Postgres（pgvector + 全文检索都走它）
     "pgvector>=0.3",               # vector 类型适配
-    "redis>=5.0",
+    # 这里曾有 `redis>=5.0`：全仓没有任何一行代码用它（`Settings.redis_url` 也没有读者），
+    # 属于"声明了没人用的依赖"，已删除——连同 compose 里那个没人连的 redis 服务。
+    # 要加缓存/限流时，再连同真实分支一起引回来。
     # 本地/CI 默认后端（KUBEDOCS_STORE=sqlite-vec）的向量表。
     # 注意：vec0 是**穷举扫描**而非 ANN（实测在本项目 18861×384 上比 numpy 暴力慢约 11 倍），
     # 选它换的是「向量与块行同事务、可增删、不常驻内存」，不是延迟——见 docs/adr/0004。
@@ -32,6 +34,8 @@ dependencies = [
     "sentence-transformers>=3.0",  # 本地嵌入（可换成 API，见 embedder 抽象）
     "langgraph>=0.2",              # Agent 编排（耐久状态 + 中断）
     # 可观测
+    # 这三个现在都有真实分支（见 observability.py）：/metrics 用 prometheus_client，
+    # OTel 用 sdk + http exporter。此前它们是"声明了但没人 import"的依赖。
     "prometheus-client>=0.20",
     "opentelemetry-sdk>=1.25",
     "opentelemetry-exporter-otlp-proto-http>=1.25",
@@ -49,7 +53,6 @@ dev = [
     "respx>=0.21",        # httpx 打桩
     "ruff>=0.6",
     "mypy>=1.11",
-    "types-redis",
 ]
 eval = [
     "ragas>=0.2",          # 行业口径的 RAG 指标（与自建闸门并存）

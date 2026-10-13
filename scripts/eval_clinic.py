@@ -25,6 +25,7 @@ sys.path.insert(0, str(REPO_ROOT / "src"))
 
 from kubedocs.domains.clinic.pack import wants_booking  # noqa: E402
 from kubedocs.evaluation.clinic import (  # noqa: E402
+    clinic_gold_sha256,
     evaluate_redline,
     evaluate_triage,
     gate_failures,
@@ -138,7 +139,8 @@ def main(argv: list[str] | None = None) -> int:
             f" + {len(triage_cases)}（分诊）"
         )
         print(
-            f"红线召回    : {report.redline_recall:.2%}"
+            f"红线召回    : "
+            f"{'未评测（用例集里没有 expect_red_line）' if report.redline_recall is None else f'{report.redline_recall:.2%}'}"
             f"  (TP={report.redline_tp} FN={report.redline_fn})"
             f"   ← 硬闸门，要求 100%"
         )
@@ -146,8 +148,11 @@ def main(argv: list[str] | None = None) -> int:
             f"红线误报率  : {report.redline_false_positive_rate:.2%}"
             f"  (FP={report.redline_fp} TN={report.redline_tn})"
         )
+        acc_booking = report.booking_accuracy
         print(
-            f"挂号意图    : {report.booking_accuracy:.2%}  ({report.booking_correct}/{report.booking_total})"
+            f"挂号意图    : "
+            f"{'未评测' if acc_booking is None else f'{acc_booking:.2%}'}"
+            f"  ({report.booking_correct}/{report.booking_total})"
         )
         acc = report.triage_accuracy
         print(f"分诊科室    : {'未评测（语料缺失）' if acc is None else f'{acc:.2%} top3 命中'}")
@@ -168,7 +173,13 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.write_baseline:
         Path(args.baseline).parent.mkdir(parents=True, exist_ok=True)
-        payload = {"schema": 1, "metrics": report.to_json()}
+        payload = {
+            "schema": 1,
+            # 金标指纹必须一起冻结：只存指标的话，"改了尺子"与"变好了"看起来一模一样。
+            "gold_sha256": clinic_gold_sha256(cases),
+            "n_cases": report.n_cases,
+            "metrics": report.to_json(),
+        }
         Path(args.baseline).write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
         _emit(f"\n已写入基线：{args.baseline}", json_mode=args.json)
         return 0
@@ -179,11 +190,31 @@ def main(argv: list[str] | None = None) -> int:
     fails = gate_failures(report)
     base_path = Path(args.baseline)
     if base_path.exists():
-        base = json.loads(base_path.read_text(encoding="utf-8"))["metrics"]
-        base_fp = float(base["redline"]["false_positive_rate"])
-        delta = report.redline_false_positive_rate - base_fp
-        if delta > GAITE_FP_TOLERANCE:
-            fails.append(f"红线误报率相对基线上升 {delta:.2%}（上限 {GAITE_FP_TOLERANCE:.0%}）")
+        base_raw = json.loads(base_path.read_text(encoding="utf-8"))
+        base = base_raw["metrics"]
+        current_sha = clinic_gold_sha256(cases)
+        if "gold_sha256" not in base_raw:
+            # 旧格式基线：**拒绝比较**，而不是"没有指纹就跳过这一关"。
+            # "缺字段就跳过校验"正是检索闸门 top_k 那个假绿洞的成因（见 harness.check_gate）。
+            fails.append(
+                "基线没有 gold_sha256（旧格式）：无法判断这把尺子是否被改过 ⇒ 拒绝比较。"
+                "确认无误后用 `--write-baseline` 重建基线"
+            )
+        elif base_raw["gold_sha256"] != current_sha:
+            fails.append(
+                f"标注集已变更（gold_sha256 {base_raw['gold_sha256']} -> {current_sha}）——"
+                "跨标注集的分数不可比，请确认后用 `--write-baseline` 重建基线"
+            )
+        else:
+            if int(base_raw.get("n_cases", -1)) != report.n_cases:
+                fails.append(
+                    f"红线用例数不一致（基线 {base_raw.get('n_cases')}，本次 {report.n_cases}）："
+                    "指纹相同却用例数不同，说明基线格式异常，拒绝比较"
+                )
+            base_fp = float(base["redline"]["false_positive_rate"])
+            delta = report.redline_false_positive_rate - base_fp
+            if delta > GAITE_FP_TOLERANCE:
+                fails.append(f"红线误报率相对基线上升 {delta:.2%}（上限 {GAITE_FP_TOLERANCE:.0%}）")
     else:
         _emit("（没有基线文件；跳过基线比较）", json_mode=args.json)
 

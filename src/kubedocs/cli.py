@@ -14,9 +14,13 @@ import argparse
 import json
 import sys
 import time
+from typing import TYPE_CHECKING
 
 from kubedocs.config import Settings
 from kubedocs.store import BACKENDS, Store, StoreError
+
+if TYPE_CHECKING:
+    from kubedocs.domains.base import DomainPack
 
 EXIT_OK = 0
 EXIT_USER = 1
@@ -26,7 +30,18 @@ EXIT_PRECONDITION = 3
 
 # --------------------------------------------------------------------------- 辅助
 def make_settings(args: argparse.Namespace) -> Settings:
-    """CLI 参数覆盖配置。直接构造 Settings 而不是改环境变量，避免污染进程环境。"""
+    """CLI 参数覆盖配置。直接构造 Settings 而不是改环境变量，避免污染进程环境。
+
+    ## 域自报的默认值（这是"双域"真正成立的地方）
+
+    `Settings` 的 `normalizer` / `embedding_model` / `embedding_dim` 是**域相关**的：
+    clinic 域必须用 jieba 预分词 + 中文模型（512 维），k8s 域用原样归一化 +
+    英文模型（384 维）。这组取值由 `DomainPack` 自报，本函数在用户**没有显式指定**时套用。
+
+    判据是 `model_fields_set`：环境变量与 `.env` 写过的字段会出现在里面，
+    所以 `KUBEDOCS_EMBEDDING_MODEL=xxx` 仍然优先于域默认值——
+    域提供的是**默认**，不是**强制**。
+    """
     overrides: dict[str, object] = {}
     if getattr(args, "domain", None):
         overrides["domain"] = args.domain
@@ -44,7 +59,52 @@ def make_settings(args: argparse.Namespace) -> Settings:
         overrides["hf_offline"] = True
     if getattr(args, "log_level", None):
         overrides["log_level"] = args.log_level
-    return Settings(**overrides)  # type: ignore[arg-type]
+    settings = Settings(**overrides)  # type: ignore[arg-type]
+    return apply_domain_defaults(settings)
+
+
+def apply_domain_defaults(settings: Settings) -> Settings:
+    """把域包自报的归一化/嵌入默认值套到 `Settings` 上（**不覆盖**显式取值）。
+
+    为什么需要它：`--domain` 原先只换了索引目录，语料、归一化器与嵌入模型
+    仍然是 k8s 默认值——于是 `--domain clinic ingest` 会把英文文档按
+    identity 归一化、用英文模型编码，灌进 clinic 的索引。
+    那正是"双域"看起来成立、实际不成立的原因。
+    """
+    from kubedocs.domains import load_all
+    from kubedocs.domains.base import DomainRegistry
+
+    load_all()
+    try:
+        pack = DomainRegistry.get(settings.domain)
+    except KeyError:
+        # 未知域：这里不报错，交给真正用到域的地方（open_store / ingest）给出可读信息。
+        return settings
+
+    patch: dict[str, object] = {}
+    explicit = settings.model_fields_set
+    if "normalizer" not in explicit:
+        patch["normalizer"] = pack.normalizer_name
+    if "embedding_model" not in explicit:
+        patch["embedding_model"] = pack.embedding_model
+    if "embedding_dim" not in explicit:
+        patch["embedding_dim"] = pack.embedding_dim
+    return settings.model_copy(update=patch) if patch else settings
+
+
+def _get_pack(settings: Settings) -> DomainPack:
+    """按 `settings.domain` 取域包。调用方需先确保 `load_all()` 已注册。"""
+    from kubedocs.domains import load_all
+    from kubedocs.domains.base import DomainRegistry
+
+    load_all()
+    try:
+        return DomainRegistry.get(settings.domain)
+    except KeyError as e:
+        # 未注册的域是**用户错误**，不该以 traceback 形式抛出：
+        # 调用方需要看到的是"有哪些域可选"。
+        print(f"域错误：{e}", file=sys.stderr)
+        raise SystemExit(EXIT_USER) from e
 
 
 def open_store(settings: Settings, *, require_data: bool = True) -> Store:
@@ -85,20 +145,27 @@ def _index_label(settings: Settings) -> str:
 
 # --------------------------------------------------------------------------- ingest
 def cmd_ingest(args: argparse.Namespace) -> int:
+    """把当前**域**的语料灌进索引。
+
+    走 `DomainPack.build_index()` 而不是直接调通用 `ingest()`：
+    语料从哪来、怎么切、用哪个归一化器与嵌入模型，都是域自己的事。
+    内核（本函数）只负责打开存储、打印报告。
+    """
     from kubedocs.embed import build_embedder
-    from kubedocs.ingest import ingest
 
     settings = make_settings(args)
+    pack = _get_pack(settings)
     store = open_store(settings, require_data=False)
     try:
         embedder = build_embedder(settings)
+        print(f"域：{settings.domain}（归一化器 {settings.normalizer}）")
         print(
             f"嵌入器：{settings.embedding_provider} / {getattr(embedder, 'name', '?')} "
             f"({settings.embedding_dim} 维)"
         )
-        print(f"语料：{settings.corpus_path}")
+        print(f"语料：{pack.corpus_root(settings)}")
         print(f"索引：{settings.store} @ {_index_label(settings)}")
-        report = ingest(
+        report = pack.build_index(
             store,
             embedder,
             settings,
@@ -120,12 +187,12 @@ def cmd_ingest(args: argparse.Namespace) -> int:
 # --------------------------------------------------------------------------- search
 def cmd_search(args: argparse.Namespace) -> int:
     from kubedocs.embed import build_embedder
-    from kubedocs.retrieve.hybrid import HybridRetriever
 
     settings = make_settings(args)
+    pack = _get_pack(settings)
     store = open_store(settings)
     try:
-        retriever = HybridRetriever(store, build_embedder(settings), settings)
+        retriever = pack.retriever(store, build_embedder(settings), settings)
         res = retriever.search(args.query, top_k=args.top_k)
         if args.json:
             print(
@@ -180,12 +247,12 @@ def cmd_search(args: argparse.Namespace) -> int:
 def cmd_ask(args: argparse.Namespace) -> int:
     from kubedocs.embed import build_embedder
     from kubedocs.generate import build_answerer
-    from kubedocs.retrieve.hybrid import HybridRetriever
 
     settings = make_settings(args)
+    pack = _get_pack(settings)
     store = open_store(settings)
     try:
-        retriever = HybridRetriever(store, build_embedder(settings), settings)
+        retriever = pack.retriever(store, build_embedder(settings), settings)
         ans = build_answerer(retriever, settings).answer(args.question, top_k=args.top_k)
         if args.json:
             print(json.dumps(ans.to_json(), ensure_ascii=False, indent=2))
@@ -235,14 +302,17 @@ def cmd_domains(args: argparse.Namespace) -> int:
         print(f"  {item['name']}")
         print(f"    说明      : {item['description']}")
         print(f"    归一化器  : {item['normalizer']}")
+        print(f"    嵌入模型  : {item['embedding_model']}（{item['embedding_dim']} 维）")
         print(f"    金标集    : {sets_text or '（无）'}")
     print("\n用 --domain <名字> 选择域；每个域的索引彼此独立（<index_dir>/<domain>/）。")
+    print("域自报的语料/归一化/嵌入会在 ingest 时自动套用（显式配置优先）。")
     return EXIT_OK
 
 
 # --------------------------------------------------------------------------- stats
 def cmd_stats(args: argparse.Namespace) -> int:
     settings = make_settings(args)
+    pack = _get_pack(settings)
     store = open_store(settings, require_data=False)
     try:
         st = store.stats()
@@ -251,7 +321,8 @@ def cmd_stats(args: argparse.Namespace) -> int:
             "domain": settings.domain,
             "store_backend": settings.store,
             "normalizer": st.normalizer,
-            "corpus_dir": str(settings.corpus_path),
+            # 语料位置由域自报：k8s 是一个目录，clinic 是一个 JSON 文件。
+            "corpus": str(pack.corpus_root(settings)),
             "db": str(settings.sqlite_path),
             "vectors": str(settings.vector_path),
             "n_docs": st.n_docs,
@@ -265,11 +336,16 @@ def cmd_stats(args: argparse.Namespace) -> int:
         }
         if args.verify:
             payload["fts_integrity"] = store.verify_fts()
+            # 向量侧体检：此前 `stats --verify` 只查 FTS，而 milvus/sqlite-vec 的
+            # docstring 都宣称它会调 `verify_vec()`——那里名不副实，这里补上。
+            verify_vec = getattr(store, "verify_vec", None)
+            if callable(verify_vec):
+                payload["vector_integrity"] = verify_vec()
         if args.json:
             print(json.dumps(payload, ensure_ascii=False, indent=2))
         else:
             print(f"域         : {settings.domain}（归一化器 {st.normalizer}）")
-            print(f"语料目录   : {payload['corpus_dir']}")
+            print(f"语料       : {payload['corpus']}")
             print(f"存储后端   : {settings.store}")
             print(f"索引位置   : {_index_label(settings)}")
             print(f"文档/块数  : {st.n_docs} / {st.n_chunks}")
@@ -279,7 +355,12 @@ def cmd_stats(args: argparse.Namespace) -> int:
             print(f"索引时间   : {st.indexed_at}")
             if args.verify:
                 print(f"FTS 一致性 : {payload['fts_integrity']}")
-                if payload["fts_integrity"] != "ok":
+                if "vector_integrity" in payload:
+                    print(f"向量一致性 : {payload['vector_integrity']}")
+                bad = payload["fts_integrity"] != "ok" or (
+                    payload.get("vector_integrity") not in (None, "ok")
+                )
+                if bad:
                     return EXIT_PRECONDITION
             if st.n_chunks == 0:
                 print("\n索引为空，请先跑 ingest", file=sys.stderr)
@@ -311,13 +392,18 @@ def cmd_serve(args: argparse.Namespace) -> int:
     import uvicorn
 
     from kubedocs.api.app import create_app
+    from kubedocs.observability import setup_tracing
 
     settings = make_settings(args)
+    tracer = setup_tracing(settings)
     app = create_app(settings)
     host = args.host or "127.0.0.1"
     port = int(args.port or settings.api_port)
     print(f"服务地址：http://{host}:{port}")
     print(f"域：{settings.domain}    索引：{settings.sqlite_path}")
+    print(
+        f"可观测：日志级别 {settings.log_level}／指标 /metrics／OTel {settings.otel_exporter if tracer else '未启用'}"
+    )
     print("首页（前端演示）：/    接口文档：/docs")
     uvicorn.run(app, host=host, port=port, log_level=(args.log_level or "info").lower())
     return EXIT_OK
@@ -377,11 +463,14 @@ def build_parser() -> argparse.ArgumentParser:
     _add_globals(common, argparse.SUPPRESS)
     sub = p.add_subparsers(dest="cmd", required=True)
 
-    pi = sub.add_parser("ingest", help="把语料切块、编码并写入索引（增量）", parents=[common])
+    pi = sub.add_parser("ingest", help="把当前域的语料切块、编码并写入索引（增量）", parents=[common])
     pi.add_argument("--rebuild", action="store_true", help="先清空索引再全量重建")
-    pi.add_argument("--limit-files", type=int, default=None, help="只处理前 N 个文件（冒烟用）")
+    pi.add_argument("--limit-files", type=int, default=None, help="只处理前 N 个文件/卡片（冒烟用）")
     pi.add_argument(
-        "--batch-files", type=int, default=60, help="每批提交的文件数（越小越不容易因中断丢工作，默认 60）"
+        "--batch-files",
+        type=int,
+        default=60,
+        help="k8s 域=每批提交的文件数；clinic 域=每次编码的卡片数（默认 60，越小越不容易因中断丢工作）",
     )
     pi.set_defaults(func=cmd_ingest)
 
@@ -433,10 +522,15 @@ def main(argv: list[str] | None = None) -> int:
     # 必须在任何第三方库（LiteLLM / huggingface_hub）读到 os.environ **之前**导出 .env，
     # 否则 .env 里的密钥到不了模型调用（详见 config.load_env_file 的说明）。
     from kubedocs.config import load_env_file
+    from kubedocs.observability import configure_logging
 
     load_env_file()
     parser = build_parser()
     args = parser.parse_args(argv)
+    # `--log-level` / `KUBEDOCS_LOG_LEVEL` 在这里真正生效。
+    # 此前它只进了 Settings（并只被 `uvicorn.run(log_level=...)` 用来设 uvicorn 自己的级别），
+    # 本项目自己的 logger 完全不受它影响——一个"设了没反应"的开关。
+    configure_logging(make_settings(args))
     t0 = time.perf_counter()
     try:
         rc = int(args.func(args))

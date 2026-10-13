@@ -244,8 +244,21 @@ class SqliteStore:
             )
 
     def _reload_index(self) -> None:
-        """把矩阵与 rowid 映射读进内存。向量矩阵按 vector_row 升序排列。"""
+        """把矩阵与 rowid 映射读进内存。向量矩阵按 vector_row 升序排列。
+
+        ## 为什么在这里校验 `vector_row` 的连续性（不是可选的防御性代码）
+
+        `dense_search` 用矩阵行号 `i` 去查 `self._row_index[i]`：**"矩阵第 i 行的
+        向量属于哪个 chunk"完全由 `vector_row` 决定**。一旦 `vector_row` 出现空洞
+        （例如调了 `delete_docs()` 之后没有 `finalize()`），`_row_index` 会比矩阵短，
+        标签整体前移——轻则**静默返回错误内容**（查询 A 的向量，返回 B 的正文），
+        重则 `IndexError` 越界。
+
+        这两种都不是"服务降级"，而是**给出了错误的答案**，所以加载时就大声失败，
+        而不是带着错位继续服务。修复办法只有一个：重建索引。
+        """
         with self._lock:
+            rows = [int(r["vector_row"]) for r in self._con.execute("SELECT vector_row FROM chunks")]
             self._row_index = [
                 r["chunk_id"] for r in self._con.execute("SELECT chunk_id FROM chunks ORDER BY vector_row")
             ]
@@ -263,6 +276,18 @@ class SqliteStore:
             mat = np.zeros((0, self.dim), dtype=np.float32)
         if mat.ndim != 2 or mat.shape[1] != self.dim:
             raise StoreError(f"{self.vector_path} 形状 {mat.shape} 与 dim={self.dim} 不符")
+        if sorted(rows) != list(range(len(rows))):
+            raise StoreError(
+                f"索引不一致：{len(rows)} 个块的 vector_row 不是连续的 0..{len(rows) - 1}"
+                f"（实际 {min(rows) if rows else '-'}..{max(rows) if rows else '-'}）。"
+                "成因通常是**删除文档后没有调用 finalize()**（纯删除的一轮 ingest 曾漏掉它）。"
+                "向量与块已经错位，继续查询会返回错误内容，请重建：`kubedocs ingest --rebuild`"
+            )
+        if mat.shape[0] != len(rows):
+            raise StoreError(
+                f"索引不一致：向量矩阵有 {mat.shape[0]} 行，chunks 表有 {len(rows)} 行。"
+                "成因通常是删除文档后没有调用 finalize()。请重建：`kubedocs ingest --rebuild`"
+            )
         self._matrix: np.ndarray = np.ascontiguousarray(mat, dtype=np.float32)
 
     # ------------------------------------------------------------------ 读取

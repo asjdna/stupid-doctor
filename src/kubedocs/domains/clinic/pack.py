@@ -9,7 +9,9 @@
     选题/建议 ← hypothesis.next_question / suggest_hypothesis（红线保护内置）
     急诊红线 ← redline.RiskGuard（确定性，LLM 不可绕过）
     挂号 ← BookingService → AppointmentProvider（SQLite / Mock 可换）
-    回答 ← selfask.self_ask（分解检索合成，带引用重编号）
+    回答 ← **注入的 `answerer`**（`build_clinic_deps(answerer=...)`）；未注入时用
+            "最佳候选 + 就医提醒"的保守兜底。`agent/selfask.py` 是实验模块，
+            **当前没有任何生产路径注入它**（P5 的 A/B 结论是"没有证据支持 self-ask"）。
 
 ## 来源判定为什么要在这里做
 
@@ -20,6 +22,7 @@
 
 from __future__ import annotations
 
+import re
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -43,9 +46,85 @@ from kubedocs.domains.clinic.redline import (
 # 实测：「挂号」不是「帮我挂个号」的子串（中间插了"个"）。朴素子串匹配在中文里直接失效。
 BOOK_WORDS = ("挂号", "挂个号", "预约", "取号", "约号", "挂专家号")
 
+# 确认词：用户对"确认挂号吗？"的**同意**表达。
+CONFIRM_WORDS = ("确认", "确定", "是的", "对的", "好的", "可以", "行", "嗯", "要", "麻烦", "谢谢")
+
+# `polarity.NEGATION_WORDS` 收录的是「无/没/不/未」一族，**不含祈使否定「别」**。
+# 为什么不在那张表里补：它是症状抽取与红线**共用**的，"特别疼""别的症状""告别"
+# 都会被裸「别」误判成否定——修一个词会造成一片误判。
+# 所以只针对挂号这一组窄词表补一条祈使否定，并把常见复合词排除掉。
+_BIE_COMPOUNDS = (
+    "别的",
+    "别人",
+    "特别",
+    "分别",
+    "区别",
+    "告别",
+    "别扭",
+    "别致",
+    "别提",
+    "个别",
+    "辨别",
+)
+
+# 「A 不 A」疑问式（能不能 / 可不可以 / 要不要 / 是不是）不是否定：
+# `polarity` 把其中的「不」当成了普通否定，于是「能不能取号」被判成"不要取号"。
+# 这里是**词表内的局部归一化**，不动 `polarity`——那张表是症状抽取与红线共用的。
+_ANOT_A = re.compile(r"(能|可|是|要|行|会|该|愿|好)不\1")
+
+
+def _negated(text: str, word: str) -> bool:
+    """`word` 在 `text` 里是否被否定（含祈使否定「别」与 A 不 A 疑问式的排除）。"""
+    probe = _ANOT_A.sub(lambda m: m.group(1), text)
+    if is_negated(probe, word):
+        return True
+    pos = probe.find(word)
+    while pos != -1:
+        idx = probe.rfind("别", 0, pos)
+        if idx != -1:
+            # 两个方向的 2 字窗口都要查：「特别」的「别」在后面，「别的」的「别」在前面。
+            after = probe[idx : idx + 2]
+            before = probe[max(0, idx - 1) : idx + 1]
+            if after not in _BIE_COMPOUNDS and before not in _BIE_COMPOUNDS:
+                return True
+        pos = probe.find(word, pos + 1)
+    return False
+
 
 def wants_booking(text: str) -> bool:
-    return any(w in text for w in BOOK_WORDS)
+    """用户是否**要求**挂号。
+
+    ## 为什么必须判否定
+
+    `"挂号" in "我不想挂号"` 是 `True`，但那是"不要挂号"。关键词命中只证明
+    "提到了挂号"，**不证明"想挂号"**——而挂号会占用一个真实号源，
+    把"用户否认"读成"用户要求"会直接扣掉一个号。
+
+    所以每个命中的词都要过一次否定判定：复用红线同一套 `polarity`（两套中文否定
+    逻辑必然有一天对不上）+ 一条祈使否定补充（见 `_negated`）。能覆盖：
+
+        我不想挂号 / 不要预约 / 不用取号 / 先别帮我挂号 / 别挂号   -> False
+
+    ## 已知边界（不是 bug，是没做）
+
+    "已经预约过了，不用再约" 里的否定词在短语**之后**且跨了分句，按 `polarity`
+    的作用域语义不构成否定 ⇒ 仍判为 True。这类"已完成"语义需要另一层
+    （时间/完成体）判定，本项目不做。代价有限：即使误判为挂号意图，
+    图路径也会先走 `confirm` 确认（见 `agent/kernel.py` 的 `node_confirm`），
+    不会直接占号。
+    """
+    return any(w in text and not _negated(text, w) for w in BOOK_WORDS)
+
+
+def confirm_booking(text: str) -> bool:
+    """用户对"确认挂号吗？"的回答是否表示**同意**。
+
+    同样走否定判定："不用了" / "先不挂" / "别确认" 必须是"不同意"。
+    再次明确说出挂号意图（"确认挂号"）也算同意。
+    """
+    if wants_booking(text):
+        return True
+    return any(w in text and not _negated(text, w) for w in CONFIRM_WORDS)
 
 
 def extract_evidence(text: str, turn: int, *, suggested: Sequence[str] = ()) -> list[SymptomEvidence]:
@@ -126,8 +205,9 @@ def build_clinic_deps(
 ) -> ClinicWiring:
     """把域资产与 agent 模块装配成 `ClinicDeps`。
 
-    `answerer` 缺省时回答走 self-ask（需要检索器与 LLM，由 P3 注入）；
-    这里给一个"只回当前最佳候选 + 就医提醒"的保守兜底——**宁可信息少，也不要没答案**。
+    `answerer` 是**可选注入**的检索回答器（需要检索器与 LLM）；
+    不注入时 `_answer` 走"最佳候选 + 就医提醒"的保守兜底——
+    **宁可信息少，也不要没答案**。注意 self-ask 不在这条链上（见模块文档）。
     """
     guard = RiskGuard()
     service = BookingService(provider)
@@ -203,6 +283,7 @@ def build_clinic_deps(
         answer=_answer,
         book=_book,
         wants_booking=wants_booking,
+        confirm_booking=confirm_booking,
         wants_emergency_care=wants_emergency_care,
         emergency_advice=emergency_advice,
         emergency_menu=emergency_menu,

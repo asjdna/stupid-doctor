@@ -6,21 +6,28 @@
 START → redline(确定性红线) ─命中→ emergency(给建议) → END
                 │不命中
                 ↓
-            observe(抽证据 + 候选打分) → decide(停/问/挂号)
+            observe(抽证据 + 候选打分) → decide(停/问/挂号/确认)
                           ┌────────────┴─────────────┐
                           ↓                          ↓
-                    ask(追问, interrupt 挂起)     book(挂号) / answer(self-ask 回答)
-                          │用户回答                    │
-                          └──────→ observe ↺            └→ END
+                    ask(追问, interrupt 挂起)   confirm(挂号确认, interrupt 挂起)
+                          │用户回答                  │用户回答
+                          └──────→ redline ↺          ├─同意→ book → END
+                                                     └─不同意→ answer → END
 ```
+
+**每一轮的输入都要重新过 `redline`**（首轮是 `question`，续答轮是 `resume_text`）：
+只在首轮判红线，会让"用户在回答追问时才说出胸痛/呼吸困难"绕过急诊分支——
+那是安全属性上的漏判，不是体验问题。同理，`book` 之前必须有 `confirm`：
+**一个关键词命中就占用号源，不是"用户要求挂号"的充分证据**（"我不想挂号"也含关键词）。
 
 ## 三个刻意的设计
 
 1. **红线走 LLM 不可达的强制边**：`redline` 节点之后由**确定性函数**决定是否转急诊，
    没有任何工具或模型输出能让它改道。急诊识别是安全属性，不是可协商的判断。
+   该节点在**每一轮**都会被进入，所以"续答轮说到红线症状"同样会被拦下。
 
 2. **追问用 `interrupt()` 真挂起**，而不是"在内存里记个标志位等下一轮"。
-   区别在于：挂起的状态由 checkpointer 落到 SQLite，进程重启后能原地续跑；
+   区别在于：挂起的状态由 checkpointer 保存，换实例/进程重启后能原地续跑；
    标志位方案一旦进程重启就丢上下文（源项目就是标志位方案）。
 
 3. **轮次有硬上限**：`decide` 里除了"候选领先度达标"还有 `max_turns` 兜底。
@@ -84,7 +91,14 @@ class ClinicDeps:
     """挂号（有副作用，仅在确认后调用）。"""
 
     wants_booking: Callable[[str], bool] = field(default=lambda text: False)
-    """用户是否要求挂号。"""
+    """用户是否要求挂号。**必须能识别否定**："我不想挂号"不是挂号请求。"""
+
+    confirm_booking: Callable[[str], bool] = field(default=lambda text: False)
+    """用户对"确认挂号吗？"的回答是否表示同意。
+
+    默认 `False` 是刻意的：**没接确认回调 = 不挂号**。
+    副作用工具的默认行为必须是"拒绝"，而不是"先做了再说"。
+    """
 
     wants_emergency_care: Callable[[str], bool] = field(default=lambda text: False)
     """用户在急诊二选一里是否选择立即就医。"""
@@ -100,12 +114,15 @@ def _make_nodes(deps: ClinicDeps, max_turns: int) -> dict[str, Callable[..., Any
     from langgraph.types import interrupt
 
     def node_redline(state: ClinicState) -> dict[str, Any]:
-        hit = deps.check_red_line(state.get("question", ""))
+        # **每一轮**的输入都要过红线：首轮是 question，续答轮是 resume_text。
+        # 只看 question 会让"用户在回答追问时才说出胸痛"绕过急诊分支。
+        text = str(state.get("resume_text") or state.get("question", ""))
+        hit = deps.check_red_line(text)
         if hit is None:
             return {"diagnostics": ["红线未命中（确定性规则）"]}
         word = getattr(hit, "word", str(hit))
         # 红线命中也要把已说症状留下：不能因为转急诊就丢掉病历
-        evidence = deps.observe(state.get("question", ""), state)
+        evidence = deps.observe(text, state)
         return {
             "red_line": {
                 "word": word,
@@ -173,12 +190,30 @@ def _make_nodes(deps: ClinicDeps, max_turns: int) -> dict[str, Callable[..., Any
         ticket = deps.book(state)
         return {"ticket": ticket, "status": "done", "stop_reason": "已挂号"}
 
+    def node_confirm(state: ClinicState) -> dict[str, Any]:
+        """挂号前的**显式确认**：真挂起，等用户回答。
+
+        为什么要这一步：`wants_booking` 是关键词判定，它证明的是"用户提到了挂号"，
+        不是"用户同意占用一个号源"。占号是**有副作用**的动作（会扣掉别人的号），
+        所以必须有一次独立的确认，而不是靠一次关键词命中就下单。
+        与工具循环路径的 `_confirm_side_effect` 是同一原则，只是这里确定性实现。
+        """
+        reply = interrupt(
+            {
+                "question": "确认要挂号吗？回复「确认」我就为您取号。",
+                "confirm": "booking",
+            }
+        )
+        text = str(reply)
+        return {"resume_text": text, "booking_confirmed": bool(deps.confirm_booking(text))}
+
     return {
         "redline": node_redline,
         "emergency": node_emergency,
         "observe": node_observe,
         "decide": node_decide,
         "ask": node_ask,
+        "confirm": node_confirm,
         "answer": node_answer,
         "book": node_book,
     }
@@ -193,10 +228,16 @@ def _after_redline(state: ClinicState) -> str:
 def _after_decide(state: ClinicState) -> str:
     status = state.get("status", "asking")
     if status == "booking":
-        return "book"
+        # 挂号意图成立**不代表可以下单**：先去 confirm 拿一次明确同意。
+        return "confirm"
     if status == "asking":
         return "ask"
     return "answer"
+
+
+def _after_confirm(state: ClinicState) -> str:
+    """确认之后：同意才占号，否则回去作答（不产生任何副作用）。"""
+    return "book" if state.get("booking_confirmed") else "answer"
 
 
 def _after_ask(state: ClinicState) -> str:
@@ -205,9 +246,12 @@ def _after_ask(state: ClinicState) -> str:
     - `answering`：**没有更有鉴别力的问题可问了** —— 必须直接去作答。
       若这里无条件回到 `observe`，就会形成一个"问不出来→再看一遍→还是问不出来"
       的空转循环，最终靠递归上限才停下（错误信息还很难懂）。
-    - 其余（含 `interrupt` 被 resume 回来的情况）：回 `observe`，把用户的回答变成新证据。
+    - 其余（含 `interrupt` 被 resume 回来的情况）：**回 `redline`**，把用户的回答
+      先过一遍确定性红线，再变成新证据。
+      回到 `observe` 也"能跑"，但那会让续答轮绕开急诊判定——
+      而用户完全可能在回答追问时才说出胸痛/呼吸困难。
     """
-    return "answer" if state.get("status") == "answering" else "observe"
+    return "answer" if state.get("status") == "answering" else "redline"
 
 
 # --------------------------------------------------------------------------- 装配
@@ -234,8 +278,10 @@ def build_clinic_graph(
     g.add_conditional_edges("redline", _after_redline, {"emergency": "emergency", "observe": "observe"})
     g.add_edge("emergency", END)
     g.add_edge("observe", "decide")
-    g.add_conditional_edges("decide", _after_decide, {"ask": "ask", "answer": "answer", "book": "book"})
-    g.add_conditional_edges("ask", _after_ask, {"observe": "observe", "answer": "answer"})
+    g.add_conditional_edges("decide", _after_decide, {"ask": "ask", "answer": "answer", "confirm": "confirm"})
+    # 续答轮先回 redline（每一轮都过确定性红线），而不是直接回 observe。
+    g.add_conditional_edges("ask", _after_ask, {"redline": "redline", "answer": "answer"})
+    g.add_conditional_edges("confirm", _after_confirm, {"book": "book", "answer": "answer"})
     g.add_edge("answer", END)
     g.add_edge("book", END)
     return g.compile(checkpointer=checkpointer or InMemorySaver())

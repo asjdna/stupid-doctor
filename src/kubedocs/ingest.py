@@ -219,6 +219,14 @@ def ingest(
             f"累计编码 {report.chunks_embedded}"
         )
 
+    if removed and report.batches == 0:
+        # **纯删除的一轮**：上面的循环体一次都没进，`finalize()` 也就没被调用过。
+        # 而 `delete_docs()` 只标记"脏"，`vector_row ↔ 矩阵行号`的对齐要由
+        # `finalize()` 重建。漏掉它的后果是索引带着错位活下去——重启后
+        # 要么静默返回错误内容，要么越界 IndexError（`sqlite` 后端实测复现过）。
+        # 这里补一次：删除本身也必须压实映射。
+        store.finalize()
+
     report.elapsed_s = time.perf_counter() - t0
     return report
 

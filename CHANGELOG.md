@@ -4,16 +4,128 @@
 版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
 **关于版本与日期，先把话说清楚**：仓库**没有 tag、没有 remote、也没有发布过任何制品**，
-所以下面的 `[0.1.0]` 标注为 **未发布（no tag yet）**——这个版本号来自 `pyproject.toml` 的
+所以下面两节的版本号标注为 **未发布（no tag yet）**——`0.1.0` 来自 `pyproject.toml` 的
 `version = "0.1.0"`，不是一次发布。**不写版本日期**，因为写任何一个日期都会是编的。
 条目里的短哈希是真实提交，`git show <哈希>` 可以逐条核对。
+
+> **本次修订说明（2026-10-12）**：此前本文件只归纳了**前 22 个提交**
+> （提交日期区间 2026-09-24 ~ 2026-09-25），而仓库当时已经有 **33 个提交**——
+> 2026-10-08 ~ 2026-10-11 那 **11 个提交没有进变更日志**。现在把它们补进 `[0.1.0]`
+> 的对应小节，并新增一节记录本轮（10 项）修复。
+> 同时更正一处旧说法：原先写"**没有删除项**——历史里没有任何功能或文件被移除"，
+> 那个判断只在 22 个提交的范围内成立；`KUBEDOCS_ENV` / `is_prod` 这两个**假开关**
+> 后来被删掉了（`4eb5e10`），本轮又删掉了另外 4 个。
+
+---
+
+## [未发布] - 本轮修复（2026-10-12）
+
+一轮以"关闭真实缺陷 + 抹平文档与实现的自相矛盾"为目标的改动。每一条都标注了
+**怎么验证**，而不是只写"已修复"。
+
+### Fixed — 安全与正确性
+
+- **急诊红线现在**每一轮**都判**：此前 `node_redline` 只看首轮的 `question`，而 resume
+  轮被直接送回 `observe`——用户在回答追问时才说出"胸痛，喘不上气"**永远不会**转急诊。
+  现在续答轮先过红线。回归测试：`test_kernel.py::test_red_line_is_checked_again_on_resume_turns`。
+- **挂号意图能识别否定**：`"挂号" in "我不想挂号"` 曾为真，用户在**明确否认**时也会被占号
+  （图路径实测出过票）。`pack.wants_booking` 现在走否定判定（复用红线的 `polarity`，
+  并补上它缺的祈使否定「别」，同时排除"特别/别的"这类复合词）。
+- **图路径必须先确认才占号**：新增 `confirm` 节点（真 `interrupt` 挂起）与
+  `_after_confirm`；未确认绝不进 `book`。副作用工具的默认行为是**拒绝**，不是"先做了再说"。
+- **号源归属来自调用方**：`patient_id` 经 `run_tool_loop(context=...)` 注入执行体，
+  **不进工具 schema**（模型无法伪造）。此前它压根传不到执行体，**所有号都记在 `"anon"` 名下**。
+- **LLM 账本真正原子**：读也在锁内、写入改成 `tmp` + 原子替换（`_atomic_replace`）。
+  此前 `write_text` 先截断，并发读者会读到空文件 ⇒ 当作"今天没花过" ⇒ **闸门 fail-open**。
+  实测 3 写 3 读并发 900 次记账：读到空文件 0 次、异常 0 次。
+- **新增 `reserve()`，堵住 `check()`→`record()` 之间的并发窗口**：
+  实测上限 $1.0、每次预留 $0.3 时，10 个并发请求只放行 **3** 个（此前会全部放行再各自记账）。
+- **账本改成"一门账"**：路径移到 `Settings.llm_spend_path`（全局一份，不在域目录下）。
+  此前按域分账 ⇒ 切换 `domain` 就能把上限翻成 N 份，且 clinic 会话的花费被记进 k8s_docs 目录。
+  磁盘上已有的两本账（`data/index/llm_spend.json` 与 `data/index/k8s_docs/llm_spend.json`）
+  已**合并求和**。
+- **纯删除的一轮 `ingest` 补上 `finalize()`**：`todo` 为空时循环体不执行，
+  `finalize()` 也就没被调用过，而 `delete_docs()` 只标记"脏"——结果是
+  `vector_row ↔ 矩阵行`错位，重启后**静默返回错误内容**或越界 `IndexError`（已复现）。
+  同时 `_reload_index` 现在校验 `vector_row` 连续性与矩阵行数，不一致就**大声失败**。
+- **评测闸门缺字段 = 拒绝比较**：`check_gate` 先校验基线有
+  `schema`/`gold_sha256`/`embedding_model`/`top_k`/`n_chunks`/`metrics`，缺任一即拒绝。
+  此前 `int(base.get("top_k", 0))` 配 `if b_top_k and ...`，让"基线没有 top_k"整段**静默跳过**——
+  实测用旧格式基线可以拿 `hit@20 = 0.9000` 通过绑定 `hit@10 = 0.8400` 的闸门（退出码 0）。
+- **clinic 安全闸门不再被空集满足**：`redline_recall` 在分母为 0 时返回 `None`（此前是
+  **1.0**，于是删掉全部红线用例会打印「红线召回 100.00% (TP=0 FN=0)」）；`gate_failures()`
+  把"红线未评测"判为失败；clinic 基线**绑定金标指纹**（`gold_sha256` + `n_cases`，
+  **指标值未改**）。
+- **存储层的失败也降级**：此前 `try` 只包住 `embedder.encode`，`StoreError` 会直接抛出，
+  既没有纯全文回退、也没有 `diagnostics.degraded` 里的原因。
+- **引用标记正则放宽到 `\d+`**：`\d{1,3}` 会漏掉 `[1234]`，让它**静默留下**。
+- **重叠尾段不再切进代码围栏**：`_safe_overlap_tail` 现在判断断点是否落在围栏内部，
+  落在里面就放弃重叠。实测全量语料：围栏标记数为奇数的块 **581 → 25**（−95.7%），
+  块数 18861 → **18811**。
+- **`_get_clinic_react` 补上锁 + 双检**（与 `_get_clinic_agent` 同款）：并发首请求曾会构造
+  两个运行时、两份互不相通的号源库存。
+
+### Fixed — 双域（clinic）真正接通
+
+- **`DomainPack` 自报嵌入模型与维度**（`embedding_model` / `embedding_dim`，与既有
+  `normalizer_name` 同构），`cli` 在用户未显式覆盖时套用：`--domain clinic` 现在会自动用
+  **jieba 归一化 + `BAAI/bge-small-zh-v1.5`（512 维）**。
+- **`cmd_ingest` 改走 `pack.build_index()`**，`stats` 改用 `pack.corpus_root()`，
+  `search`/`ask` 改走 `pack.retriever()`。此前 `--domain` **只换了索引目录**，
+  语料/归一化/嵌入仍是 k8s 默认值——于是 `--domain clinic ingest` 会把**英文文档按
+  identity 归一化、用英文模型编码**灌进 clinic 索引（本机那个 0 块的 clinic 库，
+  元信息就是 `bge-small-en / 384 / identity`，正是这个缺陷的产物）。
+- **clinic 索引已按中文模型全量建成并实测**：31,592 块 / 31,592 文档，
+  `verify_fts()` 与 `verify_vec()` 都是 `ok`，中文查询真实命中。
+- 修掉卡片引用 URL 多一层 `clinic/` 的拼接错误。
+
+### Added — 观测（此前是"假开关"）
+
+- 新增 `src/kubedocs/observability.py`：`configure_logging()`（`log_level` 真正生效）、
+  `setup_tracing()`（真实 `TracerProvider`，console / otlp）、Prometheus 计数器与直方图、
+  `span()` 上下文管理器（未启用时零开销空操作）。
+- `/metrics` 端点 + 请求计数/耗时中间件（端点名取**路由模板**，避免标签基数爆炸）；
+  检索单路延迟、LLM 调用次数（按能否定价分解）与累计花费都上了指标。
+- `otel_enable`/`otel_exporter`/`log_level` 从"声明了没人读"变成**真实分支**；
+  `otel_enable` **默认关**（console 导出器会往 stdout 打 span，测试与库场景是噪声）。
+
+### Added — 文档锚点校验覆盖到"文件引用"
+
+- `check_doc_refs.py` 新增一类校验：**纯 `.md` 文件引用必须存在**。
+  这是此前的**整类盲区**（`文件:行号` 那条路要求"路径 + 冒号 + 数字"）——
+  `docs/adr/0005-milvus-后端.md` 曾经并不存在、12 处引用它，而门禁一路绿灯。
+  规则刻意收紧以避免噪声（只查首段是仓内顶层目录的路径、跳过示意与外部路径），
+  代价写在脚本注释里。
+- 新增 `docs/adr/0005-milvus-后端.md`（补上那 12 处悬空引用），含本轮**重测**的
+  HNSW 召回/延迟数据：3000 块量级下 HNSW 与精确检索**逐位相同**（ef=16/64/128/256 都是 50/50），
+  而单查询 ~0.7 s——远慢于 `sqlite-vec`。
+
+### Changed — 陈旧文档与配置
+
+- 删除 4 个**假开关**：`Settings.redis_url`、`langfuse_host` / `langfuse_public_key` /
+  `langfuse_secret_key`；连带删除 `redis` 依赖（`types-redis`）、compose 里没人连的
+  `cache`(redis) 与 `langfuse` 服务、以及 `.env.example` 里的对应项。
+- `Makefile` 的 `eval` / `ingest` / `search` 补上 `--hf-offline`：README 自己实测"已缓存模型的
+  联网校验会挂死 >10 分钟"，而 Makefile 此前只带 `--hf-endpoint`——照着它跑会在本机卡住。
+- 重新锚定 `SECURITY.md` 的全部 `文件:行` 引用（代码改动会让行号整体位移），
+  并把本轮修复的事实写进对应的 S-2 / S-3 / S-4 / S-5 与"已封闭攻击面"表。
+- 更正 README/CONTRIBUTING/ci.yml 里若干**与代码不一致**的说法：
+  API 端点 6→8、默认存储写错、pgvector 闸门"仍是红的"（早已修好）、
+  `make check` 是否含排版门、concept 反常结论的机制（"3 条本来排第一"不成立，
+  实为 **4 失 1 得**且没有一条是第 1 位）、`±11pp` 的样本口径（那是 50 条整体的 CI）。
+- 清理游离文件：`.kd_probe1.sql`（未被 gitignore 的探针脚本）与未被跟踪的 `docker/`
+  （其镜像选型取舍已记在 ADR-0004 第十节，没有丢失结论）。
+- `.env` 里的真实密钥改为占位值。
 
 ---
 
 ## [0.1.0] - 未发布（no tag yet）
 
-首个版本的全部内容，由 22 个提交归纳（提交日期区间 2026-09-24 ~ 2026-09-25，
-取自 `git log` 的 committer date）。**没有删除项**——历史里没有任何功能或文件被移除。
+首个版本的全部内容，由 **33 个提交**归纳（提交日期区间 2026-09-24 ~ 2026-10-11，
+取自 `git log` 的 committer date）。
+
+> 说明：其中 2026-10-08 ~ 2026-10-11 的 11 个提交原先**没有记进本文件**，
+> 本次补入下面的 Added / Changed / Fixed。
 
 ### Added
 
@@ -51,12 +163,26 @@
   （端到端 15/15 通过）（`525aa6d`）
 - LLM 驱动的 clinic 路径 `ClinicReactRuntime`：红线前置（确定性、LLM 不可绕过）+
   工具接线 + 挂号确认策略（`3185a19`）
+- **开源门面 ＋ 可插拔向量存储后端**：`Store` 协议下的 `sqlite-vec`（默认）与 `pgvector`
+  实现、`store/__init__.py` 的 `BACKENDS` 单一出口、按域分目录的索引布局（`c6a8ff0`）
+- **文档锚点内容级校验器** `scripts/check_doc_refs.py`：`文件:行号` 引用必须指着它自己
+  声称的东西（不只是"文件存在、行号不越界"），并重锚了 24 处失效引用（`4eb5e10`）
+- CI 真实性：独立的 `gate` job（真实模型 + 冻结基线卡检索指标）+ `quality` job 加
+  Postgres service 让 DB 集成测试**真跑**（`b415727`）
 
 ### Changed
 
 - 回答上下文去冗余：**同一文档最多收录 2 段**（`config.max_chunks_per_doc` 默认 2）（`76471b8`）
 - `/chat` 从确定性图切到 **LLM 驱动的工具循环**（模型自己选工具、自己决定步数），
   并留下真实运行记录 `scripts/demo_clinic_agent.py`（`be399a4`）
+- `ruff format` 全量重排并接入 CI 阻塞门禁（`ruff check` 与 `ruff format --check` 是两道门）
+  （`fcd7a55`）
+- MIT 版权署名改为集合式约定 `The kubedocs Authors`（`e808e73`）
+- **pgvector 全文路换 ParadeDB `pg_search` 真 BM25**：镜像从 `pgvector/pgvector:pg16`
+  换成 `paradedb/paradedb:0.26.1-pg16`（**仍是 PG16**，数据目录原地上机）。
+  hybrid hit@10 **0.7400 → 0.8600**（≥ 冻结基线 0.8400，`--gate` 退出码 0），
+  关键字路 `EXPLAIN` 从 **42/50 条 `Seq Scan`** 变成 **0/50**，hybrid p50 120.1 → 72.6 ms
+  （`5ceaa6f`）
 
 ### Fixed
 
@@ -65,17 +191,29 @@
 - **`.env` 里的密钥到不了模型调用**（pydantic-settings 不写 `os.environ`，而
   LiteLLM 与 `has_api_key()` 读的正是它）——README 描述的那套流程此前是**静默失效**的；
   同时修掉"测试可能真实花钱"的两个缺陷（`65537e0`）
-- 修 A/B 脚本的 ruff 告警（`S110` / `C416` / `SIM105`）：成本统计失败改为显式保留原值，
-  而不是空 `pass`（`b11f2c0`）
+- 修 A/B 脚本的 ruff 告警（`S110` / `C416` / `SIM105`）（`b11f2c0`）
 - 修正 P5 对 self-ask 的错误判断，并在复合问题上做了一次**真正隔离"分解"**的 A/B
   （结论仍是负面）（`3fcd4c3`）
 - **工具协议接线**：clinic 号源工具 + `bootstrap.register_domain_tools` 幂等注册
   ——在此之前**全仓库从未调用过 `register`**，整条工具链路是死的；同一次提交补上
   `agent/tool_loop.py` 与对话前端 `data/web/index.html`（`1090c71`）
+- 修六项：工具循环丢 history / ADR-0004 的假设被证否 / `make help` / `ef_search` 默认 200 /
+  `.dockerignore` / 文档残留（`aaffab1`）
+- 修 `eval --gate --json` **静默跳过闸门**的缺陷（`1ad984d`）
+- 修三个 bug：**闸门不看分诊** / `/chat` **无成本上限** / `thread_id` **无属主校验**
+  ——三者都是"文档说有、代码没有"的缺口（`e1307cd`）
+- 堵住评测闸门的一个**假绿洞**：`check_gate` 从不比对基线的 `top_k`
+  （`f7db3d7`；本轮又把"基线缺字段"这条退路一并关掉）
+- 修 `--json` 输出污染（stdout 上多一行人类旁白会让 `json.loads` 整体失败）等三处缺陷
+  （`fcd7a55`）
+- **删除 `KUBEDOCS_ENV` / `is_prod` 两个假开关**：全仓没有任何一行代码读它们，
+  只做声明与校验，却让 CI 里的 `KUBEDOCS_ENV: ci` 看起来在起作用（`4eb5e10`）
 
 ### Removed
 
-- 无。22 个提交里没有任何对外行为或文件被删除（`git log --diff-filter=D` 为空）。
+- 无**文件**被删除（`git log --diff-filter=D` 为空）。
+- 但**有配置项被删除**（旧说法"没有删除项"不准确）：`KUBEDOCS_ENV` 与派生的 `is_prod`
+  在 `4eb5e10` 被移除，`.env.example` 与 `ci.yml` 里的对应设置一并清掉。
 
 ---
 
@@ -83,8 +221,7 @@
 
 - 每条后面的短哈希指向**一个真实提交**，不是一组合并叙述：`git show 1090c71`。
 - 负面结论（self-ask 无用、多跳更差）**照实写进来**，不粉饰成"优化了检索"。
-  它们是这个项目的资产：说明假设被证否过，而不是没试过。
 - 想看每个数字是怎么来的，看 `README.md` 的「实测数字」「评测：怎么保证分数不是自欺」
   两节，以及 `docs/检索与评测口径.md`。
-- 尚未完成的部分（LangGraph agent 落地、FastAPI `/metrics`、pgvector 生产实现、
-  Docker 全栈实测）**不在本文件里**——还没做的事不是"变更"。它们记在 README 的 Roadmap。
+- 尚未完成的部分逐条记在 README 的 Roadmap 与 `SECURITY.md` 第 6 节，
+  不写进本文件（还没做的事不是"变更"）。

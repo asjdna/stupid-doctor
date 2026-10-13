@@ -59,13 +59,15 @@ from __future__ import annotations
 
 import inspect
 import json
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Iterator, Mapping, Sequence
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from typing import Any, Protocol
 
 from pydantic import BaseModel, ValidationError
 
 from kubedocs.agent.tools import ToolError, ToolSpec
+from kubedocs.observability import observe_llm_call
 
 TOOL_RESULT_LIMIT = 4000
 """单条工具结果回灌给模型的最大字符数。
@@ -84,6 +86,10 @@ class SpendGuard(Protocol):
     刻意只要求这两个方法、不 import `generate.DailyBudget`：工具循环是**域无关**的，
     "预算是谁实现的、超限抛什么异常"属于调用方的策略（`DailyBudget` 就是它的一个实现）。
     鸭子类型在这里也真的有用：单测可以传一个只数调用次数的假闸门。
+
+    **可选**：实现里若还有 `reserve()`（返回上下文管理器），循环会优先用它——
+    它能在整个调用期间占住额度，避免并发请求一起冲过上限。
+    只有 `check()` 的实现仍然可用，只是并发下上限会松（见 `_budget_slot`）。
     """
 
     def check(self, estimated_usd: float = 0.0) -> None:
@@ -91,6 +97,29 @@ class SpendGuard(Protocol):
 
     def record(self, usd: float, *, priced: bool = True) -> float:
         """累计一次花费；`priced=False` 表示这次算不出价（实现方须保守处理）。"""
+
+
+@contextmanager
+def _budget_slot(budget: SpendGuard | None) -> Iterator[None]:
+    """为一次模型调用取得预算额度。
+
+    `DailyBudget` 有 `reserve()`：整个调用期间额度被占住，并发的请求不会一起越过上限。
+    只有 `check()` 的闸门退回原行为（检查一次），并发下上限会松——这一点写在
+    `DailyBudget` 的类文档里，不假装它被这两行解决了。
+
+    **调用方必须把这个上下文管理器放在 `try` 之外**：超限不是"一次 LLM 调用失败"，
+    不能落进循环那个"LLM 是外部服务"的 `except` 里变成一条 note 被吞掉。
+    """
+    if budget is None:
+        yield
+        return
+    reserve = getattr(budget, "reserve", None)
+    if reserve is None:
+        budget.check()
+        yield
+        return
+    with reserve():
+        yield
 
 
 HISTORY_ROLES = ("user", "assistant")
@@ -224,12 +253,17 @@ def run_tool_loop(
     confirm: ConfirmFn | None = None,
     history: Sequence[dict[str, Any]] | None = None,
     budget: SpendGuard | None = None,
+    context: Mapping[str, Any] | None = None,
 ) -> AgentTurn:
     """跑一轮"模型选工具 -> 执行 -> 回灌 -> 再选"的循环，直到模型给出最终回答。
 
     `max_steps` 是 **LLM 轮次**的硬上限（不是工具执行次数）：一轮里模型可以要求调多个
-    工具，它们都算同一步。达到上限仍未收敛就停下——宁可留下"没答完"的记录，也不要无界地
+    工具，它们都算同一步。达到上限仍未停下——宁可留下"没答完"的记录，也不要无界地
     烧预算。
+
+    `context` 是调用方提供的环境参数（如已认证的 `patient_id`），会注入到**声明了该
+    参数名**的工具执行体上。它不进工具 schema，所以模型无法伪造它——
+    `book_appointment` 记的是"谁在调用"，不是"模型说这是谁"。
 
     `confirm` 只对 `side_effect=True` 的工具生效；为 `None` 时这类工具一律拒绝执行。
 
@@ -270,33 +304,36 @@ def run_tool_loop(
 
     for _ in range(max_steps):
         turn.steps += 1
-        if budget is not None:
-            # 调用**之前**检查：超限时这一次模型调用根本不发生（不是"先花了再说"）。
-            # 这里刻意放在 try 之外：异常必须上抛给调用方，而不是变成一条 note。
-            budget.check()
-        try:
-            turn.llm_calls += 1
-            response = llm.choose(messages, schemas)
-        except Exception as e:  # noqa: BLE001 - LLM 是外部服务，任何异常都不该让 agent 崩掉
-            turn.notes.append(
-                f"LLM 调用失败（{type(e).__name__}: {e}）：已用已有 {len(turn.tool_calls)} 次"
-                "工具结果收尾（提交给调用方的 answer 为空，证据保留在 tool_calls 里）；"
-                "这里不重试，避免供应商故障时把账单放大"
-            )
-            return turn
+        # 预算闸门在 `try` **之外**：超限时这一次模型调用根本不发生，
+        # 且异常原样上抛给调用方，而不是变成一条 note（`/chat` 的响应里看不到 notes）。
+        # 有 `reserve()` 的闸门会在整个调用期间占住额度，见 `_budget_slot`。
+        with _budget_slot(budget):
+            try:
+                turn.llm_calls += 1
+                response = llm.choose(messages, schemas)
+            except Exception as e:  # noqa: BLE001 - LLM 是外部服务，任何异常都不该让 agent 崩掉
+                turn.notes.append(
+                    f"LLM 调用失败（{type(e).__name__}: {e}）：已用已有 {len(turn.tool_calls)} 次"
+                    "工具结果收尾（提交给调用方的 answer 为空，证据保留在 tool_calls 里）；"
+                    "这里不重试，避免供应商故障时把账单放大"
+                )
+                return turn
 
-        if not isinstance(response, dict):
-            turn.notes.append(
-                f"LLM 返回了非 dict 的响应（{type(response).__name__}）：无法解析工具调用，已停止"
-            )
-            return turn
+            if not isinstance(response, dict):
+                turn.notes.append(
+                    f"LLM 返回了非 dict 的响应（{type(response).__name__}）：无法解析工具调用，已停止"
+                )
+                return turn
 
-        cost, priced = _cost_of(response)
-        turn.cost_usd += cost
-        if budget is not None:
-            # 账本写不进去（磁盘满/权限）时异常同样上抛：与 `/ask` 路径一致，
-            # 不为"保住这次回答"而把一次真实花费记丢。
-            budget.record(cost, priced=priced)
+            cost, priced = _cost_of(response)
+            turn.cost_usd += cost
+            if budget is not None:
+                # 账本写不进去（磁盘满/权限）时异常同样上抛：与 `/ask` 路径一致，
+                # 不为"保住这次回答"而把一次真实花费记丢。
+                budget.record(cost, priced=priced)
+            # 指标与账本分开记：账本是事实来源，指标是可被抓取的视图。
+            # 放在 `if budget` 之外——即使没有闸门，调用次数也应当被观测到。
+            observe_llm_call(cost_usd=cost, priced=priced)
         if not priced:
             turn.unpriced_calls += 1
             turn.notes.append(
@@ -317,7 +354,13 @@ def run_tool_loop(
         )
 
         for parsed in calls:
-            call = _execute(parsed, registry=registry, confirm=confirm, notes=turn.notes)
+            call = _execute(
+                parsed,
+                registry=registry,
+                confirm=confirm,
+                notes=turn.notes,
+                context=context,
+            )
             turn.tool_calls.append(call)
             messages.append(
                 {
@@ -347,12 +390,20 @@ def run_tool_loop(
 
 
 def _execute(
-    parsed: _ParsedCall, *, registry: dict[str, ToolSpec], confirm: ConfirmFn | None, notes: list[str]
+    parsed: _ParsedCall,
+    *,
+    registry: dict[str, ToolSpec],
+    confirm: ConfirmFn | None,
+    notes: list[str],
+    context: Mapping[str, Any] | None = None,
 ) -> ToolCall:
     """执行一次已解析的调用，**任何失败都变成 `ToolCall.error`**。
 
     这里刻意不抛异常：一次工具失败的语义是"这一步没成功"，不是"整轮失败"。只有把失败文本
     回灌给模型，它才有机会改参数或换工具。
+
+    `context` 是**调用方**（不是模型）提供的环境参数，例如已认证的 `patient_id`。
+    它单独走一条路、不写进工具 schema：模型不该有机会伪造"这是谁"。
     """
     if parsed.parse_error:
         return ToolCall(name=parsed.name, arguments=parsed.arguments, error=parsed.parse_error)
@@ -383,7 +434,7 @@ def _execute(
             return ToolCall(name=spec.name, arguments=parsed.arguments, error=denial)
 
     try:
-        result = _invoke(spec, validated)
+        result = _invoke(spec, validated, context)
     except ToolError as e:
         # 可预期的业务失败（号源已满、检索器连不上）：一句人话就够，不要 traceback。
         return ToolCall(name=spec.name, arguments=parsed.arguments, error=f"工具报告失败：{e}")
@@ -435,15 +486,17 @@ def _confirm_side_effect(
     return ""
 
 
-def _invoke(spec: ToolSpec, validated: BaseModel) -> Any:
+def _invoke(spec: ToolSpec, validated: BaseModel, context: Mapping[str, Any] | None = None) -> Any:
     """按执行体的签名，把**校验后的参数**交给它。
 
     仓库里有两种执行体形状，两种都要支持：`rag_tools` 是 `handler(params)`（收一个 pydantic
     模型），`clinic.tools` 是 `handler(**kwargs)`。用签名区分，而不是要求调用方再声明一次——
     "声明的东西就是能跑的东西"这条不变量，不该因为执行体的形状不同而破功。
 
-    注意两件事：非法参数在上一道闸门就被拦下了；到这里交给执行体的是 `model_dump()` 的结果
-    （默认值补齐、类型已 coerce），不是模型给的原始 JSON。
+    注意三件事：非法参数在上一道闸门就被拦下了；到这里交给执行体的是 `model_dump()` 的结果
+    （默认值补齐、类型已 coerce），不是模型给的原始 JSON；`context` 里的键**只注入执行体
+    签名里确实存在的名字**（多塞一个不认识的关键字会把 handler 打崩），且**模型显式给了就
+    以模型给的为准**（那个值已经过 pydantic 校验）。
     """
     handler = spec.handler
     if handler is None:  # 只为类型收窄；真正拦住"只声明不实现"的是调用方
@@ -451,7 +504,13 @@ def _invoke(spec: ToolSpec, validated: BaseModel) -> Any:
     signature = inspect.signature(handler)
     accepts_kwargs = any(p.kind is inspect.Parameter.VAR_KEYWORD for p in signature.parameters.values())
     if accepts_kwargs or not _takes_params_model(signature):
-        return handler(**validated.model_dump())
+        kwargs = dict(validated.model_dump())
+        for name, value in (context or {}).items():
+            if name in kwargs:
+                continue
+            if accepts_kwargs or name in signature.parameters:
+                kwargs[name] = value
+        return handler(**kwargs)
     return handler(validated)
 
 

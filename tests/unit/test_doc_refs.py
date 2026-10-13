@@ -110,6 +110,49 @@ class TestCurrentDocs:
         assert f"白名单 {len(script.WHITELIST)} 条" in out
 
 
+class TestMissingFileRefsAreCaught:
+    """反例：引用了**不存在的 `.md` 文件**必须非零退出。
+
+    这是本检查器此前的**整类盲区**：`文件:行号` 校验要求"路径 + 冒号 + 数字"，
+    所以只写文件名的引用完全不进入校验——`docs/adr/0005-milvus-后端.md` 曾经
+    并不存在、12 处代码引用它，而门禁一路绿灯。下面的反例把这个能力钉住：
+    如果哪天有人把文件引用检查删掉，这几条会立刻变红。
+    """
+
+    def test_dangling_docs_path_fails(self, script: ModuleType, tmp_path: Path) -> None:
+        # ⚠️ 路径必须在**运行时拼**：本文件自己也落在检查器的扫描面里
+        # （`tests/**/*.py`），写成字面量会让这些假引用先被真仓库的检查抓到。
+        a = "docs/adr/" + "9999-nonexistent.md"
+        b = "docs/adr/" + "8888-nope.md"
+        _write(tmp_path, "README.md", f"# 说明\n\n见 `{a}` 与 [另一份]({b})。\n")
+        assert _run(script, tmp_path) == 1
+
+    def test_existing_docs_path_passes(self, script: ModuleType, tmp_path: Path) -> None:
+        real = "docs/adr/" + "0001-real.md"
+        _write(tmp_path, real, "# 真文件\n")
+        _write(tmp_path, "README.md", f"# 说明\n\n见 `{real}`。\n")
+        assert _run(script, tmp_path) == 0
+
+    @pytest.mark.parametrize(
+        "token",
+        [
+            "concepts/foo.md",  # k8s 语料里的示意路径：首段不是仓内顶层目录
+            "_index.md",  # 裸文件名：文档里举例太常见
+            "data/raw/other-repo.md",  # data/ 是被 gitignore 的语料，校验不了
+            "docs/.../whatever.md",  # 省略号 = 示意
+            "docs/*.md",  # 通配 = 示意
+        ],
+    )
+    def test_schematic_paths_are_not_flagged(self, script: ModuleType, tmp_path: Path, token: str) -> None:
+        """精度换召回：这几种"看着像路径、其实是示意/外部"的写法不报错。
+
+        宽规则实测一次抓出 11 处、其中只有 1 处是真的——噪声门禁会被无视，
+        那比没有门禁更糟。代价（裸文件名的悬空引用查不出）写在脚本的注释里。
+        """
+        _write(tmp_path, "README.md", f"# 说明\n\n例如 `{token}`。\n")
+        assert _run(script, tmp_path) == 0
+
+
 class TestWrongContentIsCaught:
     """反例（本次最关键的一类）：锚点**指到了别的函数**上。"""
 

@@ -27,6 +27,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
@@ -114,9 +115,16 @@ class ClinicReport:
     triage_missed: list[str] = field(default_factory=list)
 
     @property
-    def redline_recall(self) -> float:
+    def redline_recall(self) -> float | None:
+        """红线召回。**分母为 0 时返回 `None`，不是 1.0**。
+
+        返回 1.0 会把"一条红线用例都没有"伪装成"红线全部识别"——
+        安全闸门被空集满足是最危险的假绿形态。实测反例：删掉 `clinic_gold.jsonl`
+        里全部 9 条 `expect_red_line=true` 用例之后，旧实现打印的是
+        **「红线召回 100.00% (TP=0 FN=0)」**，而它一条红线都没检验。
+        """
         denom = self.redline_tp + self.redline_fn
-        return self.redline_tp / denom if denom else 1.0
+        return self.redline_tp / denom if denom else None
 
     @property
     def redline_false_positive_rate(self) -> float:
@@ -124,8 +132,9 @@ class ClinicReport:
         return self.redline_fp / denom if denom else 0.0
 
     @property
-    def booking_accuracy(self) -> float:
-        return self.booking_correct / self.booking_total if self.booking_total else 1.0
+    def booking_accuracy(self) -> float | None:
+        """挂号意图准确率；分母为 0 时同样是 `None`（理由见 `redline_recall`）。"""
+        return self.booking_correct / self.booking_total if self.booking_total else None
 
     @property
     def triage_accuracy(self) -> float | None:
@@ -137,7 +146,7 @@ class ClinicReport:
         return {
             "n_cases": self.n_cases,
             "redline": {
-                "recall": round(self.redline_recall, 4),
+                "recall": (None if self.redline_recall is None else round(self.redline_recall, 4)),
                 "false_positive_rate": round(self.redline_false_positive_rate, 4),
                 "tp": self.redline_tp,
                 "fn": self.redline_fn,
@@ -147,7 +156,7 @@ class ClinicReport:
                 "false_alarms": self.false_alarms,
             },
             "booking": {
-                "accuracy": round(self.booking_accuracy, 4),
+                "accuracy": (None if self.booking_accuracy is None else round(self.booking_accuracy, 4)),
                 "correct": self.booking_correct,
                 "total": self.booking_total,
                 "wrong": self.booking_wrong,
@@ -160,6 +169,31 @@ class ClinicReport:
                 "missed": self.triage_missed,
             },
         }
+
+
+def clinic_gold_sha256(cases: Sequence[ClinicCase]) -> str:
+    """金标集的稳定指纹（与检索 harness 同一套做法：只哈希"尺子"本身）。
+
+    为什么 clinic 基线也需要它：原先 `clinic_baseline.json` **只存指标、不存金标指纹**，
+    于是"改掉/删掉红线用例"与"红线真的全识别"在闸门眼里长得一样——
+    那把尺子可以随便换而无人察觉。绑上指纹之后，换尺子会被直接拒绝比较。
+    """
+    blob = json.dumps(
+        [
+            {
+                "id": c.id,
+                "kind": c.kind,
+                "text": c.text,
+                "expect_red_line": c.expect_red_line,
+                "expect_booking": c.expect_booking,
+                "expect_department": c.expect_department,
+            }
+            for c in cases
+        ],
+        ensure_ascii=False,
+        sort_keys=True,
+    ).encode("utf-8")
+    return hashlib.sha256(blob).hexdigest()[:16]
 
 
 def load_clinic_gold(path: Path) -> list[ClinicCase]:
@@ -237,6 +271,7 @@ def gate_failures(
 ) -> list[str]:
     """闸门判定：返回失败原因列表（空 = 通过）。
 
+    - 红线**未评测**（一条 `expect_red_line` 用例都没有）→ 失败（空集不得满足安全闸门）
     - 红线召回 < 100% → **一定失败**（安全属性，容差为 0）
     - 红线误报率 > 上限 → 失败
     - 分诊**未评测**（`evaluated=False`，或评测了却一条可评测用例都没有）→ 失败
@@ -249,13 +284,20 @@ def gate_failures(
     当成通过，那么**删掉语料就会变成让闸门变绿的手段**——指标消失了，
     闸门反而放行。所以"没测"与"测了但不达标"同样红，只是失败原因要分清是哪一种，
     这样读者才知道该去补语料还是该去改算法。
+
+    同一条理由也适用于**红线**：删掉全部红线用例会让召回的分母变成 0，
+    旧实现此时返回 1.0（100%），于是一个"没有检验任何红线"的运行拿到了安全通过。
+    现在分母为 0 返回 `None`，并按"未评测"判失败。
     """
     fails: list[str] = []
-    if report.redline_fn:
+    recall = report.redline_recall
+    if recall is None:
         fails.append(
-            f"红线漏报 {report.redline_fn} 条（召回 "
-            f"{report.redline_recall:.2%}）——安全属性要求 100%，容差为 0"
+            "红线未评测（用例集里没有任何 `expect_red_line` 用例）："
+            "没测不等于测了没问题——若把它当通过，删掉红线用例就成了让闸门变绿的手段"
         )
+    elif report.redline_fn:
+        fails.append(f"红线漏报 {report.redline_fn} 条（召回 {recall:.2%}）——安全属性要求 100%，容差为 0")
         fails.extend(f"  漏: {m}" for m in report.missed[:10])
     if report.redline_false_positive_rate > fp_limit:
         fails.append(f"红线误报率 {report.redline_false_positive_rate:.2%} 超过上限 {fp_limit:.0%}")

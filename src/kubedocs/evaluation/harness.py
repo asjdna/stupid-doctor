@@ -202,6 +202,25 @@ def load_baseline(path: Path) -> dict[str, Any] | None:
 def check_gate(base: dict, current: dict, *, allow_drift: bool) -> list[str]:
     """返回失败原因列表；空列表表示通过。"""
     fails: list[str] = []
+    # **先校验基线有必需字段**，再谈比较。
+    #
+    # 为什么这条不能省：下面每一处都用 `base.get(key, 0)` 取值，而比较又写成
+    # `if b_top_k and ...`。于是"基线里没有 top_k"会让整段校验**静默跳过**——
+    # 实测（取 6232223 之前那版 schema-1 基线，它恰好没有 top_k 字段）：
+    # `eval --top-k 20 --gate` 以 hit@20 = 0.9000 通过了绑定 hit@10 = 0.8400 的基线，
+    # **退出码 0、「闸门：通过」**。代码注释把"为什么必须校验 top_k"讲得很清楚，
+    # 实现却让它依赖"基线恰好带了这个字段"。**缺字段 = 不可比，不是"不用比"。**
+    missing = [
+        key
+        for key in ("schema", "gold_sha256", "embedding_model", "top_k", "n_chunks", "metrics")
+        if key not in base
+    ]
+    if missing:
+        return [
+            f"基线缺少必需字段 {missing}：无法判断可比性 ⇒ 拒绝比较。"
+            "（不许写成'缺字段就跳过校验'——那正是 top_k 假绿洞的成因。）"
+            "请用 `--write-baseline` 重建基线"
+        ]
     if base.get("schema") != BASELINE_SCHEMA:
         fails.append(f"基线 schema={base.get('schema')} 与当前 {BASELINE_SCHEMA} 不符，请重建基线")
         return fails
@@ -218,18 +237,18 @@ def check_gate(base: dict, current: dict, *, allow_drift: bool) -> list[str]:
     # top_k 必须与基线一致，否则就是拿 hit@k 去比基线的 hit@10。而且方向不对称：
     # hit 随 k 单调上升，于是「把 --top-k 改大」就能让闸门变绿，把真实的指标退化盖过去
     # （实测 `--top-k 20 --gate` 曾以 hit@20=0.9000 通过了绑定 top_k=10 的基线）。
-    # 基线里存了 top_k，这里必须校验，不能只在下面拼错误信息时引用它。
-    b_top_k = int(base.get("top_k", 0))
+    # 字段存在性已由上面的 missing 校验保证，所以这里直接取、不再用 .get 兜底。
+    b_top_k = int(base["top_k"])
     c_top_k = int(current["top_k"])
-    if b_top_k and b_top_k != c_top_k:
+    if b_top_k != c_top_k:
         fails.append(
             f"top_k 不一致（基线 top_k={b_top_k}，本次 top_k={c_top_k}）："
             f"hit@k 的 k 不同则指标不可比，请用与基线一致的 --top-k"
         )
         return fails
-    b_chunks = int(base.get("n_chunks", 0))
+    b_chunks = int(base["n_chunks"])
     c_chunks = int(current["n_chunks"])
-    if b_chunks and abs(c_chunks - b_chunks) / b_chunks > CORPUS_DRIFT_TOL:
+    if abs(c_chunks - b_chunks) / b_chunks > CORPUS_DRIFT_TOL:
         msg = (
             f"索引规模变化 {(c_chunks - b_chunks) / b_chunks:+.1%}"
             f"（{b_chunks} -> {c_chunks}），语料变了，指标不可比"

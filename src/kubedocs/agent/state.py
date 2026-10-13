@@ -124,6 +124,8 @@ class ClinicState(TypedDict, total=False):
     triage: dict[str, Any]  # {departments, diseases, reason}
     answer: dict[str, Any]  # CitedAnswer 的序列化形式
     ticket: dict[str, Any]  # 挂号结果
+    booking_confirmed: bool
+    """用户是否**明确确认**了挂号。副作用只有在它为 True 时才允许发生。"""
     status: str  # asking / emergency / booking / done / refused
     stop_reason: str
 
@@ -148,6 +150,7 @@ def empty_state(question: str, *, patient_id: str = "anon") -> ClinicState:
         triage={},
         answer={},
         ticket={},
+        booking_confirmed=False,
         status="asking",
         stop_reason="",
         diagnostics=[],
