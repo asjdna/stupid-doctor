@@ -36,7 +36,7 @@ python -m kubedocs.cli --hf-offline eval --gate   # 评测并卡闸门
 | 观测：`/metrics` + OTel + `log_level` 生效 | ✅ 已完成（`src/kubedocs/observability.py`）；`otel_enable` 默认关，显式打开才导出 |
 | P2 agent 内核（图 / 工具 / 持久化 / 中断） | ✅ 已完成（`agent/` 13 个模块：LangGraph `StateGraph` + 工具循环 + `InMemorySaver` + `interrupt` 续跑；单测在闸门内） |
 | P5 FastAPI + 对话前端 | ✅ 已完成（`api/app.py` **8 个**端点：`/healthz` `/metrics` `/domains` `/tools` `/search` `/ask` `/chat` `/`，+ `data/web/index.html` + `scripts/smoke_api.py` 冒烟） |
-| `docker compose up` 全栈 | ⚠️ **文件已写，本机 Docker Hub 不可达，未实测** |
+| `docker compose up` 全栈 | ✅ **已实测**（2026-10-13，Docker 29.8）：db + api 起来、健康检查通过、`/healthz` 报 **18811 块**、`/metrics` 200、`/search` 真实命中、`/chat` 的 SSE 红线**确定性转急诊**。过程中发现并修掉 3 个真实缺陷，见下面「Docker 全栈实测」 |
 
 > 本项目坚持一件事：**没跑过的就不写"已完成"**。
 
@@ -395,6 +395,54 @@ python -m kubedocs.cli --provider hashing ingest --limit-files 100
 | "renew cluster certificates before they expire" | `kubeadm_certs_renew_*`（10 条全是自动生成的 stub 页） | 自动生成参考页挤占结果 |
 | "let people on the internet reach my app using a hostname" | `debug-service` | ingress 页未召回 |
 
+### Docker 全栈实测（2026-10-13，Docker 29.8 / compose v2）
+
+`docker compose up -d` 起来后实测通过的项：
+
+| 检查 | 结果 |
+|---|---|
+| `db`（`paradedb/paradedb:0.26.1-pg16`） | healthy；扩展 `pg_search` + `vector` 齐全 |
+| `api` 容器 | healthy，非 root（`USER app`，uid 10001），8080 已映射 |
+| `GET /healthz` | `{"ok":true,"domain":"k8s_docs","n_chunks":18811}` |
+| `GET /metrics` | 200 + `text/plain; version=1.0.0`；`kubedocs_http_requests_total` 等按**路由模板**打标签，计数随请求增长 |
+| `POST /search` | 3 条真实命中、`degraded` 为空（模型从挂载卷加载成功） |
+| `POST /chat` | SSE 200：`thread` → `tool`（`check_red_line` 命中「胸痛」）→ `message`（`status: emergency`）→ `done` |
+| `GET /tools?domain=clinic` | `book_appointment, check_citations, get_availability, list_departments` |
+
+**这次实测抓到 3 个只有真起容器才会暴露的缺陷（都已修）：**
+
+1. **容器内 `repo_root()` 解析错**（最严重）。`repo_root()` 从 `__file__` 上溯三层，而容器里包是
+   `pip install .` 装进 venv 的 ⇒ 解析成 `/opt/venv/lib/python3.10`，`data/` 指向一个不存在、
+   也写不进去的目录。而 `/healthz` **照样返回 200**（"索引不可用"按设计不算存活失败），
+   表现是"服务是绿的、`n_chunks` 是 0、`/search` 报
+   `PermissionError: '/opt/venv/lib/python3.10/data'`"。修：`repo_root()` 支持
+   `KUBEDOCS_REPO_ROOT` 覆盖，compose 里设成 `/app`。**本地与 CI 不设它，行为逐字不变。**
+2. **`HF_HOME` 落在非 root 用户读不到的地方**。Dockerfile 原来写
+   `/root/.cache/huggingface`，而容器以 `app` 运行、`/root` 是 0700 ⇒ 挂进卷的模型
+   **对 app 不可读**，容器内检索会静默降级成"没有向量路"。修：改到
+   `/home/app/.cache/huggingface` + `chown`，compose 的挂载点同步。
+3. **依赖层与源码层耦合 + 无谓的编译器**。原来 `COPY src` 之后才 `pip install .`，
+   于是**改一行源码就要重下几 GB 的依赖**；而且 builder 里装了 `build-essential`
+   （64 个包 / 87 MB），但依赖其实全是 manylinux wheel，在受限网络下这一层实测
+   **>18 分钟仍没下完**。修：先装依赖（空占位包）再 `COPY src` + `pip install --no-deps .`；
+   编译器改成 `BUILD_TOOLS=1` 按需开启（默认不装）。
+
+**镜像体积（如实记录，未在本机跑完）**：PyPI 上的 `torch` 默认是 **CUDA 版**，
+会多拉约 2.5 GB 的 `nvidia-*` / `triton` / `cuda-toolkit`，实测镜像 **9.91 GB**——
+而这个服务是**纯 CPU** 的。已给出可选配方（`TORCH_CPU_FIND_LINKS` + `TORCH_CPU_VERSION`，
+必须连版本一起给，否则 pip 会挑数值更大的 CUDA 版），本机实测能把 torch 从 553 MB + 一堆
+CUDA 包降到 **184 MB**；但那次构建在外网下载停滞中被打断，**没有跑完**，
+所以"镜像能瘦到多少"在这里不作断言。
+
+**构建的资源与网络要求（实测）**：需要约 **15 GB 空闲磁盘**（中间层 + 9.91 GB 镜像）——
+本机 C 盘曾只剩 0.5 GB，构建直接以 `OSError: [Errno 5] Input/output error` 失败；
+Docker 的数据目录在 C 盘时尤其容易撞上。构建还**不消费 `requirements.lock.txt`**：
+镜像里的依赖比锁文件新不少（实测 `langgraph` 1.2.15 / `litellm` 1.105.0 / `torch` 2.14.1，
+而锁文件与本地 venv 是 1.2.12 / 1.102.1 / 2.11）——这与 CI 侧"装的是当时最新版"是同一个缺口。
+
+**基础镜像仍是浮动 tag**：`python:3.10-slim` 现在解析到 **Debian 13（trixie）**，
+而 compose 自己写着"版本都钉死"。这条**没修**（改 tag 会连带影响运行时依赖），如实记下。
+
 ### 环境约束（实测，决定了取数方式）
 
 | 通道 | 结果 |
@@ -404,7 +452,10 @@ python -m kubedocs.cli --provider hashing ingest --limit-files 100
 | GitHub API | ✅ 可用但 **限流 60/h**（取 1720 个文件必然撞墙） |
 | codeload tarball | ✅ 335 MB / 2.1 分钟 |
 | huggingface.co | ❌ 超时 → 走 **hf-mirror.com** ✅ |
-| Docker Hub（`registry-1.docker.io`） | ❌ 连接被拒；镜像站 `docker.m.daocloud.io` ✅ 2.9s |
+| Docker Hub（`registry-1.docker.io`） | ✅ **现在可用**（实测拉下 `alpine`、`python:3.10-slim` 已在本地）。早先记为"连接被拒"，已过时 |
+| **容器内 `deb.debian.org`** | ⚠️ **TCP 能连、HTTP 取包被中断** → `apt-get install` 直接失败。构建要传 `APT_MIRROR`（实测 `mirrors.aliyun.com` 可用） |
+| **容器内 `download.pytorch.org`** | ⚠️ 同上（TCP 通、传输挂死）→ CPU-only torch 不能从官方源拿；阿里云 `pytorch-wheels/cpu/` 目录可用（cp310 有 54 个 `+cpu` wheel） |
+| **外网大文件传输（通用）** | ⚠️ **反复停滞**：同一构建里 tuna 镜像能把 553 MB 的 torch 拉完，另一条 184 MB 的 wheel 却卡死 6 分钟零字节。构建脚本必须可重跑，不能假设一次成功 |
 | 已缓存模型的联网校验 | ❌ **挂死 >10 分钟** → 必须 `--hf-offline`（载入 0.8s） |
 
 ⇒ 取语料唯一可行路径是 tarball 流式解包，见 [`scripts/fetch_corpus.py`](scripts/fetch_corpus.py)。
@@ -501,7 +552,8 @@ python -m kubedocs.cli --provider hashing ingest --limit-files 100
       见 SECURITY.md 第 6 节。）
 - [ ] 精排（cross-encoder）用真实模型实测收益（里程碑 9）
 - [ ] 嵌入量化/ONNX 提速 + k6 压测 + P95/成本 SLO（里程碑 10）
-- [ ] Docker 全栈实测（受限于本机 Docker Hub 不可达）
+- [x] **Docker 全栈实测**（2026-10-13）：见下面「Docker 全栈实测」一节。修掉了 3 个只有真起容器才会暴露的缺陷
+      （容器内 `repo_root` 解析错、`HF_HOME` 落在非 root 用户读不到的地方、依赖层与源码层耦合）
 
 ---
 

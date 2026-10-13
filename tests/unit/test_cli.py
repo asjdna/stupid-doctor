@@ -226,3 +226,73 @@ class TestJsonStdoutIsPureJson:
         captured = capsys.readouterr()
         assert "完成，用时" in captured.out
         assert captured.err == ""
+
+
+class TestStatsVerifyCallsTheVectorChecker:
+    """`stats --verify` 必须真的做**向量侧**体检，而且要认两种方法名。
+
+    缺陷形态：早先只 `getattr(store, "verify_vec")`，而 `pgvector` 的方法叫
+    `verify_hnsw` —— 于是三个后端里有一个的向量体检**永远是空的**，
+    方法存在却没人调，`stats --verify` 照样打印"通过"。
+    """
+
+    class _FakeStore:
+        """只实现 `stats --verify` 用到的那几个方法。
+
+        `method=None` 表示"这个后端没有任何向量体检方法"。
+        """
+
+        def __init__(self, method: str | None) -> None:
+            self._method = method
+
+        def verify_fts(self) -> str:
+            return "ok"
+
+        def __getattr__(self, name: str):
+            if self._method is not None and name == self._method:
+                return lambda: "ok"
+            raise AttributeError(name)
+
+        def stats(self):
+            class _S:
+                n_docs = 1
+                n_chunks = 1
+                mean_chars = 10.0
+                n_with_code = 0
+                embedding_model = "fake"
+                embedding_dim = 8
+                indexed_at = "now"
+                normalizer = "identity"
+
+            return _S()
+
+        def meta_dump(self) -> dict[str, str]:
+            return {}
+
+        def close(self) -> None:
+            pass
+
+    @pytest.mark.parametrize("method", ["verify_vec", "verify_hnsw"])
+    def test_each_backend_method_name_is_recognised(self, tmp_path, capsys, monkeypatch, method):
+        import kubedocs.store as store_mod
+
+        monkeypatch.setattr(store_mod, "from_settings", lambda _settings: self._FakeStore(method))
+
+        rc = main(_args(tmp_path, "stats", "--verify"))
+        out = capsys.readouterr().out
+
+        assert rc == EXIT_OK
+        assert "向量一致性 : ok" in out, f"{method} 没有被调用"
+
+    def test_missing_checker_is_not_an_error(self, tmp_path, capsys, monkeypatch):
+        """后端没有任何向量体检方法时不该崩（只是不打印那一行）。"""
+        import kubedocs.store as store_mod
+
+        monkeypatch.setattr(store_mod, "from_settings", lambda _settings: self._FakeStore(None))
+
+        rc = main(_args(tmp_path, "stats", "--verify"))
+        out = capsys.readouterr().out
+
+        assert rc == EXIT_OK
+        assert "向量一致性" not in out
+        assert "FTS 一致性 : ok" in out

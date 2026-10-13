@@ -4,9 +4,12 @@
 所有结论都标了**代码出处**（`文件:行`），可以逐条核对；没有核对过的写"未验证"。
 
 > 本项目是一个**尚未上线的工程作品**：仓库无 remote、CI 从未在真实 runner 上跑过
-> （`.github/workflows/ci.yml` 存在但未执行）、`Dockerfile` 与 `docker-compose.yml`
-> 自述"尚未在本机实测"（`Dockerfile:2`、`docker-compose.yml:10`）。
-> 请按"未经过生产验证的代码"对待它。
+> （`.github/workflows/ci.yml` 存在但未执行）。**容器栈已在 2026-10-13 实测**：
+> `docker compose up -d` 起 db + api、健康检查通过、`/healthz` 报 18811 块、
+> `/metrics` 与 `/search`、`/chat` 的 SSE 红线都验过（见 README「Docker 全栈实测」）；
+> 那次实测抓到 3 个缺陷（容器内 `repo_root` 解析错、`HF_HOME` 非 root 不可读、
+> 依赖层与源码层耦合）**都已修**。
+> 仍请按"未经过生产验证的代码"对待它。
 
 > **本次修订说明**：下面所有 `文件:行` 锚点已按当前 `main` 重新核对（本轮改动集中在
 > 红线判定、挂号确认与归属、预算账本原子性、评测闸门字段校验、clinic 域接线、
@@ -83,7 +86,7 @@
   也不变成一条 note——`/chat` 的响应里看不到 notes）。
   预算对象由 `ClinicReactRuntime` 持有（长寿命）；构造点在 `clinic_react.py:136`，
   用的是 `DailyBudget`，与 CLI `ask` / `POST /ask` 同一本账。
-- **一本账**：账本路径是 `config.py:267` 的 `llm_spend_path`——**全局一份**，
+- **一本账**：账本路径是 `config.py:286` 的 `llm_spend_path`——**全局一份**，
   不在域目录下。此前写成 `<index_dir>/<domain>/llm_spend.json`，后果是
   "切换 domain 就能把上限翻成 N 份"，而且 clinic 会话的花费被记进 **k8s_docs** 目录
   （审计 `data/index/clinic/` 的人看不到）。磁盘上曾同时存在
@@ -271,7 +274,7 @@
 | 工具同名冲突 | 注册表（`registry`）按名索引，重名直接报错而不是静默覆盖 | `agent/tool_loop.py:289-290` |
 | 副作用工具默认行为 | **默认拒绝执行**，不是默认执行后再回滚（见 `_confirm_side_effect`） | `agent/tool_loop.py:460` |
 | 空索引 / 索引损坏 | 不返回 500、不泄露 traceback：记 `index_error` 并返回 200 + 说明 | `api/app.py:143-153` |
-| 容器内权限 | api 以非 root（`USER app`，uid 10001）运行 | `Dockerfile:60` |
+| 容器内权限 | api 以非 root（`USER app`，uid 10001）运行 | `Dockerfile:147` |
 | **观测开关不再是假开关** | 日志级别真正生效（`configure_logging`）；OTel 真正建 provider（`setup_tracing`）；`/metrics` 真实存在（`metrics_payload`）。此前这三个字段全仓无人读取 | `observability.py:77`、`observability.py:100`、`observability.py:148` |
 
 ---
@@ -283,14 +286,14 @@
    - 密钥读取路径是 `os.environ`（`generate.py:501` 的 `required_api_key_env()` /
      `generate.py:513` 的 `has_api_key()`）；`.env` 由 `config.load_env_file()` 导入
      `os.environ`，**真实环境变量优先、`.env` 不覆盖已有值**
-     （`config.py:48` 的 `override=False`）。
-   - `.env` 里**留空的键等于未设置**（`config.py:59`）：这防止 `.env.example` 里成片的
+     （`config.py:67` 的 `override=False`）。
+   - `.env` 里**留空的键等于未设置**（`config.py:78`）：这防止 `.env.example` 里成片的
      `KEY=` 把"没有密钥"伪装成"有密钥"。
-3. **`.env` 永不入库。** 它已被 `.gitignore` 覆盖；`docker-compose.yml:76` 用
+3. **`.env` 永不入库。** 它已被 `.gitignore` 覆盖；`docker-compose.yml:95` 用
    `env_file: .env` 把密钥注入 api 容器——它不会被打印，
    但会出现在 `docker inspect` 的输出里，共享宿主机的场合要注意。
 4. **钱包护栏**：`KUBEDOCS_LLM_DAILY_BUDGET_USD` 覆盖 `/ask`、CLI `ask` **和
-   `/chat` 的工具循环**，且是**一本全局账**（`config.py:267` 的 `llm_spend_path`）。
+   `/chat` 的工具循环**，且是**一本全局账**（`config.py:286` 的 `llm_spend_path`）。
    但仍有两条要你自己加：
    - **速率限制不在本项目里**（S-3），日上限只限制总额、不限制烧得多快；
    - **多副本下上限会变成 `副本数 × 预算`**（S-2 的残留限制）。
@@ -310,7 +313,7 @@
 7. **公网部署前至少替换**：`docker-compose.yml:54` 的 Postgres 口令
    （`kubedocs/kubedocs`）。
    compose 把 Postgres 的 `5432` 与 api 的 `8080` 映射到宿主机
-   （端口映射见 `docker-compose.yml:82`）。
+   （端口映射见 `docker-compose.yml:107`）。
    本次已移除 redis 服务与它的 `6379` 映射、以及未使用的 langfuse 服务
    （连同 `NEXTAUTH_SECRET` / `SALT` 占位值）——它们此前是"没人连的容器"。
 
@@ -333,9 +336,16 @@
 
 ## 6. 未验证事项（诚实清单）
 
-- `Dockerfile` 与 `docker-compose.yml` **从未在本机跑通过**（Docker Hub / 本机 Docker
-  守护进程均不可用，见 `Dockerfile:2`、`docker-compose.yml:10`）。上面关于容器内权限、
-  端口暴露的描述来自**文件内容**，不是运行观察。
+- **容器镜像的"从零重建"在本机没有跑完**：`docker compose up -d` 与容器内的行为已实测
+  （见 README「Docker 全栈实测」），但那次验证是在**现有镜像里挂载当前源码**跑的
+  ——因为重建镜像需要的外网大文件下载在本机会**反复停滞**（同一构建里 tuna 能把 553 MB
+  的 torch 拉完，另一条 184 MB 的 wheel 却卡死 6 分钟零字节）。
+  所以：`Dockerfile` / `docker-compose.yml` 的**修复已就位并被上述验证覆盖**，
+  但"干净环境一次构建成功"这条**没有**在本机跑通。
+- **基础镜像仍是浮动 tag**：`python:3.10-slim` 实测解析到 Debian 13（trixie），
+  与 compose 里"版本都钉死"的纪律不一致。没修（换 tag 会影响运行时依赖），如实记下。
+- **镜像里的依赖不等于锁文件**：Docker 构建走 `pip install .`，**不消费
+  `requirements.lock.txt`**，实测装到的 `langgraph` / `litellm` / `torch` 都比锁文件新。
 - CI（`.github/workflows/ci.yml`）**从未在真实 runner 上执行过**（仓库无 remote）。
 - 红线规则只有 26 条自建用例，**没有**外部/临床验证。
 - 分诊链路的分数**未测到可信水平**：`data/clinic/cards.json` 存在（31,592 张卡），
@@ -346,7 +356,11 @@
   这条红**没有被"修绿"**。
 - **多副本下的 LLM 花费上限未验证**：跨进程账本仍未原子（S-2），
   当前部署形态是单进程所以不生效，但**没有实测过多副本**。
-- **pgvector 的集成测试在本轮未能重跑**：本机 Docker 守护进程停止，
-  `tests/unit/test_pgvector_store.py` 整文件 skip（测试会打印原因，不是假装通过）。
+- **pgvector 的集成测试已重跑**（2026-10-13，Docker 起来之后）：`test_pgvector_store.py`
+  + `test_store_contract.py` 的 pgvector 参数 **90 passed / 0 skipped**（不再有 skip）。
+  同一天把当前本地索引（18811 块）重灌进 pgvector：全文/向量自检都 ok、抽样 200 块向量
+  **逐位一致**、字符总数两边相同，`cli --store pgvector eval --top-k 10 --gate`
+  **退出码 0**（hybrid hit@10 0.8600 ≥ 冻结基线 0.8400）。
+- **多副本 / 容器化下的 LLM 花费上限仍未实测**（与上一条的多进程限制同源）。
 - 依赖的 PyPI 可达性与 CVE 状态**未测**。
 - 没有做过任何渗透测试、模糊测试或负载测试。

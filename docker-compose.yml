@@ -73,20 +73,47 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
+      args:
+        # 受限网络下先 `export APT_MIRROR=mirrors.aliyun.com` 与
+        # `export PIP_INDEX_URL=https://pypi.tuna.tsinghua.edu.cn/simple` 再 build。
+        # 不设时留空 = 走 Debian / PyPI 官方源（与加这两个参数之前完全一致）。
+        APT_MIRROR: ${APT_MIRROR:-}
+        PIP_INDEX_URL: ${PIP_INDEX_URL:-}
+        # 装 **CPU-only torch** 是可选的，而且**必须连版本一起给**（见 Dockerfile 说明：
+        # PEP 440 里 `2.14.1` 比 `2.9.1+cpu` 新，只给 find-links 的话 pip 照样挑 CUDA 版）：
+        #   export TORCH_CPU_FIND_LINKS=https://mirrors.aliyun.com/pytorch-wheels/cpu/
+        #   export TORCH_CPU_VERSION=2.9.1+cpu
+        # 两个都留空（默认）= 走 pip 默认源，即 CUDA 版 torch，实测镜像 **9.91 GB**。
+        # 为什么不把官方 CPU 源设成默认：本机实测 `download.pytorch.org`
+        # **TCP 可达但 HTTP 传输挂死**（与 deb.debian.org 同一形态）——
+        # 宁可默认大，也不能默认挂。
+        TORCH_CPU_FIND_LINKS: ${TORCH_CPU_FIND_LINKS:-}
+        TORCH_CPU_VERSION: ${TORCH_CPU_VERSION:-}
+        # 置 1 = 在 builder 里装 build-essential + libpq-dev（默认不装：
+        # 依赖全是 wheel，而那一层在受限网络下实测要 >18 分钟）。
+        BUILD_TOOLS: ${BUILD_TOOLS:-}
     env_file:
       - .env
     environment:
       # 容器内互访用服务名（.env 里的示例值就是按 compose 写的）
       KUBEDOCS_DATABASE_URL: postgresql://kubedocs:kubedocs@db:5432/kubedocs
+      # **必须显式给出挂载点**：容器里包是 `pip install .` 装进 venv 的，
+      # `config.repo_root()` 的"上溯三层"会落到 `/opt/venv/lib/python3.10`，
+      # 于是 `data/` 指向一个不存在、也写不进去的目录——而 `/healthz` 照样 200
+      # （"索引不可用"按设计不算存活失败），表现为"服务是绿的但什么都搜不到"。
+      # 见 `config.repo_root()` 的说明。
+      KUBEDOCS_REPO_ROOT: /app
     ports:
       - "8080:8080"
     depends_on:
       db:
         condition: service_healthy
     volumes:
-      # 语料与模型缓存持久化：否则每次重建容器都要重下 16MB 语料 + 模型
+      # 语料与模型缓存持久化：否则每次重建容器都要重下 16MB 语料 + 模型。
+      # 挂载点必须与 Dockerfile 的 `HF_HOME` **一致**，而且要在 app 用户读得到的位置：
+      # 容器是非 root（USER app），`/root` 是 0700 —— 挂到那里等于"模型对 app 不可读"。
       - ./data:/app/data
-      - hfcache:/root/.cache/huggingface
+      - hfcache:/home/app/.cache/huggingface
     healthcheck:
       test: ["CMD", "python", "-c", "import httpx;httpx.get('http://127.0.0.1:8080/healthz',timeout=3)"]
       interval: 10s

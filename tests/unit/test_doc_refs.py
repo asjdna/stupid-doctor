@@ -95,12 +95,19 @@ class TestCurrentDocs:
     def test_whitelisted_entries_are_reported_not_swallowed(
         self, script: ModuleType, capsys: pytest.CaptureFixture[str]
     ) -> None:
-        """白名单必须**被打印出来**（含条数与理由），否则就是静默跳过。"""
+        """白名单必须**被打印出来**（含条数与理由），否则就是静默跳过。
+
+        断言的是**不变量**（脚本里登记的每条 `reason` 都出现在输出里），
+        而不是某个固定措辞——原先断言 `"白名单：第"`，措辞一改就变成假失败
+        （实际发生过：重写白名单理由时 5 条都带了理由，这条测试却红了）。
+        """
         _run(script, repo_root())
 
         out = capsys.readouterr().out
         assert "白名单     :" in out
-        assert "白名单：第" in out, "每条白名单都要带理由"
+        assert script.WHITELIST, "白名单不该是空的（空表会让这条测试退化成恒真）"
+        for white in script.WHITELIST.values():
+            assert white.reason in out, f"白名单条目没有把理由打印出来：{white.reason[:40]}"
 
     def test_whitelist_listing_matches_the_table(
         self, script: ModuleType, capsys: pytest.CaptureFixture[str]

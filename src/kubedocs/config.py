@@ -23,7 +23,26 @@ def repo_root() -> Path:
     存在的意义：默认数据路径必须**锚定在代码位置上**，不能依赖进程 cwd。
     否则从别处调 CLI（或 pytest 换了 rootdir）时，`data/...` 会解析到一个
     空目录，"索引里明明有数据却搜不到"这种事故排查起来极贵。
+
+    ## 容器里必须覆盖它（`KUBEDOCS_REPO_ROOT`）
+
+    上溯三层只在"源码布局"下成立：`<repo>/src/kubedocs/config.py`。
+    而 `pip install .` 会把包装进 site-packages，此时
+    `__file__` 是 `/opt/venv/lib/python3.10/site-packages/kubedocs/config.py`，
+    上溯三层变成 `/opt/venv/lib/python3.10` ⇒ `data/` 指向
+    `/opt/venv/lib/python3.10/data`（不存在、也写不进去）。
+
+    实测后果（`docker compose up` 里真实发生）：`/healthz` 仍然返回 200
+    ——因为"索引不可用"按设计不算存活失败——但 `n_chunks` 是 0、
+    `/search` 降级为"索引不可用：PermissionError: '/opt/venv/lib/python3.10/data'"。
+    **服务看着是绿的，实际什么也搜不到。**
+
+    所以容器里显式给出挂载点即可（`docker-compose.yml` 里设 `KUBEDOCS_REPO_ROOT=/app`）。
+    本地与 CI 不设它，行为与以前**逐字相同**。
     """
+    override = os.environ.get("KUBEDOCS_REPO_ROOT", "").strip()
+    if override:
+        return Path(override)
     return Path(__file__).resolve().parents[2]
 
 

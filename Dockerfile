@@ -1,15 +1,51 @@
 # 多阶段构建：builder 装依赖并编译轮子，runtime 只带运行所需，镜像更小、攻击面更少。
 # ⚠️ 本文件尚未在本机实测（写它时本机还没装 Docker）。标为「未验证」。
 
+# ---------- 受限网络下的源（可选）----------
+# 本机实测（2026-10-13，Docker 29.8）：容器里 **TCP 能连上 `deb.debian.org:80`，
+# 但 http 取包会被中断**（构建报 "Unable to connect to deb.debian.org:http"），
+# 于是 `apt-get install` 直接失败——与 README「环境约束」里那批
+# "连接被拒 / 挂死"的记录是同一类问题。
+# 这两个 ARG **默认留空 = 用 Debian / PyPI 官方源，行为与加它们之前完全一致**；
+# 受限网络下传镜像站即可构建：
+#   docker compose build --build-arg APT_MIRROR=mirrors.aliyun.com \
+#                        --build-arg PIP_INDEX_URL=https://pypi.tuna.tsinghua.edu.cn/simple api
+ARG APT_MIRROR=""
+ARG PIP_INDEX_URL=""
+# CPU-only torch 的可选配方（为什么需要它见 builder 里的长注释）。默认**不启用**。
+ARG TORCH_CPU_FIND_LINKS=""
+ARG TORCH_CPU_VERSION=""
+
 # ---------- builder ----------
 FROM python:3.10-slim AS builder
 
+ARG APT_MIRROR
+ARG PIP_INDEX_URL
+ARG TORCH_CPU_FIND_LINKS
+ARG TORCH_CPU_VERSION
+# 默认**不**装编译器：本项目的依赖全都以 manylinux wheel 提供
+# （首次构建的 pip 日志里只有 `.whl` 下载，没有一次 sdist 编译），
+# 而 `build-essential` 会拖进 64 个包 / 87MB——在受限网络下这一步实测耗时 **>18 分钟**
+# 且仍没下完。需要从源码编译依赖时（换架构、或加了没有 wheel 的包）置 1：
+#   docker compose build --build-arg BUILD_TOOLS=1 api
+ARG BUILD_TOOLS=""
+
 ENV PIP_NO_CACHE_DIR=1 PIP_DISABLE_PIP_VERSION_CHECK=1
 
-# 编译期依赖（psycopg / numpy 等有 C 扩展）
-RUN apt-get update && apt-get install -y --no-install-recommends \
-        build-essential libpq-dev \
-    && rm -rf /var/lib/apt/lists/*
+# 编译期依赖（**可选**，见上面的 BUILD_TOOLS 说明）
+RUN set -eux; \
+    if [ "$BUILD_TOOLS" = "1" ]; then \
+        if [ -n "$APT_MIRROR" ]; then \
+            for f in /etc/apt/sources.list /etc/apt/sources.list.d/debian.sources; do \
+                if [ -f "$f" ]; then \
+                    sed -i "s|deb.debian.org|$APT_MIRROR|g; s|security.debian.org|$APT_MIRROR|g" "$f"; \
+                fi; \
+            done; \
+        fi; \
+        apt-get update; \
+        apt-get install -y --no-install-recommends build-essential libpq-dev; \
+        rm -rf /var/lib/apt/lists/*; \
+    fi
 
 WORKDIR /build
 COPY pyproject.toml README.md ./
@@ -28,26 +64,77 @@ COPY pyproject.toml README.md ./
 # 放 builder 阶段：本文件里只有 builder 会执行构建（下面的 `pip install .`），
 # runtime 只从 builder 拷已装好的 venv，不再读 pyproject，所以那里不需要 LICENSE。
 COPY LICENSE ./
-COPY src ./src
 # 用 venv 承载依赖，运行时整目录拷过去即可（避免把 build-essential 带进最终镜像）
+#
+# ## 为什么分两步装（依赖层 / 源码层分开）
+#
+# 本机实测（2026-10-13，首次构建）：`pip install .` 这一步耗时 **788 秒**、
+# 镜像 **9.91 GB** ——因为 PyPI 上的 `torch` 默认是 **CUDA 版**，
+# 会连带拉 `nvidia-cublas / cudnn / nccl / cusparse / cusparselt / triton /
+# cuda-toolkit / cuda-bindings …` 共约 2.5 GB，而这个服务是**纯 CPU** 的
+# （README 的吞吐表就是在纯 CPU torch 上测的）。装一个 1 GB 的服务却下 2.5 GB 的
+# GPU 运行时，是纯粹的浪费——所以给出可选配方。
+#
+# ### CPU-only torch 的可选配方（`TORCH_CPU_FIND_LINKS` + `TORCH_CPU_VERSION`）
+#
+# **必须显式指定版本**，不能只给一个 `--find-links`：PEP 440 里 `2.14.1` 比
+# `2.9.1+cpu` 新，pip 会照样挑 PyPI 上的 CUDA 版。所以版本要一起给：
+#
+#     export TORCH_CPU_FIND_LINKS=https://mirrors.aliyun.com/pytorch-wheels/cpu/
+#     export TORCH_CPU_VERSION=2.9.1+cpu     # 该目录里 cp310 的最新 CPU 版
+#
+# 两个都留空（默认）时**完全不执行这一步**，行为与加它之前逐字相同。
+# 本机实测过的取舍：官方 CPU 源 `download.pytorch.org` 在这里
+# **TCP 可达但 HTTP 传输挂死**（与 `deb.debian.org` 同一形态），
+# 而阿里云的 `pytorch-wheels` 目录可用（cp310 有 54 个 `+cpu` wheel）。
+#
+# ### 依赖层 / 源码层分开
+#
+# 先只装依赖（用一个空的占位包），**再** COPY 真正的 src 并用 `--no-deps` 装包。
+# 这样以后改 `src/` 不会让那几 GB 重下一遍——层缓存才有意义。
 RUN python -m venv /opt/venv \
-    && /opt/venv/bin/pip install --upgrade pip \
-    && /opt/venv/bin/pip install .
+    && /opt/venv/bin/pip install --upgrade pip ${PIP_INDEX_URL:+--index-url "$PIP_INDEX_URL"} \
+    && mkdir -p src/kubedocs && : > src/kubedocs/__init__.py \
+    && if [ -n "$TORCH_CPU_FIND_LINKS" ]; then \
+           /opt/venv/bin/pip install --find-links "$TORCH_CPU_FIND_LINKS" \
+               ${PIP_INDEX_URL:+--extra-index-url "$PIP_INDEX_URL"} \
+               "torch${TORCH_CPU_VERSION:+==$TORCH_CPU_VERSION}"; \
+       fi \
+    && /opt/venv/bin/pip install ${PIP_INDEX_URL:+--index-url "$PIP_INDEX_URL"} .
+
+# 真正的源码：这一层只覆盖 `src/`，上面那个几 GB 的依赖层不受影响。
+# `--no-deps`：依赖已经装好了，这里只把包本身换成真代码。
+COPY src ./src
+RUN /opt/venv/bin/pip install --no-deps .
 
 # ---------- runtime ----------
 FROM python:3.10-slim AS runtime
 
+ARG APT_MIRROR
+
 ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
     PATH="/opt/venv/bin:$PATH" \
-    # 模型与语料落到挂载卷，容器重建不重下
-    HF_HOME=/root/.cache/huggingface
+    # 模型缓存必须放在 **app 用户读得到** 的地方：容器以非 root 运行（下面 USER app），
+    # 而 `/root` 是 0700 —— 曾经写成 `/root/.cache/huggingface`，
+    # 于是挂载进卷的模型对 app 用户**不可读**，容器内的检索会静默降级成"没有向量路"。
+    HF_HOME=/home/app/.cache/huggingface
 
 # 运行期只需要 libpq（psycopg 的动态库）+ curl（healthcheck 用）
-RUN apt-get update && apt-get install -y --no-install-recommends \
-        libpq5 curl \
-    && rm -rf /var/lib/apt/lists/* \
-    && useradd -m -u 10001 app
+RUN set -eux; \
+    if [ -n "$APT_MIRROR" ]; then \
+        for f in /etc/apt/sources.list /etc/apt/sources.list.d/debian.sources; do \
+            if [ -f "$f" ]; then \
+                sed -i "s|deb.debian.org|$APT_MIRROR|g; s|security.debian.org|$APT_MIRROR|g" "$f"; \
+            fi; \
+        done; \
+    fi; \
+    apt-get update; \
+    apt-get install -y --no-install-recommends libpq5 curl; \
+    rm -rf /var/lib/apt/lists/*; \
+    useradd -m -u 10001 app; \
+    mkdir -p /home/app/.cache/huggingface; \
+    chown -R app:app /home/app/.cache
 
 COPY --from=builder /opt/venv /opt/venv
 

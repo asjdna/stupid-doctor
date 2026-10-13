@@ -119,6 +119,57 @@
 
 ---
 
+### Docker 全栈实测（2026-10-13）
+
+容器栈第一次真跑，并修掉 **3 个只有真起容器才会暴露的缺陷**：
+
+- **容器内 `repo_root()` 解析错**（最严重）：包是 `pip install .` 装进 venv 的，
+  `__file__` 上溯三层落到 `/opt/venv/lib/python3.10` ⇒ `data/` 指向一个不存在、
+  也写不进去的目录。而 `/healthz` **照样返回 200**（"索引不可用"按设计不算存活失败），
+  表现是"服务是绿的、`n_chunks` 是 0、`/search` 报
+  `PermissionError: '/opt/venv/lib/python3.10/data'`"。
+  修：`repo_root()` 支持 `KUBEDOCS_REPO_ROOT` 覆盖，compose 里设 `/app`
+  （本地与 CI 不设它，行为与以前**逐字相同**）。
+- **`HF_HOME` 落在非 root 用户读不到的地方**：容器以 `app`（uid 10001）运行，
+  而 `/root` 是 0700 ⇒ 挂进卷的模型对 `app` **不可读**，容器内检索会静默降级成
+  "没有向量路"。修：改到 `/home/app/.cache/huggingface` + `chown`，compose 挂载点同步。
+- **依赖层与源码层耦合 + 无谓的编译器**：原来 `COPY src` 之后才 `pip install .`，
+  改一行源码就要重下几 GB 依赖；builder 里还装了 `build-essential`（64 个包 / 87 MB），
+  而依赖其实全是 manylinux wheel——受限网络下这一层实测 **>18 分钟仍没下完**。
+  修：先装依赖（空占位包）、再 `COPY src` + `pip install --no-deps .`；
+  编译器改成 `BUILD_TOOLS=1` 按需开启（默认不装）。
+
+新增构建参数（**默认全部留空 = 官方源，行为与以前一致**）：`APT_MIRROR`、`PIP_INDEX_URL`、
+`TORCH_CPU_FIND_LINKS` + `TORCH_CPU_VERSION`（CPU-only torch 配方；必须连版本一起给，
+否则 PEP 440 下 pip 会挑数值更大的 CUDA 版）。
+
+实测结论（细节见 README「Docker 全栈实测」与 SECURITY.md 第 6 节）：
+
+- ✅ `docker compose up -d`：db + api 起来且 healthy；`/healthz` 报 **18811 块**；
+  `/metrics` 200（`kubedocs_*` 指标按**路由模板**打标签、计数随请求增长）；
+  `/search` **3 条真实命中、无降级**；`/chat` 的 SSE 里 `check_red_line` 命中「胸痛」
+  并转 `status: emergency`。
+- ✅ **pgvector 集成测试从 skip 变为真跑**：`test_pgvector_store.py` +
+  `test_store_contract.py` 的 pgvector 参数 **90 passed / 0 skipped**；
+  当前索引（18811 块）重灌进 pgvector 后全文/向量自检 ok、抽样 200 块向量**逐位一致**、
+  字符总数两边相同，`cli --store pgvector eval --top-k 10 --gate` **退出码 0**
+  （hybrid hit@10 0.8600 ≥ 冻结基线 0.8400）。
+- ⚠️ **镜像"从零重建"没有在本机跑完**：重建需要的外网大文件下载**反复停滞**
+  （同一构建里 tuna 能把 553 MB 的 torch 拉完，另一条 184 MB 的 wheel 却卡死 6 分钟零字节）。
+  所以那次容器验证是在**现有镜像里挂载当前源码**跑的——修复本身被完整验证了，
+  但"干净环境一次构建成功"这条没有跑通。
+- ⚠️ 镜像 **9.91 GB**：PyPI 上的 `torch` 默认是 CUDA 版，会多拉约 2.5 GB 的
+  `nvidia-*` / `triton` / `cuda-toolkit`，而这个服务是**纯 CPU** 的。CPU-only 配方
+  实测能把 torch 从 553 MB+ 降到 **184 MB**，但那一次构建被打断，
+  因此**不对"镜像能瘦到多少"下断言**。
+- ⚠️ 基础镜像仍是**浮动 tag**（`python:3.10-slim` 实测解析到 **Debian 13**），
+  与 compose 自己"版本都钉死"的纪律不一致；Docker 构建**不消费 `requirements.lock.txt`**
+  （镜像里的 `langgraph` 1.2.15 / `litellm` 1.105.0 / `torch` 2.14.1 都比锁文件新）。
+- ⚠️ 构建需要约 **15 GB 空闲磁盘**（中间层 + 9.91 GB 镜像）：本机 C 盘曾只剩 0.5 GB，
+  构建直接以 `OSError: [Errno 5] Input/output error` 失败。
+
+---
+
 ## [0.1.0] - 未发布（no tag yet）
 
 首个版本的全部内容，由 **33 个提交**归纳（提交日期区间 2026-09-24 ~ 2026-10-11，

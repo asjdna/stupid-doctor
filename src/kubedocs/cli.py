@@ -336,11 +336,17 @@ def cmd_stats(args: argparse.Namespace) -> int:
         }
         if args.verify:
             payload["fts_integrity"] = store.verify_fts()
-            # 向量侧体检：此前 `stats --verify` 只查 FTS，而 milvus/sqlite-vec 的
-            # docstring 都宣称它会调 `verify_vec()`——那里名不副实，这里补上。
-            verify_vec = getattr(store, "verify_vec", None)
-            if callable(verify_vec):
-                payload["vector_integrity"] = verify_vec()
+            # 向量侧体检：**三个后端的方法名不一样**——`sqlite-vec` / `milvus` 叫
+            # `verify_vec`，`pgvector` 叫 `verify_hnsw`。只试 `verify_vec` 会让
+            # pgvector 那一路的向量体检永远是空的（方法存在却没人调）。
+            # 注意**不要**预先塞一个 None：那会让"这个后端没有向量体检"打印成
+            # 「向量一致性 : None」，比不打印更误导。
+            for name in ("verify_vec", "verify_hnsw"):
+                checker = getattr(store, name, None)
+                if callable(checker):
+                    payload["vector_integrity"] = checker()
+                    payload["vector_verify_method"] = name
+                    break
         if args.json:
             print(json.dumps(payload, ensure_ascii=False, indent=2))
         else:

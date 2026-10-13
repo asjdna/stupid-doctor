@@ -179,44 +179,29 @@ class White:
 
 
 WHITELIST: dict[tuple[str, int, str], White] = {
-    # 本表在 SECURITY.md 重写后重新登记：只有"整句里除锚点外没有任何源码标识符"的引用
-    # 才会在这里，而且每条都带 `expect`（锚点漂走时它必须失败，白名单不是免死金牌）。
-    ("SECURITY.md", 8, "Dockerfile:2"): White(
-        reason="第 6-9 行是引用块，反引号里除这个锚点外只有文件名（`Dockerfile` / "
-        "`.github/workflows/ci.yml`），没有可抽的符号名",
-        expect="尚未在本机实测",
-    ),
-    ("SECURITY.md", 8, "docker-compose.yml:10"): White(
-        reason="与上一条同一句（第 6-9 行），同样只有文件名",
-        expect="尚未在本机实测",
-    ),
-    ("SECURITY.md", 27, ".gitignore:53-54"): White(
+    # 只登记"整句里除锚点外没有任何源码标识符"的引用，而且每条都带 `expect`
+    # （锚点漂走时它必须失败——白名单不是免死金牌）。
+    # 键里的行号是**引用所在的 SECURITY.md 行号**：改写文档会移动它，所以这几条
+    # 在重锚时同步更新过。
+    ("SECURITY.md", 30, ".gitignore:53-54"): White(
         reason="这一句在说 clinic 卡片语料不入库，反引号里只有这个锚点",
         expect="clinic",
     ),
-    ("SECURITY.md", 165, "clinic_baseline.json:8"): White(
+    ("SECURITY.md", 168, "clinic_baseline.json:8"): White(
         reason="markdown 表格行：单元格里只有指标名与数字、以及这个锚点，没有源码符号",
         expect='"recall"',
     ),
-    ("SECURITY.md", 166, "clinic_baseline.json:9"): White(
+    ("SECURITY.md", 169, "clinic_baseline.json:9"): White(
         reason="同上（表格行，单元格里只有数字与锚点）",
         expect='"false_positive_rate"',
     ),
-    ("SECURITY.md", 167, "clinic_baseline.json:18"): White(
+    ("SECURITY.md", 170, "clinic_baseline.json:18"): White(
         reason="同上（表格行，单元格里只有数字与锚点）",
         expect='"accuracy"',
     ),
-    ("SECURITY.md", 313, "docker-compose.yml:82"): White(
+    ("SECURITY.md", 316, "docker-compose.yml:107"): White(
         reason="这一句在说端口映射，反引号里只有端口号与这个锚点",
         expect="8080:8080",
-    ),
-    ("SECURITY.md", 337, "Dockerfile:2"): White(
-        reason="这一行是『未验证事项』条目，反引号里只有文件名 + 两个锚点",
-        expect="尚未在本机实测",
-    ),
-    ("SECURITY.md", 337, "docker-compose.yml:10"): White(
-        reason="与上一条同一句，同样只有文件名",
-        expect="尚未在本机实测",
     ),
 }
 
