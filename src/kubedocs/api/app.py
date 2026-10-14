@@ -127,6 +127,9 @@ CONSOLE_HTML = ("data", "web", "console.html")
 STATS_TTL_S = 2.0
 """`_DomainRuntime.stats()` 的缓存有效期（秒）。取值理由见该方法 docstring。"""
 
+PATIENT_HTML = ("data", "web", "patient.html")
+"""患者端页面。**只**保留问诊 agent，面向真实使用者（见 `patient` 端点的说明）。"""
+
 
 # ===========================================================================
 # 运行期资源：一个域一份，只构造一次
@@ -656,6 +659,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     publish_config_gauges(cfg)
     app.state.index_html = repo_root().joinpath(*INDEX_HTML)
     app.state.console_html = repo_root().joinpath(*CONSOLE_HTML)
+    app.state.patient_html = repo_root().joinpath(*PATIENT_HTML)
     app.state.runtimes_lock = threading.Lock()
     app.state.agent_lock = threading.Lock()
     app.state.clinic_agent = None
@@ -801,6 +805,24 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         `/search`、`/chat` 等请求，而 API 没有开 CORS，换源就会全线失败。
         """
         return _serve_page(request.app.state.console_html)
+
+    @app.get("/patient", response_class=HTMLResponse)
+    def patient(request: Request) -> HTMLResponse:
+        """患者端：**只**保留问诊 agent，面向真实使用者。
+
+        与另外两个页面的分工（三者的差异是**刻意**的，不是没整理的重复）：
+
+        | 页面 | 给谁 | 有什么 |
+        |---|---|---|
+        | `/patient` | 患者/使用者 | 只有对话、急诊提示、追问与依据；**没有**域名/API 地址/top_k/指标/工具清单 |
+        | `/` | 开发者 | 检索 / 工具清单 / 问诊的最小示例 |
+        | `/console` | 运维 | 索引体检、`/metrics`、每路检索名次、降级原因 |
+
+        为什么患者端的"没有"很重要：`/` 与 `/console` 上的那些输入项（`API 地址`、
+        `域`、`top_k`）对患者是纯粹的认知负担，而且**能改到不该改的东西**——
+        患者端因此一律**同源**、不暴露任何可调参数。
+        """
+        return _serve_page(request.app.state.patient_html)
 
     return app
 
