@@ -38,6 +38,7 @@ from kubedocs.clinical.rag import (
     RetrievalBackend,
     RetrievedChunk,
 )
+from kubedocs.clinical.reasoning import ClinicalReasoner, LiteLLMAdapter
 from kubedocs.clinical.skills import SkillRegistry, default_registry
 from kubedocs.clinical.triage import RetrievalTriage
 
@@ -45,6 +46,7 @@ __all__ = [
     "BackendHealth",
     "ClinicalAssessment",
     "ClinicalPipeline",
+    "ClinicalReasoner",
     "ClinicalTurn",
     "DepartmentAdvice",
     "DifferentialItem",
@@ -52,6 +54,7 @@ __all__ = [
     "EvidenceItem",
     "ExamAdvice",
     "HttpRagBackend",
+    "LiteLLMAdapter",
     "LocalIndexBackend",
     "MedicationAdvice",
     "RetrievalBackend",

@@ -85,6 +85,27 @@ class TestPolarity:
         assert is_negated("我以前没有胸痛，现在胸痛", "胸痛") is True  # 已知局限
         assert polarity("我以前没有胸痛，现在胸痛", "胸痛") == "absent"
 
+    @pytest.mark.parametrize(
+        ("text", "phrase"),
+        [
+            ("无腹泻，其实是肚子疼", "肚子疼"),
+            ("无胸痛、无呼吸困难，仅有轻微头晕", "头晕"),
+        ],
+    )
+    def test_reversal_words_cut_the_scope(self, text, phrase):
+        """**用原型用例实测补上的两个转折词**（`其实` / `仅`）。
+
+        这两条来自 `data/eval/prototype/symptom_status_gold.jsonl`（原型标 `comma-scope`
+        与 `known-limitation`）：缺这两个词时，否定作用域会越过逗号盖住后半句，
+        把"肚子疼""头晕"判成**否认**。补词后该文件的 status 一致率 43/45 → **45/45**
+        （`scripts/eval_prototype_cases.py`）。
+
+        注意与上一条的关系：上面「我以前没有胸痛，现在胸痛」依赖的是**时间重启词 `现在`**，
+        那是另一类线索，本次没有动——所以那条已知局限**依然存在**，没有被顺手"修好"。
+        """
+        assert polarity(text, phrase) == "present"
+        assert is_reportable(text, phrase) is True
+
 
 class TestPolaritySafetyGate:
     """`is_reportable` 是急诊红线唯一的安全阀，四类必须挡住。"""

@@ -1,0 +1,121 @@
+{"kind": "meta", "version": 1, "built_at": "2026-09-22 23:22:42", "built_from": {"cards_sha": "4267d23d5997975b", "card_count": 19236, "symptom_sample": 40, "sample_strategy": "按标题排序后等步长抽样（无随机，跨进程可复现）"}, "human_verified": false, "disclaimer": "本文件是**冻结基线**：用于检测语料变更，不判定医学正确性。条目默认未经人工复核（human_verified=false）；要判断「某症状是否真的该关联某疾病」，必须由医学人员复核。", "baseline": {"retrieval_hit@1": 1.0, "retrieval_hit@k": 1.0, "content_pass_rate": 1.0, "type_pass_rate": 1.0, "negative_pass_rate": 1.0}, "baseline_recorded_at": "2026-09-22 23:23:00", "baseline_mode": {"dense": false, "top_k": 5}}
+{"kind": "retrieval", "id": "g0001", "query": "Doc", "expect_titles": ["Doc"], "expect_type": "symptom", "note": "查询症状名应能召回自己的卡片"}
+{"kind": "content", "id": "g10001", "query": "Doc", "must_contain": ["心内科", "肾内科", "恶性高血压", "肾血管性高血压"], "must_not_contain": ["不孕不育"], "note": "卡文本应包含当时的科室/疾病关联；不应混入不相干科室"}
+{"kind": "type", "id": "g20001", "query": "Doc", "expect_type": "symptom", "note": "top-1 应为症状卡，防检索串味"}
+{"kind": "retrieval", "id": "g0002", "query": "丘脑出血", "expect_titles": ["丘脑出血"], "expect_type": "symptom", "note": "查询症状名应能召回自己的卡片"}
+{"kind": "content", "id": "g10002", "query": "丘脑出血", "must_contain": ["神经外科", "高血压性脑出血"], "must_not_contain": ["不孕不育"], "note": "卡文本应包含当时的科室/疾病关联；不应混入不相干科室"}
+{"kind": "type", "id": "g20002", "query": "丘脑出血", "expect_type": "symptom", "note": "top-1 应为症状卡，防检索串味"}
+{"kind": "retrieval", "id": "g0003", "query": "人格解体", "expect_titles": ["人格解体"], "expect_type": "symptom", "note": "查询症状名应能召回自己的卡片"}
+{"kind": "content", "id": "g10003", "query": "人格解体", "must_contain": ["神经外科", "精神科", "颞叶癫痫", "急性妄想发作"], "must_not_contain": ["不孕不育"], "note": "卡文本应包含当时的科室/疾病关联；不应混入不相干科室"}
+{"kind": "type", "id": "g20003", "query": "人格解体", "expect_type": "symptom", "note": "top-1 应为症状卡，防检索串味"}
+{"kind": "retrieval", "id": "g0004", "query": "儿童头痛", "expect_titles": ["儿童头痛"], "expect_type": "symptom", "note": "查询症状名应能召回自己的卡片"}
+{"kind": "content", "id": "g10004", "query": "儿童头痛", "must_contain": ["神经内科", "颅内低压性头痛", "紧张性头痛"], "must_not_contain": ["不孕不育"], "note": "卡文本应包含当时的科室/疾病关联；不应混入不相干科室"}
+{"kind": "type", "id": "g20004", "query": "儿童头痛", "expect_type": "symptom", "note": "top-1 应为症状卡，防检索串味"}
+{"kind": "retrieval", "id": "g0005", "query": "创伤性湿肺", "expect_titles": ["创伤性湿肺"], "expect_type": "symptom", "note": "查询症状名应能召回自己的卡片"}
+{"kind": "content", "id": "g10005", "query": "创伤性湿肺", "must_contain": ["心胸外科", "肺损伤"], "must_not_contain": ["不孕不育"], "note": "卡文本应包含当时的科室/疾病关联；不应混入不相干科室"}
+{"kind": "type", "id": "g20005", "query": "创伤性湿肺", "expect_type": "symptom", "note": "top-1 应为症状卡，防检索串味"}
+{"kind": "retrieval", "id": "g0006", "query": "反复抽搐", "expect_titles": ["反复抽搐"], "expect_type": "symptom", "note": "查询症状名应能召回自己的卡片"}
+{"kind": "content", "id": "g10006", "query": "反复抽搐", "must_contain": ["神经内科", "急诊科", "抽搐与惊厥", "有机氯杀虫剂中毒"], "must_not_contain": ["不孕不育"], "note": "卡文本应包含当时的科室/疾病关联；不应混入不相干科室"}
+{"kind": "type", "id": "g20006", "query": "反复抽搐", "expect_type": "symptom", "note": "top-1 应为症状卡，防检索串味"}
+{"kind": "retrieval", "id": "g0007", "query": "吸吮反射阳性", "expect_titles": ["吸吮反射阳性"], "expect_type": "symptom", "note": "查询症状名应能召回自己的卡片"}
+{"kind": "content", "id": "g10007", "query": "吸吮反射阳性", "must_contain": ["骨外科", "反射性交感神经营养不良综合征"], "must_not_contain": ["不孕不育"], "note": "卡文本应包含当时的科室/疾病关联；不应混入不相干科室"}
+{"kind": "type", "id": "g20007", "query": "吸吮反射阳性", "expect_type": "symptom", "note": "top-1 应为症状卡，防检索串味"}
+{"kind": "retrieval", "id": "g0008", "query": "喉部有痰", "expect_titles": ["喉部有痰"], "expect_type": "symptom", "note": "查询症状名应能召回自己的卡片"}
+{"kind": "content", "id": "g10008", "query": "喉部有痰", "must_contain": ["耳鼻喉科", "喉炎", "慢性喉炎"], "must_not_contain": ["不孕不育"], "note": "卡文本应包含当时的科室/疾病关联；不应混入不相干科室"}
+{"kind": "type", "id": "g20008", "query": "喉部有痰", "expect_type": "symptom", "note": "top-1 应为症状卡，防检索串味"}
+{"kind": "retrieval", "id": "g0009", "query": "外阴皮肤肿胀", "expect_titles": ["外阴皮肤肿胀"], "expect_type": "symptom", "note": "查询症状名应能召回自己的卡片"}
+{"kind": "content", "id": "g10009", "query": "外阴皮肤肿胀", "must_contain": ["妇科", "肿瘤科", "前庭大腺炎", "外阴癌"], "must_not_contain": ["不孕不育"], "note": "卡文本应包含当时的科室/疾病关联；不应混入不相干科室"}
+{"kind": "type", "id": "g20009", "query": "外阴皮肤肿胀", "expect_type": "symptom", "note": "top-1 应为症状卡，防检索串味"}
+{"kind": "retrieval", "id": "g0010", "query": "妊娠蛋白尿", "expect_titles": ["妊娠蛋白尿"], "expect_type": "symptom", "note": "查询症状名应能召回自己的卡片"}
+{"kind": "content", "id": "g10010", "query": "妊娠蛋白尿", "must_contain": ["肾内科", "急性肾炎"], "must_not_contain": ["不孕不育"], "note": "卡文本应包含当时的科室/疾病关联；不应混入不相干科室"}
+{"kind": "type", "id": "g20010", "query": "妊娠蛋白尿", "expect_type": "symptom", "note": "top-1 应为症状卡，防检索串味"}
+{"kind": "retrieval", "id": "g0011", "query": "小头", "expect_titles": ["小头"], "expect_type": "symptom", "note": "查询症状名应能召回自己的卡片"}
+{"kind": "content", "id": "g10011", "query": "小头", "must_contain": ["血液科", "感染科", "先天性再生障碍性贫血", "脑弓形体病"], "must_not_contain": ["不孕不育"], "note": "卡文本应包含当时的科室/疾病关联；不应混入不相干科室"}
+{"kind": "type", "id": "g20011", "query": "小头", "expect_type": "symptom", "note": "top-1 应为症状卡，防检索串味"}
+{"kind": "retrieval", "id": "g0012", "query": "岳淑芹", "expect_titles": ["岳淑芹"], "expect_type": "symptom", "note": "查询症状名应能召回自己的卡片"}
+{"kind": "content", "id": "g10012", "query": "岳淑芹", "must_contain": ["精神科", "产科", "夜惊", "早孕反应"], "must_not_contain": ["不孕不育"], "note": "卡文本应包含当时的科室/疾病关联；不应混入不相干科室"}
+{"kind": "type", "id": "g20012", "query": "岳淑芹", "expect_type": "symptom", "note": "top-1 应为症状卡，防检索串味"}
+{"kind": "retrieval", "id": "g0013", "query": "心包内出血", "expect_titles": ["心包内出血"], "expect_type": "symptom", "note": "查询症状名应能召回自己的卡片"}
+{"kind": "content", "id": "g10013", "query": "心包内出血", "must_contain": ["心胸外科", "心脏穿透伤", "穿透性心脏外伤"], "must_not_contain": ["不孕不育"], "note": "卡文本应包含当时的科室/疾病关联；不应混入不相干科室"}
+{"kind": "type", "id": "g20013", "query": "心包内出血", "expect_type": "symptom", "note": "top-1 应为症状卡，防检索串味"}
+{"kind": "retrieval", "id": "g0014", "query": "性腺发育不良", "expect_titles": ["性腺发育不良"], "expect_type": "symptom", "note": "查询症状名应能召回自己的卡片"}
+{"kind": "content", "id": "g10014", "query": "性腺发育不良", "must_contain": ["内分泌科", "男科", "特发性青春期延迟", "无睾症"], "must_not_contain": ["不孕不育"], "note": "卡文本应包含当时的科室/疾病关联；不应混入不相干科室"}
+{"kind": "type", "id": "g20014", "query": "性腺发育不良", "expect_type": "symptom", "note": "top-1 应为症状卡，防检索串味"}
+{"kind": "retrieval", "id": "g0015", "query": "手指歪斜", "expect_titles": ["手指歪斜"], "expect_type": "symptom", "note": "查询症状名应能召回自己的卡片"}
+{"kind": "content", "id": "g10015", "query": "手指歪斜", "must_contain": ["神经内科", "骨外科", "偏瘫", "伸指肌腱损伤"], "must_not_contain": ["不孕不育"], "note": "卡文本应包含当时的科室/疾病关联；不应混入不相干科室"}
+{"kind": "type", "id": "g20015", "query": "手指歪斜", "expect_type": "symptom", "note": "top-1 应为症状卡，防检索串味"}
+{"kind": "retrieval", "id": "g0016", "query": "排便不尽感", "expect_titles": ["排便不尽感"], "expect_type": "symptom", "note": "查询症状名应能召回自己的卡片"}
+{"kind": "content", "id": "g10016", "query": "排便不尽感", "must_contain": ["肛肠科", "消化内科", "肠癌", "慢性肠炎"], "must_not_contain": ["不孕不育"], "note": "卡文本应包含当时的科室/疾病关联；不应混入不相干科室"}
+{"kind": "type", "id": "g20016", "query": "排便不尽感", "expect_type": "symptom", "note": "top-1 应为症状卡，防检索串味"}
+{"kind": "retrieval", "id": "g0017", "query": "晶状体移位", "expect_titles": ["晶状体移位"], "expect_type": "symptom", "note": "查询症状名应能召回自己的卡片"}
+{"kind": "content", "id": "g10017", "query": "晶状体移位", "must_contain": ["眼科", "继发于无晶状体眼和人工晶状体眼的青光眼", "晶状体异位"], "must_not_contain": ["不孕不育"], "note": "卡文本应包含当时的科室/疾病关联；不应混入不相干科室"}
+{"kind": "type", "id": "g20017", "query": "晶状体移位", "expect_type": "symptom", "note": "top-1 应为症状卡，防检索串味"}
+{"kind": "retrieval", "id": "g0018", "query": "气短", "expect_titles": ["气短"], "expect_type": "symptom", "note": "查询症状名应能召回自己的卡片"}
+{"kind": "content", "id": "g10018", "query": "气短", "must_contain": ["呼吸内科", "心内科", "支气管炎", "心包积液"], "must_not_contain": ["不孕不育"], "note": "卡文本应包含当时的科室/疾病关联；不应混入不相干科室"}
+{"kind": "type", "id": "g20018", "query": "气短", "expect_type": "symptom", "note": "top-1 应为症状卡，防检索串味"}
+{"kind": "retrieval", "id": "g0019", "query": "混浊尿", "expect_titles": ["混浊尿"], "expect_type": "symptom", "note": "查询症状名应能召回自己的卡片"}
+{"kind": "content", "id": "g10019", "query": "混浊尿", "must_contain": ["泌尿科", "肾内科", "泌尿道肿瘤", "膀胱与尿道结石"], "must_not_contain": ["不孕不育"], "note": "卡文本应包含当时的科室/疾病关联；不应混入不相干科室"}
+{"kind": "type", "id": "g20019", "query": "混浊尿", "expect_type": "symptom", "note": "top-1 应为症状卡，防检索串味"}
+{"kind": "retrieval", "id": "g0020", "query": "犬吠样咳嗽", "expect_titles": ["犬吠样咳嗽"], "expect_type": "symptom", "note": "查询症状名应能召回自己的卡片"}
+{"kind": "content", "id": "g10020", "query": "犬吠样咳嗽", "must_contain": ["感染科", "副流行性感冒"], "must_not_contain": ["不孕不育"], "note": "卡文本应包含当时的科室/疾病关联；不应混入不相干科室"}
+{"kind": "type", "id": "g20020", "query": "犬吠样咳嗽", "expect_type": "symptom", "note": "top-1 应为症状卡，防检索串味"}
+{"kind": "retrieval", "id": "g0021", "query": "瘀斑性环", "expect_titles": ["瘀斑性环"], "expect_type": "symptom", "note": "查询症状名应能召回自己的卡片"}
+{"kind": "content", "id": "g10021", "query": "瘀斑性环", "must_contain": ["皮肤科", "风热疮"], "must_not_contain": ["不孕不育"], "note": "卡文本应包含当时的科室/疾病关联；不应混入不相干科室"}
+{"kind": "type", "id": "g20021", "query": "瘀斑性环", "expect_type": "symptom", "note": "top-1 应为症状卡，防检索串味"}
+{"kind": "retrieval", "id": "g0022", "query": "皮肤钙化", "expect_titles": ["皮肤钙化"], "expect_type": "symptom", "note": "查询症状名应能召回自己的卡片"}
+{"kind": "content", "id": "g10022", "query": "皮肤钙化", "must_contain": ["骨外科", "皮肤科", "纤维性骨炎", "营养不良性皮肤钙化病"], "must_not_contain": ["不孕不育"], "note": "卡文本应包含当时的科室/疾病关联；不应混入不相干科室"}
+{"kind": "type", "id": "g20022", "query": "皮肤钙化", "expect_type": "symptom", "note": "top-1 应为症状卡，防检索串味"}
+{"kind": "retrieval", "id": "g0023", "query": "眼裂细小", "expect_titles": ["眼裂细小"], "expect_type": "symptom", "note": "查询症状名应能召回自己的卡片"}
+{"kind": "content", "id": "g10023", "query": "眼裂细小", "must_contain": ["眼科", "内眦赘皮"], "must_not_contain": ["不孕不育"], "note": "卡文本应包含当时的科室/疾病关联；不应混入不相干科室"}
+{"kind": "type", "id": "g20023", "query": "眼裂细小", "expect_type": "symptom", "note": "top-1 应为症状卡，防检索串味"}
+{"kind": "retrieval", "id": "g0024", "query": "类癌面红", "expect_titles": ["类癌面红"], "expect_type": "symptom", "note": "查询症状名应能召回自己的卡片"}
+{"kind": "content", "id": "g10024", "query": "类癌面红", "must_contain": ["肿瘤科", "皮肤科", "类癌综合征", "面红和面红恐惧症"], "must_not_contain": ["不孕不育"], "note": "卡文本应包含当时的科室/疾病关联；不应混入不相干科室"}
+{"kind": "type", "id": "g20024", "query": "类癌面红", "expect_type": "symptom", "note": "top-1 应为症状卡，防检索串味"}
+{"kind": "retrieval", "id": "g0025", "query": "结肠梗阻", "expect_titles": ["结肠梗阻"], "expect_type": "symptom", "note": "查询症状名应能召回自己的卡片"}
+{"kind": "content", "id": "g10025", "query": "结肠梗阻", "must_contain": ["消化内科", "肿瘤科", "缺血性结肠炎", "大肠腺瘤"], "must_not_contain": ["不孕不育"], "note": "卡文本应包含当时的科室/疾病关联；不应混入不相干科室"}
+{"kind": "type", "id": "g20025", "query": "结肠梗阻", "expect_type": "symptom", "note": "top-1 应为症状卡，防检索串味"}
+{"kind": "retrieval", "id": "g0026", "query": "耸肩喘息", "expect_titles": ["耸肩喘息"], "expect_type": "symptom", "note": "查询症状名应能召回自己的卡片"}
+{"kind": "content", "id": "g10026", "query": "耸肩喘息", "must_contain": ["呼吸内科", "喘息样支气管炎", "肺功能衰竭"], "must_not_contain": ["不孕不育"], "note": "卡文本应包含当时的科室/疾病关联；不应混入不相干科室"}
+{"kind": "type", "id": "g20026", "query": "耸肩喘息", "expect_type": "symptom", "note": "top-1 应为症状卡，防检索串味"}
+{"kind": "retrieval", "id": "g0027", "query": "肝缩小", "expect_titles": ["肝缩小"], "expect_type": "symptom", "note": "查询症状名应能召回自己的卡片"}
+{"kind": "content", "id": "g10027", "query": "肝缩小", "must_contain": ["肝病科", "酒精性肝硬化"], "must_not_contain": ["不孕不育"], "note": "卡文本应包含当时的科室/疾病关联；不应混入不相干科室"}
+{"kind": "type", "id": "g20027", "query": "肝缩小", "expect_type": "symptom", "note": "top-1 应为症状卡，防检索串味"}
+{"kind": "retrieval", "id": "g0028", "query": "肺火", "expect_titles": ["肺火"], "expect_type": "symptom", "note": "查询症状名应能召回自己的卡片"}
+{"kind": "content", "id": "g10028", "query": "肺火", "must_contain": ["呼吸内科", "肺热", "肺燥"], "must_not_contain": ["不孕不育"], "note": "卡文本应包含当时的科室/疾病关联；不应混入不相干科室"}
+{"kind": "type", "id": "g20028", "query": "肺火", "expect_type": "symptom", "note": "top-1 应为症状卡，防检索串味"}
+{"kind": "retrieval", "id": "g0029", "query": "胆囊结石", "expect_titles": ["胆囊结石"], "expect_type": "symptom", "note": "查询症状名应能召回自己的卡片"}
+{"kind": "content", "id": "g10029", "query": "胆囊结石", "must_contain": ["消化内科", "肝胆外科", "胆囊胆固醇沉着症", "胆囊癌"], "must_not_contain": ["不孕不育"], "note": "卡文本应包含当时的科室/疾病关联；不应混入不相干科室"}
+{"kind": "type", "id": "g20029", "query": "胆囊结石", "expect_type": "symptom", "note": "top-1 应为症状卡，防检索串味"}
+{"kind": "retrieval", "id": "g0030", "query": "胸骨后疼痛", "expect_titles": ["胸骨后疼痛"], "expect_type": "symptom", "note": "查询症状名应能召回自己的卡片"}
+{"kind": "content", "id": "g10030", "query": "胸骨后疼痛", "must_contain": ["心内科", "呼吸内科", "心肌梗死", "纵隔气肿"], "must_not_contain": ["不孕不育"], "note": "卡文本应包含当时的科室/疾病关联；不应混入不相干科室"}
+{"kind": "type", "id": "g20030", "query": "胸骨后疼痛", "expect_type": "symptom", "note": "top-1 应为症状卡，防检索串味"}
+{"kind": "retrieval", "id": "g0031", "query": "脓疱", "expect_titles": ["脓疱"], "expect_type": "symptom", "note": "查询症状名应能召回自己的卡片"}
+{"kind": "content", "id": "g10031", "query": "脓疱", "must_contain": ["皮肤科", "口腔科", "湿疹", "口腔溃疡"], "must_not_contain": ["不孕不育"], "note": "卡文本应包含当时的科室/疾病关联；不应混入不相干科室"}
+{"kind": "type", "id": "g20031", "query": "脓疱", "expect_type": "symptom", "note": "top-1 应为症状卡，防检索串味"}
+{"kind": "retrieval", "id": "g0032", "query": "腹痛", "expect_titles": ["腹痛"], "expect_type": "symptom", "note": "查询症状名应能召回自己的卡片"}
+{"kind": "content", "id": "g10032", "query": "腹痛", "must_contain": ["消化内科", "急性胃肠炎", "胃溃疡"], "must_not_contain": ["不孕不育"], "note": "卡文本应包含当时的科室/疾病关联；不应混入不相干科室"}
+{"kind": "type", "id": "g20032", "query": "腹痛", "expect_type": "symptom", "note": "top-1 应为症状卡，防检索串味"}
+{"kind": "retrieval", "id": "g0033", "query": "色素性胆结石", "expect_titles": ["色素性胆结石"], "expect_type": "symptom", "note": "查询症状名应能召回自己的卡片"}
+{"kind": "content", "id": "g10033", "query": "色素性胆结石", "must_contain": ["肝胆外科", "消化内科", "胆结石", "胆石症"], "must_not_contain": ["不孕不育"], "note": "卡文本应包含当时的科室/疾病关联；不应混入不相干科室"}
+{"kind": "type", "id": "g20033", "query": "色素性胆结石", "expect_type": "symptom", "note": "top-1 应为症状卡，防检索串味"}
+{"kind": "retrieval", "id": "g0034", "query": "血胸", "expect_titles": ["血胸"], "expect_type": "symptom", "note": "查询症状名应能召回自己的卡片"}
+{"kind": "content", "id": "g10034", "query": "血胸", "must_contain": ["骨外科", "心胸外科", "肋骨骨折", "自发性血胸"], "must_not_contain": ["不孕不育"], "note": "卡文本应包含当时的科室/疾病关联；不应混入不相干科室"}
+{"kind": "type", "id": "g20034", "query": "血胸", "expect_type": "symptom", "note": "top-1 应为症状卡，防检索串味"}
+{"kind": "retrieval", "id": "g0035", "query": "足背部肿胀", "expect_titles": ["足背部肿胀"], "expect_type": "symptom", "note": "查询症状名应能召回自己的卡片"}
+{"kind": "content", "id": "g10035", "query": "足背部肿胀", "must_contain": ["营养科", "骨外科", "恶性营养不良病", "跖骨骨折"], "must_not_contain": ["不孕不育"], "note": "卡文本应包含当时的科室/疾病关联；不应混入不相干科室"}
+{"kind": "type", "id": "g20035", "query": "足背部肿胀", "expect_type": "symptom", "note": "top-1 应为症状卡，防检索串味"}
+{"kind": "retrieval", "id": "g0036", "query": "酒悖", "expect_titles": ["酒悖"], "expect_type": "symptom", "note": "查询症状名应能召回自己的卡片"}
+{"kind": "content", "id": "g10036", "query": "酒悖", "must_contain": ["血液科", "急诊科", "慢性酒中毒", "急性酒中毒"], "must_not_contain": ["不孕不育"], "note": "卡文本应包含当时的科室/疾病关联；不应混入不相干科室"}
+{"kind": "type", "id": "g20036", "query": "酒悖", "expect_type": "symptom", "note": "top-1 应为症状卡，防检索串味"}
+{"kind": "retrieval", "id": "g0037", "query": "阴道溃疡", "expect_titles": ["阴道溃疡"], "expect_type": "symptom", "note": "查询症状名应能召回自己的卡片"}
+{"kind": "content", "id": "g10037", "query": "阴道溃疡", "must_contain": ["妇科", "皮肤科", "细菌性阴道病", "三期梅毒"], "must_not_contain": ["不孕不育"], "note": "卡文本应包含当时的科室/疾病关联；不应混入不相干科室"}
+{"kind": "type", "id": "g20037", "query": "阴道溃疡", "expect_type": "symptom", "note": "top-1 应为症状卡，防检索串味"}
+{"kind": "retrieval", "id": "g0038", "query": "顽固性头痛", "expect_titles": ["顽固性头痛"], "expect_type": "symptom", "note": "查询症状名应能召回自己的卡片"}
+{"kind": "content", "id": "g10038", "query": "顽固性头痛", "must_contain": ["肿瘤科", "耳鼻喉科", "上颌窦恶性肿瘤", "鼻前颅底肿瘤"], "must_not_contain": ["不孕不育"], "note": "卡文本应包含当时的科室/疾病关联；不应混入不相干科室"}
+{"kind": "type", "id": "g20038", "query": "顽固性头痛", "expect_type": "symptom", "note": "top-1 应为症状卡，防检索串味"}
+{"kind": "retrieval", "id": "g0039", "query": "餐后血糖过低", "expect_titles": ["餐后血糖过低"], "expect_type": "symptom", "note": "查询症状名应能召回自己的卡片"}
+{"kind": "content", "id": "g10039", "query": "餐后血糖过低", "must_contain": ["消化内科", "倾倒综合征", "餐后血糖过低症"], "must_not_contain": ["不孕不育"], "note": "卡文本应包含当时的科室/疾病关联；不应混入不相干科室"}
+{"kind": "type", "id": "g20039", "query": "餐后血糖过低", "expect_type": "symptom", "note": "top-1 应为症状卡，防检索串味"}
+{"kind": "retrieval", "id": "g0040", "query": "鸟嘴样尖鼻", "expect_titles": ["鸟嘴样尖鼻"], "expect_type": "symptom", "note": "查询症状名应能召回自己的卡片"}
+{"kind": "content", "id": "g10040", "query": "鸟嘴样尖鼻", "must_contain": ["耳鼻喉科", "遗传病科", "鼻外伤", "沃纳综合征"], "must_not_contain": ["不孕不育"], "note": "卡文本应包含当时的科室/疾病关联；不应混入不相干科室"}
+{"kind": "type", "id": "g20040", "query": "鸟嘴样尖鼻", "expect_type": "symptom", "note": "top-1 应为症状卡，防检索串味"}

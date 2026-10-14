@@ -41,9 +41,42 @@ EMERGENCY_FALLBACK_TEXT = (
 
 
 class LLMClient(Protocol):
-    """最小 LLM 接口。与仓库既有的客户端形状一致（`complete(system, user) -> str`）。"""
+    """最小 LLM 接口：**返回文本**。
+
+    仓库既有客户端（`generate.LiteLLMClient`）的 `complete()` 返回的是 `LLMResult`
+    **对象**而不是 `str`，所以要经 `LiteLLMAdapter` 才能接进来。这个差异必须收在
+    显式适配器里，理由见那个类的文档。
+    """
 
     def complete(self, system: str, user: str) -> str: ...
+
+
+class LiteLLMAdapter:
+    """把仓库既有的 LLM 客户端适配成本层要求的 `complete(...) -> str`。
+
+    ## 为什么不直接在 reasoner 里读 `.text`
+
+    **实测踩过这个坑**：reasoner 直接对返回值调 `.strip()`，而真实客户端返回的是
+    `LLMResult`，于是抛 `AttributeError` —— 整条主判**安静地走了降级**：
+    表面上"有回答"，实际上一次模型判断都没发生。
+
+    若在 reasoner 里写 `getattr(result, "text", ...)` 兜底，这个差异就会继续藏在业务
+    代码里，而"接错了客户端"永远表现为"模型输出不合契约"。所以差异收在这个
+    **能被单测钉住**的适配器里，且类型不对时**大声抛**。
+    """
+
+    def __init__(self, client: object) -> None:
+        self._client = client
+
+    def complete(self, system: str, user: str) -> str:
+        result = self._client.complete(system, user)  # type: ignore[attr-defined]
+        text = getattr(result, "text", None)
+        if not isinstance(text, str):
+            raise TypeError(
+                f"{type(result).__name__} 没有可用的 .text 文本，无法适配成 LLMClient。"
+                "要么传入本层期望的客户端，要么为该客户端写一个适配器。"
+            )
+        return text
 
 
 @dataclass

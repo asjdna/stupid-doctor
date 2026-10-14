@@ -76,6 +76,12 @@ REVERSAL_WORDS = [
     "倒是",
     "又有",
     "并有",
+    # 下面两个是**用原型用例实测补上的**（`data/eval/prototype/symptom_status_gold.jsonl`）：
+    #   · ss-034「无腹泻，其实是肚子疼」——缺 "其实"，否定作用域盖过逗号，把"肚子疼"判成 absent；
+    #   · ss-035「无胸痛、无呼吸困难，仅有轻微头晕」——缺 "仅"，"头晕"同样被判成 absent。
+    # 补这两个词后 status 一致率 43/45 → 45/45（见 `scripts/eval_prototype_cases.py`）。
+    "其实",
+    "仅",
 ]
 
 # 假否定复合词：「无X」里 X 是修饰而非被否定的症状（「无痛性血尿」= painless hematuria，血尿仍在）。
@@ -229,7 +235,13 @@ NEG_SCOPE_MAX = 14
 
 
 def _scan_scope(text: str, start: int, limit: int) -> int:
-    """从 start 起找作用域结束位置（遇到转折词或分句边界即止）。"""
+    """从 start 起找作用域结束位置（遇到转折词或分句边界即止）。
+
+    ⚠️ 逗号**不是**分句边界，这是有意的：`无发热、无咳嗽` 与 `无发热，无咳嗽`
+    都该让"无"盖住后面那一段。真正该收束作用域的是**转折词**（`但没有`、`其实是`）。
+    所以缺的转折词会让否定"越界"——用原型用例实测到两处（见下表），补词即可，
+    不要把逗号当成边界（那会把 `无发热，无咳嗽` 判反）。
+    """
     k = start
     while k < limit:
         for r in REVERSAL_WORDS:

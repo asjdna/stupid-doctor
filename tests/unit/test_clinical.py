@@ -499,6 +499,58 @@ class TestReasoner:
         assert "120" in result.assessment.patient_summary
 
 
+class TestLiteLLMAdapter:
+    """把仓库的 `LLMResult` 适配成 `str` 的那一层。
+
+    **这个坑是实测踩到的**：`ClinicalReasoner` 直接对返回值调 `.strip()`，而仓库真实的
+    `LiteLLMClient.complete()` 返回 `LLMResult` 对象 → `AttributeError` → 整条主判
+    **安静地走降级**（表面上"有回答"，实际一次模型判断都没发生）。
+    """
+
+    def test_reads_text_from_a_result_like_object(self) -> None:
+        from kubedocs.clinical.reasoning import LiteLLMAdapter
+
+        class _Result:
+            text = "正文"
+
+        class _Client:
+            def complete(self, system: str, user: str) -> _Result:
+                del system, user
+                return _Result()
+
+        assert LiteLLMAdapter(_Client()).complete("s", "u") == "正文"
+
+    def test_raises_loudly_when_result_has_no_text(self) -> None:
+        """类型不对要**大声抛**，不许变成"模型输出不合契约"这种误导性的降级理由。"""
+        from kubedocs.clinical.reasoning import LiteLLMAdapter
+
+        class _Client:
+            def complete(self, system: str, user: str) -> object:
+                del system, user
+                return object()
+
+        with pytest.raises(TypeError, match="没有可用的 .text"):
+            LiteLLMAdapter(_Client()).complete("s", "u")
+
+    def test_adapter_output_reaches_the_contract(self) -> None:
+        """端到端接一遍：适配器 + reasoner + 契约解析。"""
+        from kubedocs.clinical.reasoning import LiteLLMAdapter
+
+        class _Result:
+            def __init__(self, text: str) -> None:
+                self.text = text
+
+        class _Client:
+            def complete(self, system: str, user: str) -> _Result:
+                del system, user
+                return _Result(_assessment_json())
+
+        bundle = ev.build_evidence("q", backend=rag.LocalIndexBackend(_FakeRetriever([_Chunk("T", "B")])))
+        result = ClinicalReasoner(LiteLLMAdapter(_Client())).reason("q", bundle, intake_mod.IntakeState())
+        assert result.assessment is not None
+        assert result.problems == []
+
+
 # --------------------------------------------------------------------- 编排
 class TestPipeline:
     def _pipeline(self, reply: str | Exception = "", *, word: str | None = None) -> ClinicalPipeline:
