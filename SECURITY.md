@@ -60,7 +60,7 @@
 | `GET /tools`、`GET /domains` | 泄露内部工具与域的清单（自省信息） |
 
 **当前缓解到什么程度**：`/chat` 的挂号工具用进程内替身号源
-（`MockAppointmentProvider`，`api/app.py:610-612`），所以现在被占用的只是内存里的假号源，
+（`MockAppointmentProvider`，`api/app.py:648-650`），所以现在被占用的只是内存里的假号源，
 不是真实 HIS。换成真实号源库后这条立刻变成"任何人都能替别人取号"。
 
 **部署者必须做的**：把服务放在反向代理 / API 网关之后，由网关做认证与授权；
@@ -86,7 +86,7 @@
   也不变成一条 note——`/chat` 的响应里看不到 notes）。
   预算对象由 `ClinicReactRuntime` 持有（长寿命）；构造点在 `clinic_react.py:136`，
   用的是 `DailyBudget`，与 CLI `ask` / `POST /ask` 同一本账。
-- **一本账**：账本路径是 `config.py:286` 的 `llm_spend_path`——**全局一份**，
+- **一本账**：账本路径是 `config.py:297` 的 `llm_spend_path`——**全局一份**，
   不在域目录下。此前写成 `<index_dir>/<domain>/llm_spend.json`，后果是
   "切换 domain 就能把上限翻成 N 份"，而且 clinic 会话的花费被记进 **k8s_docs** 目录
   （审计 `data/index/clinic/` 的人看不到）。磁盘上曾同时存在
@@ -146,13 +146,21 @@
 这条绑定挡的是**误撞 / 复用别人的 thread_id**，挡不住有意的身份伪造。
 
 **一条仍然部分成立的"无界"性质，如实记下**：无 LLM 密钥时 `/chat` 回退到确定性图，
-而 `_get_clinic_agent()` 构造 agent 时**没有传 checkpointer**，于是 `kernel.py` 的
-默认分支生效（`InMemorySaver()`）——那份状态同样只在内存里、同样按 `thread_id` 累积。
-属主校验对它有效（校验在端点里），但**淘汰对它无效**（那是一份独立的 checkpointer 表）。
+那份会话状态按 `thread_id` 累积。属主校验对它有效（校验在端点里），
+但**淘汰对它无效**（那是一份独立的 checkpointer 表）。
 更强的一条：**LRU 淘汰会连同 owner 一起丢掉**（`api/threads.py` 的 `_evict_locked`），
 而 checkpointer 里那份会话状态仍在——淘汰之后重新 `claim` 同一个 `thread_id` 会被接受，
 于是属主校验不再保护那份**仍被保留**的病情状态。触发条件较窄（需要先发生 LRU 换出，
 且服务端生成的 thread_id 是 32 位十六进制），但它是真实存在的窗口。
+
+**2026-10-14 起这条的性质变了一半**（借用参考项目的"外部记忆"做法）：新增
+`KUBEDOCS_CLINIC_STATE_DB`，配了它就让图状态落 SQLite，**进程重启后可续跑**。
+因此上面那个窗口：
+· **默认（留空）仍是内存态**，与以前逐字相同，窗口不变；
+· **配了之后窗口变大**——那份病情状态不再随进程退出而消失，而是留在盘上，
+  而 LRU 淘汰与属主表都还是内存里的。⇒ **配了它就必须同时处理"谁能读到那个文件"**：
+  文件权限、以及多机构隔离（后者仍未实现，见 `docs/design/0001-医疗辅助诊断产品方案.md`）。
+  它存的是**会话状态**，不是病历表；真正的患者数据模型仍是占位（`clinical/persistence.py`）。
 
 **输入体积本身是有界的**（这部分做得对）：`q ≤ 300`、`top_k ∈ [1,20]`、
 `message ≤ 2000`、`thread_id ≤ 64`、`extra="forbid"`（`api/schemas.py`）。
@@ -302,7 +310,7 @@
    `env_file: .env` 把密钥注入 api 容器——它不会被打印，
    但会出现在 `docker inspect` 的输出里，共享宿主机的场合要注意。
 4. **钱包护栏**：`KUBEDOCS_LLM_DAILY_BUDGET_USD` 覆盖 `/ask`、CLI `ask` **和
-   `/chat` 的工具循环**，且是**一本全局账**（`config.py:286` 的 `llm_spend_path`）。
+   `/chat` 的工具循环**，且是**一本全局账**（`config.py:297` 的 `llm_spend_path`）。
    但仍有两条要你自己加：
    - **速率限制不在本项目里**（S-3），日上限只限制总额、不限制烧得多快；
    - **多副本下上限会变成 `副本数 × 预算`**（S-2 的残留限制）。

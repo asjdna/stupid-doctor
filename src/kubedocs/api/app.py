@@ -359,6 +359,37 @@ def _clinic_links() -> dict[str, tuple[str, ...]]:
     return {k: tuple(v) for k, v in links.items()}
 
 
+def _make_checkpointer(settings: Settings) -> object | None:
+    """按配置造图的持久化 checkpointer；未配置时返回 None（内存态，与以前一致）。
+
+    ## 为什么要有这条路径（借用参考项目的"外部记忆"做法）
+
+    图的状态原先只在 `InMemorySaver` 里：**进程一重启，追问到一半的会话就没了**。
+    参考项目（`Agent_In_Action` 的 LangGraph 章节）演示的正是"外部记忆"——
+    把 checkpoint 落盘。而我们的 `build_clinic_graph` 早就留了 `checkpointer` 参数
+    （它的 docstring 甚至写着"传入 `SqliteSaver` 则状态落 SQLite，可断点续跑"），
+    只是**没有任何调用点传它**。这条把那个空位接上。
+
+    实测性质（`langgraph.checkpoint.sqlite.SqliteSaver`）：新连接 + 新编译的图
+    能读到**同一 `thread_id`** 的历史状态 ⇒ 跨请求、跨重启续跑成立。
+
+    `check_same_thread=False` 是必需的：`/chat` 跑在 `asyncio.to_thread` 的线程池里，
+    连接会跨线程使用。
+    """
+    path = str(getattr(settings, "clinic_state_db", "") or "").strip()
+    if not path:
+        return None
+    import sqlite3
+
+    from langgraph.checkpoint.sqlite import SqliteSaver
+
+    target = Path(path)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    conn = sqlite3.connect(str(target), check_same_thread=False)
+    logger.info("clinic 图状态落盘：%s", target)
+    return SqliteSaver(conn)
+
+
 def _get_clinic_agent(app: FastAPI) -> ClinicAgent:
     """惰性构造 clinic agent 并缓存到 `app.state`。
 
@@ -379,7 +410,11 @@ def _get_clinic_agent(app: FastAPI) -> ClinicAgent:
             from kubedocs.domains.clinic.pack import build_clinic_deps
 
             wiring = build_clinic_deps(MockAppointmentProvider(), links=_clinic_links())
-            agent = _ClinicAgent(wiring.deps)
+            checkpointer = _make_checkpointer(app.state.settings)
+            if checkpointer is not None:
+                # 记下来给 lifespan 关连接用（SQLite 连接不关会在 Windows 上锁住文件）
+                app.state.clinic_checkpointer = checkpointer
+            agent = _ClinicAgent(wiring.deps, checkpointer=checkpointer)  # type: ignore[arg-type]
             app.state.clinic_agent = agent
         return agent
 
@@ -647,6 +682,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         finally:
             for runtime in app.state.runtimes.values():
                 runtime.close()
+            # 图状态的 SQLite 连接同样要关：不关会在 Windows 上锁住那个文件
+            # （删不掉、换不了），与上面 runtime 的理由完全一样。
+            checkpointer = getattr(app.state, "clinic_checkpointer", None)
+            if checkpointer is not None:
+                conn = getattr(checkpointer, "conn", None)
+                if conn is not None:
+                    conn.close()
 
     app = FastAPI(title="kubedocs", version="0.1.0", lifespan=lifespan)
     app.state.settings = cfg
@@ -663,6 +705,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.state.runtimes_lock = threading.Lock()
     app.state.agent_lock = threading.Lock()
     app.state.clinic_agent = None
+    app.state.clinic_checkpointer = None
+    """图状态的持久化 checkpointer（仅当 `KUBEDOCS_CLINIC_STATE_DB` 配了路径时才非 None）。"""
     # /chat 的会话表：属主绑定 + LRU 上界。**不放在 `_get_clinic_react` 里**——
     # 那个函数只在有 LLM 密钥、且真的走到工具循环时才被调用，而属主校验必须在
     # 端点里、对两条路径都生效，所以它必须是 create_app 的常驻状态。

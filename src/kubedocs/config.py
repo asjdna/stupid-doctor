@@ -191,6 +191,17 @@ class Settings(BaseSettings):
     # **挂死到超时**（实测载入一个已缓存模型 >10 分钟无返回）。
     hf_offline: bool = False
 
+    # ---------- 会话状态 ----------
+    # clinic 图的 checkpoint 落盘路径。**留空 = 内存态**（与以前逐字相同的行为）。
+    #
+    # 为什么要有它：图状态原先只在 `InMemorySaver` 里，**进程重启就把问到一半的会话丢了**。
+    # 参考项目（`Agent_In_Action` 的 LangGraph 章节）演示的"外部记忆"正是这个。
+    # 我们的 `build_clinic_graph` 早就留了 `checkpointer` 参数，只是没人传。
+    #
+    # 为什么不是布尔开关：路径本身就是它需要的信息，"开关 + 另一处写路径"会让
+    # 两处状态可能不一致。留空即关闭，配了就用——一个字段表达一件事。
+    clinic_state_db: str = ""
+
     # ---------- 检索 ----------
     top_k: int = Field(default=8, ge=1, le=100)
     rrf_k: int = Field(default=60, ge=1)

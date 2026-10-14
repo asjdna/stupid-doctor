@@ -18,7 +18,7 @@ import time
 from collections.abc import Iterator
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, TypedDict
 
 import pytest
 from fastapi.testclient import TestClient
@@ -563,6 +563,70 @@ class TestStatsCache:
                 assert client.get("/healthz").json()["n_chunks"] == 18822
 
         assert len(calls) == 1, f"三次 /healthz 查了 {len(calls)} 次库（缓存没生效）"
+
+
+class TestClinicStatePersistence:
+    """图状态的持久化 checkpointer（借用参考项目的"外部记忆"做法）。
+
+    原先图状态只在 `InMemorySaver` 里：**进程一重启，问到一半的会话就没了**。
+    `build_clinic_graph` 早就留了 `checkpointer` 参数，只是没有任何调用点传它。
+    下面三条把"接上之后"的行为锁住。
+    """
+
+    def test_unset_means_in_memory(self, api_settings: Settings) -> None:
+        """留空 = 与以前逐字相同的行为（不落盘、不建文件）。"""
+        from kubedocs.api.app import _make_checkpointer
+
+        assert _make_checkpointer(api_settings) is None
+
+    def test_configured_persists_and_survives_a_new_saver(self, tmp_path: Path) -> None:
+        """配了路径就落盘，且**新实例能读到同一个 thread**——这才是续跑的关键。"""
+        from langgraph.graph import END, START, StateGraph
+
+        from kubedocs.api.app import _make_checkpointer
+
+        db = tmp_path / "state" / "clinic.db"
+        settings = Settings(
+            index_dir=str(tmp_path / "index"),
+            domain="k8s_docs",
+            embedding_provider="hashing",
+            embedding_dim=DIM,
+            embedding_model="hashing-test",
+            rerank_enable=False,
+            clinic_state_db=str(db),
+        )
+
+        class _S(TypedDict):
+            n: int
+
+        def bump(state: _S) -> _S:
+            return {"n": state.get("n", 0) + 1}
+
+        g = StateGraph(_S)
+        g.add_node("a", bump)
+        g.add_edge(START, "a")
+        g.add_edge("a", END)
+        cfg = {"configurable": {"thread_id": "t1"}}
+
+        first = _make_checkpointer(settings)
+        assert first is not None
+        assert g.compile(checkpointer=first).invoke({"n": 0}, cfg) == {"n": 1}  # type: ignore[arg-type]
+        first.conn.close()  # type: ignore[attr-defined]
+        assert db.is_file(), "配了路径却没有落盘文件"
+
+        second = _make_checkpointer(settings)
+        assert second is not None
+        assert g.compile(checkpointer=second).get_state(cfg).values == {"n": 1}  # type: ignore[arg-type]
+        second.conn.close()  # type: ignore[attr-defined]
+
+    def test_app_does_not_build_one_by_default(self, api_settings: Settings) -> None:
+        """装配层默认不建：不配就不该多出一个文件、多一条连接。"""
+        from kubedocs.api.app import _get_clinic_agent
+
+        app = create_app(api_settings)
+        with TestClient(app):
+            _get_clinic_agent(app)
+        assert app.state.clinic_checkpointer is None, "没配路径却建了 checkpointer"
 
 
 class TestConsolePage:
