@@ -118,6 +118,17 @@ def main(argv: list[str] | None = None) -> int:
             f"{len(r.text)} 字节",
         )
 
+        # `/console` 控制台页：与 `/` 同一套送达逻辑，但它**直接对同源发请求**
+        # （API 没开 CORS），所以"能不能 200"之外还要检查它没有外链依赖 ——
+        # 容器里没有外网，挂一个 CDN 就是白板。
+        r = client.get("/console")
+        check("GET /console 200", r.status_code == 200, f"{r.status_code}")
+        check(
+            "GET /console 自带样式与脚本且无外链",
+            "<style" in r.text and "<script" in r.text and "//cdn" not in r.text,
+            f"{len(r.text)} 字节",
+        )
+
     width = max(len(n) for n, _, _ in checks)
     failed = 0
     for name, ok, detail in checks:
