@@ -21,7 +21,7 @@ from __future__ import annotations
 import json
 import logging
 from dataclasses import dataclass, field
-from typing import Protocol
+from typing import Any, Protocol
 
 from kubedocs.clinical.contracts import (
     ClinicalAssessment,
@@ -51,6 +51,36 @@ class LLMClient(Protocol):
     def complete(self, system: str, user: str) -> str: ...
 
 
+class BudgetedClient:
+    """给 LLM 客户端套上**同一本日预算账**（与 CLI `ask` / `/ask` / `/chat` 共用）。
+
+    ## 为什么这一层是必需的，而不是"锦上添花"
+
+    `ClinicalReasoner` 直接调模型。少了这一层，它就是一条**能无限花钱的产品路径**——
+    而 S-2 那一整轮工作（预留、原子账本、算不出价按保守上限计）就是为了让花费有上限。
+    新增一条产品路径却绕过那个闸，等于把之前的活儿作废。
+
+    用 `reserve()` 而不是 `check()`：预留把"这次在途调用"按保守金额算进本次判断，
+    否则 N 个并发会各自通过 `check()` 然后各自 `record()`，上限被冲过 N 倍。
+
+    计费口径与 `Answerer` 完全一致：`recorder` 拿到的是 `LLMResult`，
+    所以能用它的 `cost_priced` 区分"真免费"与"算不出价"。
+    """
+
+    def __init__(self, client: object, budget: Any) -> None:
+        self._client = client
+        self._budget = budget
+
+    def complete(self, system: str, user: str) -> object:
+        with self._budget.reserve():
+            result = self._client.complete(system, user)  # type: ignore[attr-defined]
+        self._budget.record(
+            float(getattr(result, "cost_usd", 0.0) or 0.0),
+            priced=bool(getattr(result, "cost_priced", False)),
+        )
+        return result
+
+
 class LiteLLMAdapter:
     """把仓库既有的 LLM 客户端适配成本层要求的 `complete(...) -> str`。
 
@@ -63,6 +93,9 @@ class LiteLLMAdapter:
     若在 reasoner 里写 `getattr(result, "text", ...)` 兜底，这个差异就会继续藏在业务
     代码里，而"接错了客户端"永远表现为"模型输出不合契约"。所以差异收在这个
     **能被单测钉住**的适配器里，且类型不对时**大声抛**。
+
+    预算闸不在这里做：它需要 `LLMResult` 的成本字段，属于"客户端包装"的职责，
+    见 `BudgetedClient`。两个适配器各管一件事，可以单独替换。
     """
 
     def __init__(self, client: object) -> None:

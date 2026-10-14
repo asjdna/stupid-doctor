@@ -33,6 +33,10 @@ dependencies = [
     "litellm>=1.50",               # 多供应商路由/重试/回退/成本统计
     "sentence-transformers>=3.0",  # 本地嵌入（可换成 API，见 embedder 抽象）
     "langgraph>=0.2",              # Agent 编排（耐久状态 + 中断）
+    # 工具对外暴露（MCP = Model Context Protocol）。**显式声明**：
+    # 它此前作为传递依赖存在（`import mcp` 能成功），而"能用但没声明"是脆的——
+    # 上游哪天不带了，功能会静默消失。参考项目 Agent_In_Action 演示的就是这条路径。
+    "mcp>=1.27",
     # 可观测
     # 这三个现在都有真实分支（见 observability.py）：/metrics 用 prometheus_client，
     # OTel 用 sdk + http exporter。此前它们是"声明了但没人 import"的依赖。

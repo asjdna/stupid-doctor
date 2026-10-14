@@ -94,4 +94,7 @@
 - `exams` / `medications` 的 `evidence_ids` **不能为空**（见 R3）；没有依据就不给这一项。
 - `medications` **没有剂量字段**——不要试图加，加了会被拒绝。
 - `citations` 只列你真正用到的依据，`chunk_id` 用 `[K#]` 里的编号。
+- **长度上限（重要）**：`patient_summary` 不超过 4 句；`followup_questions` 最多 3 条；
+  `differentials` 最多 5 条；`departments` 最多 3 条；`exams` 最多 5 条；`medications` 最多 3 条。
+  超长输出会被截断，截断后整段 JSON 都作废——**宁可少写，也不要写不完**。
 - 所有字段都要出现；没有内容的用空数组 `[]`。

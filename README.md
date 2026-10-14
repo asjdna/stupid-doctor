@@ -281,6 +281,30 @@ start.cmd
 |---|---|
 | `/console` | 控制台：索引体检、`/metrics` 摘要（含非 2xx 单独计数）、每路检索名次、`/ask` 的降级原因、问诊 SSE 轨迹 |
 | `/` | 演示页：检索 / 工具清单 / 问诊的最小示例 |
+| `/patient` | 患者端：**只**保留问诊 agent（无域选择、无 API 地址、无 top_k、无指标），面向真实使用者 |
+
+### 把工具暴露给外部客户端（MCP）
+
+工具定义来自 `ToolRegistry` 这一份真相源，MCP 只是把它翻译出去——
+**不另写第二份定义**（两份定义早晚不一致，那正是本项目一直在删的东西）。
+
+```bash
+python -m kubedocs.mcp.server                          # clinic 域，只暴露只读工具
+python -m kubedocs.mcp.server --allow-side-effects     # 同时暴露挂号（调用时仍须 confirm=true）
+```
+
+**副作用默认不外露**：挂号会真的占号，而 `BookParams` 没有确认字段；原样暴露等于让任何
+MCP 客户端跳过我们那条"未确认绝不取号"的性质。开启后服务端会给这类工具的入参 schema
+**注入必填的 `confirm: boolean`**，调用时必须为 `true`——确认这道关在 MCP 边界上仍然存在，
+而不是写进一句说明里靠调用方自觉（详见 `src/kubedocs/mcp/__init__.py`）。
+
+### 两个评测脚本（离线/免费 与 需要模型）
+
+```bash
+python scripts/eval_prototype_cases.py        # 离线免费：症状三维判定 + 急诊假阳性 + 医疗/非医疗区分
+python scripts/eval_medical_cot.py --dry-run  # 只加载数据与后端，不调模型
+python scripts/eval_medical_cot.py --limit 20 # 真跑（每条一次模型调用，走同一本日预算账）
+```
 
 不想下载模型（离线/受限网络）时，用确定性哈希向量跑通管道：
 

@@ -224,7 +224,15 @@ class Settings(BaseSettings):
     llm_model: str = "deepseek/deepseek-chat"
     llm_fallbacks: str = ""
     llm_temperature: float = Field(default=0.1, ge=0.0, le=2.0)
-    llm_max_tokens: int = Field(default=800, ge=1)
+    llm_max_tokens: int = Field(default=2000, ge=1)
+    # 从 800 提到 2000 是**实测评测逼出来的**（2026-10-15，见
+    # `scripts/eval_medical_cot.py`）：临床主判要求模型回一个结构化契约 JSON
+    # （科室 + 病症排序 + 检查 + 用药 + 引用 + 白话总结），中文很吃 token。
+    # 800 时 20 条里有 **7 条被截断**（raw 长度恰好卡在 1573~1718），
+    # 而截断的表现是"模型输出不符合契约"——**一个会把人引向错误方向的报错**：
+    # 看起来像模型不听话，实际是我方给的额度不够。
+    # `max_tokens` 是上限而非目标，正常回答写不到就按实际计费，所以调高它
+    # 只增加"最坏情况的上界"，不增加日常成本。
     llm_timeout: float = Field(default=30.0, gt=0)
     llm_max_retries: int = Field(default=2, ge=0)
     llm_daily_budget_usd: float = Field(default=5.0, ge=0.0)

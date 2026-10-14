@@ -86,7 +86,7 @@
   也不变成一条 note——`/chat` 的响应里看不到 notes）。
   预算对象由 `ClinicReactRuntime` 持有（长寿命）；构造点在 `clinic_react.py:136`，
   用的是 `DailyBudget`，与 CLI `ask` / `POST /ask` 同一本账。
-- **一本账**：账本路径是 `config.py:297` 的 `llm_spend_path`——**全局一份**，
+- **一本账**：账本路径是 `config.py:306` 的 `llm_spend_path`——**全局一份**，
   不在域目录下。此前写成 `<index_dir>/<domain>/llm_spend.json`，后果是
   "切换 domain 就能把上限翻成 N 份"，而且 clinic 会话的花费被记进 **k8s_docs** 目录
   （审计 `data/index/clinic/` 的人看不到）。磁盘上曾同时存在
@@ -310,7 +310,7 @@
    `env_file: .env` 把密钥注入 api 容器——它不会被打印，
    但会出现在 `docker inspect` 的输出里，共享宿主机的场合要注意。
 4. **钱包护栏**：`KUBEDOCS_LLM_DAILY_BUDGET_USD` 覆盖 `/ask`、CLI `ask` **和
-   `/chat` 的工具循环**，且是**一本全局账**（`config.py:297` 的 `llm_spend_path`）。
+   `/chat` 的工具循环**，且是**一本全局账**（`config.py:306` 的 `llm_spend_path`）。
    但仍有两条要你自己加：
    - **速率限制不在本项目里**（S-3），日上限只限制总额、不限制烧得多快；
    - **多副本下上限会变成 `副本数 × 预算`**（S-2 的残留限制）。
