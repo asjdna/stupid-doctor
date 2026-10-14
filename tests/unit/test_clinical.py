@@ -252,6 +252,58 @@ class TestTriage:
         assert triage_mod.RetrievalTriage(_FakeBooking(departments=[])).rank("胸痛", []) == []
 
 
+class TestTriageFromCardLabels:
+    """分诊 v1：按召回卡片的**科室标签**投票（v0 只看"科室名有没有出现在文本里"）。
+
+    这里钉住三件在真实数据上踩过的事：
+
+    1. 卡片正文里那句「建议就诊科室：X、Y。」要能解析出来；
+    2. **占位符「未标注」必须被滤掉**——实测 `data/clinic/cards.json` 里正文含该子句的
+       27,303 张卡中有 **12,863 张（47.1%）只写着「未标注」**，不滤掉它会把
+       「未标注」投成一个"科室"，而实测它真的出现在了人工金标的 top-3 里
+       （看起来像答案、实际什么都没有）；
+    3. 多科室卡片按科室数**均分**票权，否则列了 3 个科室的卡片等于 3 票。
+    """
+
+    def test_clause_is_parsed(self) -> None:
+        assert triage_mod.departments_in_card("咳嗽。建议就诊科室：呼吸内科、儿科。") == ["呼吸内科", "儿科"]
+
+    def test_missing_clause_is_not_an_error(self) -> None:
+        """没有科室的卡片是正常的，不该抛异常。"""
+        assert triage_mod.departments_in_card("只是一句普通正文") == []
+
+    def test_placeholder_is_filtered(self) -> None:
+        """**核心回归**：占位符不是科室。"""
+        assert triage_mod.departments_in_card("某病。建议就诊科室：未标注。") == []
+        assert triage_mod.departments_in_card("某病。建议就诊科室：其他科室。") == []
+
+    def test_vote_comes_from_card_labels(self) -> None:
+        engine = triage_mod.RetrievalTriage(known_departments=None)
+        chunks = [
+            _Chunk("咳嗽", "咳嗽。建议就诊科室：呼吸内科。", 1.0),
+            _Chunk("发热", "发热。建议就诊科室：呼吸内科、感染科。", 1.0),
+        ]
+        ranked = [d.name for d in engine.rank("咳嗽发烧", chunks)]
+        assert ranked and ranked[0] == "呼吸内科"
+
+    def test_placeholder_only_pool_yields_nothing(self) -> None:
+        """整池都是「未标注」⇒ 返回空，而不是返回一个假的科室名。"""
+        engine = triage_mod.RetrievalTriage(known_departments=None)
+        chunks = [_Chunk("某病", "某病。建议就诊科室：未标注。", 1.0)]
+        assert engine.rank("某病", chunks) == []
+
+    def test_multi_department_card_splits_its_vote(self) -> None:
+        """一张列 3 个科室的卡不该等于 3 票：单科室的两张卡应当胜过它。"""
+        engine = triage_mod.RetrievalTriage(known_departments=None)
+        chunks = [
+            _Chunk("甲", "甲。建议就诊科室：皮肤科。", 1.0),
+            _Chunk("乙", "乙。建议就诊科室：皮肤科。", 1.0),
+            _Chunk("丙", "丙。建议就诊科室：皮肤科、骨外科、妇科。", 1.0),
+        ]
+        ranked = engine.rank("甲 乙 丙", chunks)
+        assert ranked[0].name == "皮肤科"
+
+
 # --------------------------------------------------------------------- 证据装配
 class TestEvidence:
     def test_red_line_is_rendered_first_and_marked_must(self) -> None:
