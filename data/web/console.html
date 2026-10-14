@@ -1,0 +1,536 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>kubedocs 控制台 · 索引体检 / 检索诊断 / 指标 / 问诊</title>
+<!-- 内联 favicon：不引外部文件，也免得浏览器每次来要 /favicon.ico 而留下一条 404 记录 -->
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Ccircle cx='8' cy='8' r='7' fill='%234c9aff'/%3E%3C/svg%3E">
+<style>
+  /* 与 data/web/index.html 共用同一套设计令牌，两个页面看起来是一家的。 */
+  :root {
+    --bg: #0f1419;
+    --panel: #171d24;
+    --panel-2: #1e262f;
+    --line: #2b3542;
+    --fg: #e6edf3;
+    --fg-dim: #9aa7b4;
+    --fg-mute: #6e7b8a;
+    --accent: #4c9aff;
+    --accent-soft: #1d3a5c;
+    --ok: #3fb950;
+    --warn: #d29922;
+    --err: #f85149;
+    --mono: ui-monospace, SFMono-Regular, Consolas, "Cascadia Mono", Menlo, monospace;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; }
+  body {
+    background: var(--bg); color: var(--fg);
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "Microsoft YaHei", "PingFang SC", Roboto, sans-serif;
+    font-size: 14px; line-height: 1.6;
+  }
+  a { color: var(--accent); text-decoration: none; }
+  a:hover { text-decoration: underline; }
+  code, pre { font-family: var(--mono); font-size: 12px; }
+
+  .topbar {
+    position: sticky; top: 0; z-index: 20;
+    display: flex; flex-wrap: wrap; align-items: center; gap: 10px 18px;
+    padding: 10px 16px; background: #12181f; border-bottom: 1px solid var(--line);
+  }
+  .brand { font-weight: 600; letter-spacing: .3px; }
+  .brand span { color: var(--fg-mute); font-weight: 400; margin-left: 6px; font-size: 12px; }
+  .status { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+  .dot { width: 9px; height: 9px; border-radius: 50%; background: var(--fg-mute); flex: none; }
+  .dot.ok { background: var(--ok); }
+  .dot.err { background: var(--err); }
+  .kv { color: var(--fg-dim); font-size: 13px; }
+  .kv b { color: var(--fg); font-weight: 600; }
+  .spacer { flex: 1 1 auto; }
+  .field { display: flex; align-items: center; gap: 6px; font-size: 13px; color: var(--fg-dim); }
+
+  select, input[type=text], textarea {
+    background: var(--panel-2); color: var(--fg); border: 1px solid var(--line);
+    border-radius: 6px; padding: 6px 8px; font-size: 13px; font-family: inherit; outline: none; min-width: 0;
+  }
+  select:focus, input[type=text]:focus, textarea:focus { border-color: var(--accent); }
+  textarea { resize: vertical; line-height: 1.5; }
+  button {
+    background: var(--accent-soft); color: #cfe4ff; border: 1px solid #2f5c92; border-radius: 6px;
+    padding: 6px 14px; font-size: 13px; font-family: inherit; cursor: pointer;
+  }
+  button:hover { background: #24486f; }
+  button:disabled { opacity: .5; cursor: not-allowed; }
+  button.ghost { background: transparent; color: var(--fg-dim); border-color: var(--line); }
+  button.ghost:hover { color: var(--fg); background: var(--panel-2); }
+
+  main { padding: 16px; display: grid; gap: 16px; grid-template-columns: repeat(auto-fit, minmax(430px, 1fr)); }
+  .panel { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; overflow: hidden; }
+  .panel > h2 {
+    margin: 0; padding: 10px 14px; font-size: 14px; font-weight: 600;
+    background: var(--panel-2); border-bottom: 1px solid var(--line);
+    display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+  }
+  .panel > h2 .hint { color: var(--fg-mute); font-weight: 400; font-size: 12px; }
+  .panel .body { padding: 12px 14px; }
+  .row { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+  .grow { flex: 1 1 220px; }
+  .empty { color: var(--fg-mute); }
+  .hint { color: var(--fg-mute); font-size: 12px; }
+
+  table.kv-table { width: 100%; border-collapse: collapse; }
+  table.kv-table td { padding: 4px 0; vertical-align: top; border-bottom: 1px dashed rgba(43,53,66,.6); }
+  table.kv-table td:first-child { color: var(--fg-dim); width: 42%; }
+  table.kv-table tr:last-child td { border-bottom: none; }
+
+  .chip {
+    display: inline-block; padding: 1px 7px; border-radius: 999px; font-size: 12px;
+    border: 1px solid var(--line); color: var(--fg-dim); background: var(--panel-2); margin-right: 4px;
+  }
+  .chip.ok { color: #b7f0c0; border-color: #2b6b39; background: #16301d; }
+  .chip.warn { color: #f3d99a; border-color: #6b5420; background: #302714; }
+  .chip.err { color: #ffc9c5; border-color: #7a2b26; background: #331a18; }
+
+  .hit { border: 1px solid var(--line); border-radius: 8px; padding: 10px 12px; margin-bottom: 10px; background: var(--panel-2); }
+  .hit .t { font-weight: 600; }
+  .hit .meta { color: var(--fg-mute); font-size: 12px; margin: 2px 0 6px; }
+  .hit .body { color: var(--fg-dim); font-size: 13px; white-space: pre-wrap; }
+  .ranks { margin-top: 6px; }
+
+  .banner { border-radius: 8px; padding: 8px 12px; margin-bottom: 8px; font-size: 13px; border: 1px solid var(--line); }
+  .banner.warn { background: #302714; border-color: #6b5420; color: #f3d99a; }
+  .banner.err { background: #331a18; border-color: #7a2b26; color: #ffc9c5; }
+  .banner.ok { background: #16301d; border-color: #2b6b39; color: #b7f0c0; }
+
+  #messages { display: grid; gap: 8px; max-height: 320px; overflow: auto; padding-right: 4px; }
+  .msg { border-radius: 8px; padding: 8px 10px; border: 1px solid var(--line); font-size: 13px; white-space: pre-wrap; }
+  .msg.user { background: var(--accent-soft); border-color: #2f5c92; }
+  .msg.bot { background: var(--panel-2); }
+  .msg.emergency { background: #331a18; border-color: #7a2b26; color: #ffd9d6; font-weight: 600; }
+  .trace { font-family: var(--mono); font-size: 12px; color: var(--fg-dim); }
+  .trace div { padding: 2px 0; border-bottom: 1px dashed rgba(43,53,66,.5); }
+</style>
+</head>
+<body>
+
+<div class="topbar">
+  <div class="brand">kubedocs<span>控制台</span></div>
+  <div class="status">
+    <span class="dot" id="dot"></span>
+    <span class="kv" id="statusText">正在检测…</span>
+  </div>
+  <div class="spacer"></div>
+  <label class="field">域
+    <select id="domain"></select>
+  </label>
+  <label class="field">API
+    <input type="text" id="apiBase" size="18" placeholder="留空=同源">
+  </label>
+  <button class="ghost" id="btnRefresh">刷新</button>
+  <a href="./" title="原始的演示页（检索/工具/问诊）">演示页 →</a>
+</div>
+
+<main>
+  <!-- 索引体检 -->
+  <section class="panel">
+    <h2>索引体检 <span class="hint">/healthz + /domains（域自报的语料/归一化/嵌入）</span></h2>
+    <div class="body">
+      <div id="indexBanner"></div>
+      <table class="kv-table" id="indexTable"><tr><td class="empty">加载中…</td><td></td></tr></table>
+    </div>
+  </section>
+
+  <!-- 指标 -->
+  <section class="panel">
+    <h2>指标 <span class="hint">/metrics（Prometheus 文本，前端解析）</span></h2>
+    <div class="body">
+      <table class="kv-table" id="metricsTable"><tr><td class="empty">加载中…</td><td></td></tr></table>
+      <p class="hint">检索耗时是按直方图的 sum/count 算的平均值；想看分布请用 Prometheus/Grafana 抓 <code>/metrics</code>。</p>
+    </div>
+  </section>
+
+  <!-- 检索 -->
+  <section class="panel">
+    <h2>检索诊断 <span class="hint">/search（每条的 RRF 分与**各路名次**）</span></h2>
+    <div class="body">
+      <div class="row">
+        <input type="text" id="q" class="grow" placeholder="例如：how do I stop a container using too much memory" autocomplete="off">
+        <label class="field">top_k <input type="text" id="topK" value="5" size="3"></label>
+        <button id="btnSearch">检索</button>
+      </div>
+      <div id="searchDiag" class="hint" style="margin-top:8px"></div>
+      <div id="searchOut" style="margin-top:10px"></div>
+    </div>
+  </section>
+
+  <!-- 问答 -->
+  <section class="panel">
+    <h2>带引用问答 <span class="hint">/ask（没有密钥时应该**降级**而不是崩）</span></h2>
+    <div class="body">
+      <div class="row">
+        <input type="text" id="askQ" class="grow" placeholder="例如：怎么限制一个 Pod 的 CPU？" autocomplete="off">
+        <button id="btnAsk">提问</button>
+      </div>
+      <div id="askOut" style="margin-top:10px"></div>
+    </div>
+  </section>
+
+  <!-- 问诊 -->
+  <section class="panel" style="grid-column: 1 / -1;">
+    <h2>问诊 Agent <span class="hint">/chat（SSE 流：工具轨迹 + 急诊红线会确定性触发）</span>
+      <span class="spacer"></span>
+      <label class="field">患者 <input type="text" id="patientId" value="anon" size="8"></label>
+      <button class="ghost" id="btnNewChat">新会话</button>
+    </h2>
+    <div class="body">
+      <div id="messages"></div>
+      <div class="row" style="margin-top:10px">
+        <textarea id="chatInput" rows="2" class="grow" placeholder="描述症状，例如：我现在胸痛，喘不上气（Enter 发送，Shift+Enter 换行）"></textarea>
+        <button id="btnSend">发送</button>
+        <button class="ghost" id="btnStop" disabled>停止</button>
+      </div>
+      <details style="margin-top:10px" open>
+        <summary class="hint">工具调用轨迹 <span id="traceCount"></span></summary>
+        <div class="trace" id="trace"></div>
+      </details>
+    </div>
+  </section>
+</main>
+
+<script>
+(function () {
+  'use strict';
+  var $ = function (id) { return document.getElementById(id); };
+  var threadId = null, ctrl = null;
+
+  function base() {
+    var v = ($('apiBase').value || '').trim().replace(/\/+$/, '');
+    return v;
+  }
+  function url(p) { return base() + p; }
+  function esc(s) {
+    return String(s == null ? '' : s).replace(/[&<>"']/g, function (c) {
+      return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c];
+    });
+  }
+  function setBanner(el, kind, text) {
+    el.innerHTML = text ? '<div class="banner ' + kind + '">' + esc(text) + '</div>' : '';
+  }
+
+  async function getJSON(p) {
+    var r = await fetch(url(p), { headers: { 'Accept': 'application/json' } });
+    if (!r.ok) throw new Error('HTTP ' + r.status + ' ' + r.statusText);
+    return r.json();
+  }
+  async function postJSON(p, body) {
+    var r = await fetch(url(p), {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
+    });
+    var text = await r.text();
+    if (!r.ok) throw new Error('HTTP ' + r.status + ' ' + (text || r.statusText));
+    return JSON.parse(text);
+  }
+
+  // ---------------------------------------------------------------- 状态 + 索引体检
+  async function refresh() {
+    var dot = $('dot'), st = $('statusText'), tbl = $('indexTable'), banner = $('indexBanner');
+    try {
+      var h = await getJSON('/healthz');
+      var domains = await getJSON('/domains');
+      dot.className = 'dot ok';
+      st.innerHTML = '服务正常 · 域 <b>' + esc(h.domain) + '</b> · 块数 <b>' + h.n_chunks + '</b>';
+
+      var sel = $('domain');
+      var keep = sel.value;
+      sel.innerHTML = '';
+      domains.forEach(function (d) {
+        var o = document.createElement('option');
+        o.value = d.name; o.textContent = d.name;
+        sel.appendChild(o);
+      });
+      if (keep) sel.value = keep;
+      if (!sel.value && domains.length) sel.value = domains[0].name;
+
+      var me = domains.filter(function (d) { return d.name === h.domain; })[0] || {};
+      var rows = [
+        ['当前域', esc(h.domain)],
+        ['块数', h.n_chunks ? '<b>' + h.n_chunks + '</b>' : '<span class="chip err">0（索引为空）</span>'],
+        ['归一化器', '<code>' + esc(me.normalizer || '?') + '</code>'],
+        ['嵌入模型', '<code>' + esc(me.embedding_model || '?') + '</code>（' + esc(me.embedding_dim || '?') + ' 维）'],
+        ['可用域', domains.map(function (d) { return '<span class="chip">' + esc(d.name) + '</span>'; }).join('')],
+      ];
+      tbl.innerHTML = rows.map(function (r) {
+        return '<tr><td>' + r[0] + '</td><td>' + r[1] + '</td></tr>';
+      }).join('');
+
+      if (!h.n_chunks) {
+        setBanner(banner, 'err', '索引为空：先跑 `python -m kubedocs.cli ingest`（或 `--domain clinic ingest`）。服务本身是活的（/healthz 按设计不会因为索引空而失败）。');
+      } else {
+        setBanner(banner, 'ok', '索引可用。');
+      }
+    } catch (e) {
+      dot.className = 'dot err';
+      st.textContent = '连不上后端：' + e.message;
+      setBanner(banner, 'err', '连不上后端：' + e.message + '（服务没起来？或 API 地址填错了？）');
+      tbl.innerHTML = '<tr><td class="empty">—</td><td></td></tr>';
+    }
+    loadMetrics();
+    loadTools();
+  }
+
+  // ---------------------------------------------------------------- 指标
+  function parseProm(text) {
+    var out = { counters: {}, hist: {}, gauges: {} };
+    text.split('\n').forEach(function (line) {
+      if (!line || line[0] === '#') return;
+      var m = line.match(/^([a-zA-Z_:][\w:]*)(\{[^}]*\})?\s+([\d.eE+-]+|NaN|\+Inf|-Inf)\s*$/);
+      if (!m) return;
+      var name = m[1], labels = m[2] || '', val = parseFloat(m[3]);
+      if (isNaN(val)) return;
+      var key = name + labels;
+      if (/_sum$|_count$/.test(name)) { out.hist[key] = val; return; }
+      if (/_total$/.test(name)) { out.counters[key] = val; return; }
+      out.gauges[key] = val;
+    });
+    return out;
+  }
+  function labelOf(labels, want) {
+    var m = labels.match(new RegExp(want + '="([^"]*)"'));
+    return m ? m[1] : '';
+  }
+  async function loadMetrics() {
+    var tbl = $('metricsTable');
+    try {
+      var r = await fetch(url('/metrics'));
+      if (!r.ok) throw new Error('HTTP ' + r.status);
+      var prom = parseProm(await r.text());
+
+      // 请求数：按端点汇总
+      var byEndpoint = {};
+      var reqTotal = 0;
+      Object.keys(prom.counters).forEach(function (k) {
+        if (k.indexOf('kubedocs_http_requests_total') !== 0) return;
+        var ep = labelOf(k, 'endpoint') || '?', v = prom.counters[k];
+        byEndpoint[ep] = (byEndpoint[ep] || 0) + v; reqTotal += v;
+      });
+      var epRows = Object.keys(byEndpoint).sort(function (a, b) { return byEndpoint[b] - byEndpoint[a]; })
+        .slice(0, 6).map(function (ep) { return '<code>' + esc(ep) + '</code> ' + byEndpoint[ep]; });
+
+      // 只看端点会把 404 混进正常流量里，看上去一切正常——所以状态码必须单独拎出来。
+      var notOk = 0, badRows = [];
+      Object.keys(prom.counters).forEach(function (k) {
+        if (k.indexOf('kubedocs_http_requests_total') !== 0) return;
+        var st = labelOf(k, 'status');
+        if (st && st.charAt(0) !== '2') {
+          notOk += prom.counters[k];
+          badRows.push('<code>' + esc(labelOf(k, 'endpoint') || '?') + '</code> → ' + esc(st) + ' × ' + prom.counters[k]);
+        }
+      });
+
+      // 检索平均耗时 = sum / count
+      var lat = [];
+      ['bm25', 'dense'].forEach(function (ch) {
+        var s = 0, c = 0;
+        Object.keys(prom.hist).forEach(function (k) {
+          if (k.indexOf('kubedocs_retrieve_seconds') !== 0 || labelOf(k, 'channel') !== ch) return;
+          if (/_sum/.test(k)) s = prom.hist[k];
+          if (/_count/.test(k)) c = prom.hist[k];
+        });
+        if (c > 0) lat.push('<code>' + ch + '</code> 平均 ' + (s / c * 1000).toFixed(1) + ' ms（' + c + ' 次）');
+        else lat.push('<code>' + ch + '</code> 还没有记录');
+      });
+
+      var llmYes = 0, llmNo = 0, cost = 0, budget = 0;
+      Object.keys(prom.counters).forEach(function (k) {
+        if (k.indexOf('kubedocs_llm_calls_total') !== 0) return;
+        if (labelOf(k, 'priced') === 'no') llmNo += prom.counters[k]; else llmYes += prom.counters[k];
+      });
+      Object.keys(prom.gauges).forEach(function (k) {
+        if (k.indexOf('kubedocs_llm_cost_usd_total') === 0) cost = prom.gauges[k];
+        if (k.indexOf('kubedocs_llm_budget_usd') === 0) budget = prom.gauges[k];
+      });
+      Object.keys(prom.counters).forEach(function (k) {
+        if (k.indexOf('kubedocs_llm_cost_usd_total') === 0) cost = prom.counters[k];
+      });
+
+      var rows = [
+        ['HTTP 请求总数', reqTotal ? '<b>' + reqTotal + '</b>' : '0'],
+        ['按端点', epRows.join('<br>') || '<span class="empty">无</span>'],
+        ['非 2xx 响应', notOk
+          ? '<span class="chip err">' + notOk + '</span><br>' + badRows.join('<br>')
+          : '<span class="chip ok">0</span>'],
+        ['检索平均耗时', lat.join('<br>')],
+        ['LLM 调用', '可定价 <b>' + llmYes + '</b> · 算不出价 <b>' + llmNo + '</b>'],
+        ['累计花费', '$' + cost.toFixed(6)],
+        ['当日预算', budget ? '$' + budget.toFixed(2) : '不限'],
+      ];
+      tbl.innerHTML = rows.map(function (r) {
+        return '<tr><td>' + r[0] + '</td><td>' + r[1] + '</td></tr>';
+      }).join('');
+    } catch (e) {
+      tbl.innerHTML = '<tr><td class="empty">读不到 /metrics：' + esc(e.message) + '</td><td></td></tr>';
+    }
+  }
+
+  // ---------------------------------------------------------------- 工具清单
+  async function loadTools() {
+    return;
+  }
+
+  // ---------------------------------------------------------------- 检索
+  function renderHits(hits) {
+    if (!hits.length) return '<span class="empty">没有命中。</span>';
+    return hits.map(function (h, i) {
+      var ranks = h.ranks && Object.keys(h.ranks).length
+        ? Object.keys(h.ranks).sort().map(function (n) {
+            return '<span class="chip">' + esc(n) + ' #' + h.ranks[n] + '</span>';
+          }).join('')
+        : '<span class="chip warn">无各路名次</span>';
+      return '<div class="hit">' +
+        '<div class="t">[' + (i + 1) + '] ' + esc(h.title) + (h.breadcrumb ? ' <span class="hint">› ' + esc(h.breadcrumb) + '</span>' : '') + '</div>' +
+        '<div class="meta"><a href="' + esc(h.source_url) + '" target="_blank" rel="noopener">' + esc(h.source_url) + '</a> · RRF ' + (h.score || 0).toFixed(4) + ' · <code>' + esc(h.chunk_id) + '</code></div>' +
+        '<div class="body">' + esc((h.body || '').slice(0, 320)) + ((h.body || '').length > 320 ? '…' : '') + '</div>' +
+        '<div class="ranks">' + ranks + '</div>' +
+        '</div>';
+    }).join('');
+  }
+  async function doSearch() {
+    var q = $('q').value.trim();
+    if (!q) return;
+    var out = $('searchOut'), diag = $('searchDiag');
+    diag.textContent = '';
+    // 冷启动要加载嵌入模型，本机实测 69 s（暖机 0.1 s）。不抖出计时的话，
+    // 页面看上去就是"点了没反应"——用户会在第 5 秒就去点第二次。
+    var t0 = Date.now();
+    var tick = setInterval(function () {
+      out.innerHTML = '<span class="empty">检索中… 已 ' + ((Date.now() - t0) / 1000).toFixed(0) +
+        ' s（首次检索要加载嵌入模型，可能要一分钟）</span>';
+    }, 500);
+    out.innerHTML = '<span class="empty">检索中…</span>';
+    try {
+      var res = await postJSON('/search', { q: q, top_k: parseInt($('topK').value, 10) || 5, domain: $('domain').value });
+      var d = res.diagnostics || {};
+      var parts = [];
+      if (d.n_fused !== undefined) parts.push('融合池 ' + d.n_fused);
+      if (d.overlap !== undefined) parts.push('两路重合 ' + d.overlap);
+      if (d.total_ms !== undefined) parts.push('耗时 ' + d.total_ms + ' ms');
+      (d.degraded || []).forEach(function (m) { parts.push('⚠ ' + m); });
+      diag.textContent = parts.join(' · ');
+      out.innerHTML = res.note ? '<div class="banner warn">' + esc(res.note) + '</div>' : '';
+      out.innerHTML += renderHits(res.hits || []);
+    } catch (e) {
+      out.innerHTML = '<div class="banner err">检索失败：' + esc(e.message) + '</div>';
+    } finally {
+      clearInterval(tick);
+    }
+  }
+
+  // ---------------------------------------------------------------- 问答
+  async function doAsk() {
+    var q = $('askQ').value.trim();
+    if (!q) return;
+    var out = $('askOut');
+    out.innerHTML = '<span class="empty">生成中…</span>';
+    try {
+      var res = await postJSON('/ask', { q: q, top_k: parseInt($('topK').value, 10) || 5, domain: $('domain').value });
+      var html = '';
+      if (res.degraded) {
+        html += '<div class="banner warn"><b>降级</b>：' + esc(res.degraded) + '</div>';
+      }
+      html += res.answer
+        ? '<div class="hit"><div class="body">' + esc(res.answer) + '</div></div>'
+        : '<div class="hit"><div class="body empty">（没有回答文本）</div></div>';
+      html += '<div class="hint">命中 ' + (res.n_hits || 0) + ' 段，引用 ' + ((res.citations || []).length) + ' 条：</div>';
+      html += (res.citations || []).map(function (c) {
+        return '<div class="meta">[' + c.index + '] <a href="' + esc(c.source_url) + '" target="_blank" rel="noopener">' + esc(c.title) + '</a></div>';
+      }).join('');
+      out.innerHTML = html;
+    } catch (e) {
+      out.innerHTML = '<div class="banner err">请求失败：' + esc(e.message) + '</div>';
+    }
+  }
+
+  // ---------------------------------------------------------------- 问诊（SSE）
+  function addMsg(kind, text) {
+    var d = document.createElement('div');
+    d.className = 'msg ' + kind;
+    d.textContent = text;
+    $('messages').appendChild(d);
+    $('messages').scrollTop = $('messages').scrollHeight;
+    return d;
+  }
+  function addTrace(line) {
+    var d = document.createElement('div');
+    d.textContent = line;
+    $('trace').appendChild(d);
+    $('traceCount').textContent = '（' + $('trace').children.length + ' 条）';
+  }
+  async function sendChat() {
+    var text = $('chatInput').value.trim();
+    if (!text) return;
+    $('chatInput').value = '';
+    addMsg('user', text);
+    var bot = addMsg('bot', '…');
+    $('btnSend').disabled = true; $('btnStop').disabled = false;
+    ctrl = new AbortController();
+    var body = { message: text, patient_id: $('patientId').value || 'anon' };
+    if (threadId) body.thread_id = threadId;
+    try {
+      var r = await fetch(url('/chat'), {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body), signal: ctrl.signal,
+      });
+      if (!r.ok) { bot.className = 'msg err'; bot.textContent = 'HTTP ' + r.status + ' ' + await r.text(); return; }
+      var reader = r.body.getReader(), dec = new TextDecoder(), buf = '';
+      for (;;) {
+        var chunk = await reader.read();
+        if (chunk.done) break;
+        buf += dec.decode(chunk.value, { stream: true });
+        var blocks = buf.split('\n\n'); buf = blocks.pop();
+        blocks.forEach(function (block) {
+          var ev = 'message', data = '';
+          block.split('\n').forEach(function (line) {
+            if (line.indexOf('event:') === 0) ev = line.slice(6).trim();
+            else if (line.indexOf('data:') === 0) data += line.slice(5).trim();
+          });
+          if (!data) return;
+          var obj = {};
+          try { obj = JSON.parse(data); } catch (e) { return; }
+          if (ev === 'thread' && obj.thread_id) { threadId = obj.thread_id; addTrace('thread ' + obj.thread_id); }
+          else if (ev === 'tool') { addTrace('tool ' + obj.tool + (obj.word ? ' word=' + obj.word : '') + (obj.arguments ? ' args=' + JSON.stringify(obj.arguments) : '')); }
+          else if (ev === 'message') {
+            bot.textContent = obj.text || '（空）';
+            if (obj.status === 'emergency') bot.className = 'msg emergency';
+            if (obj.unpriced_llm_calls) addTrace('注意：有 ' + obj.unpriced_llm_calls + ' 次调用算不出价，已按保守上限计入预算');
+            if (obj.awaiting_user) addTrace('（在等用户回答追问）');
+          } else if (ev === 'error') { bot.className = 'msg err'; bot.textContent = '错误：' + (obj.error || data); }
+          else if (ev === 'done') { addTrace('done'); }
+        });
+      }
+    } catch (e) {
+      if (e.name === 'AbortError') bot.textContent = (bot.textContent || '') + '\n（已停止）';
+      else { bot.className = 'msg err'; bot.textContent = '网络错误：' + e.message; }
+    } finally {
+      $('btnSend').disabled = false; $('btnStop').disabled = true; ctrl = null;
+    }
+  }
+
+  // ---------------------------------------------------------------- 绑定
+  $('btnRefresh').onclick = refresh;
+  $('btnSearch').onclick = doSearch;
+  $('btnAsk').onclick = doAsk;
+  $('btnSend').onclick = sendChat;
+  $('btnStop').onclick = function () { if (ctrl) ctrl.abort(); };
+  $('btnNewChat').onclick = function () { threadId = null; $('trace').innerHTML = ''; $('messages').innerHTML = ''; $('traceCount').textContent = ''; };
+  $('apiBase').onchange = refresh;
+  $('q').addEventListener('keydown', function (e) { if (e.key === 'Enter') doSearch(); });
+  $('askQ').addEventListener('keydown', function (e) { if (e.key === 'Enter') doAsk(); });
+  $('chatInput').addEventListener('keydown', function (e) {
+    if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendChat(); }
+  });
+  refresh();
+})();
+</script>
+</body>
+</html>

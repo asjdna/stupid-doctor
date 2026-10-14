@@ -99,6 +99,7 @@ from kubedocs.observability import (
     HTTP_REQUESTS,
     configure_logging,
     metrics_payload,
+    publish_config_gauges,
     setup_tracing,
     span,
 )
@@ -113,7 +114,15 @@ if TYPE_CHECKING:  # 只为标注：不 import langgraph / agent 内核的实现
 logger = logging.getLogger(__name__)
 
 INDEX_HTML = ("data", "web", "index.html")
-"""前端构建产物相对仓库根的位置。缺失是正常情况（见 `index` 端点）。"""
+"""演示前端相对仓库根的位置。缺失是正常情况（见 `index` 端点）。"""
+
+CONSOLE_HTML = ("data", "web", "console.html")
+"""控制台页相对仓库根的位置。
+
+和演示页分成两个文件、而不是把演示页改胖：演示页是"最小可用示例"，控制台是
+"把运维信号摆出来"（索引体检、/metrics 摘要、每路检索名次、降级原因）。
+两者共用同一套设计令牌，视觉上是一家的，但职责不同、可以各自演进。
+"""
 
 
 # ===========================================================================
@@ -602,7 +611,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     # 日志级别真正设到 root logger，OTel 真正建 provider。
     configure_logging(cfg)
     setup_tracing(cfg)
+    # 预算上限与"有没有调用过 LLM"无关，必须在装配点就发出去；否则控制台会把
+    # 一个真实存在的上限读成 gauge 默认值 0，而 0 的约定是"不限"（假信息）。
+    publish_config_gauges(cfg)
     app.state.index_html = repo_root().joinpath(*INDEX_HTML)
+    app.state.console_html = repo_root().joinpath(*CONSOLE_HTML)
     app.state.runtimes_lock = threading.Lock()
     app.state.agent_lock = threading.Lock()
     app.state.clinic_agent = None
@@ -724,18 +737,30 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             raise HTTPException(status_code=409, detail=str(e)) from e
         return EventSourceResponse(_chat_events(request.app, body, thread_id))
 
-    # ---------------------------------------------------------------- 首页
-    @app.get("/", response_class=HTMLResponse)
-    def index(request: Request) -> HTMLResponse:
-        """返回前端产物；没有产物就返回说明页（**200，不是 404**）。"""
-        path: Path = request.app.state.index_html
+    # ---------------------------------------------------------------- 前端页面
+    def _serve_page(path: Path) -> HTMLResponse:
+        """返回静态页；没有该文件就返回说明页（**200，不是 404**）。"""
         if path.is_file():
             try:
                 return HTMLResponse(path.read_text(encoding="utf-8"))
             except OSError as e:
-                logger.warning("读取首页 %s 失败：%s", path, e)
+                logger.warning("读取页面 %s 失败：%s", path, e)
                 return HTMLResponse(_fallback_html(f"读取 {path} 失败：{e}"))
         return HTMLResponse(_fallback_html(f"未找到 {path}"))
+
+    @app.get("/", response_class=HTMLResponse)
+    def index(request: Request) -> HTMLResponse:
+        """演示页：检索 / 工具清单 / 问诊的最小示例。"""
+        return _serve_page(request.app.state.index_html)
+
+    @app.get("/console", response_class=HTMLResponse)
+    def console(request: Request) -> HTMLResponse:
+        """控制台页：索引体检 + 指标 + 检索诊断 + 问诊。
+
+        必须由同一个 app 提供（而不是另起静态服务器）：页面直接对同源发
+        `/search`、`/chat` 等请求，而 API 没有开 CORS，换源就会全线失败。
+        """
+        return _serve_page(request.app.state.console_html)
 
     return app
 

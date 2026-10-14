@@ -168,6 +168,67 @@
 - ⚠️ 构建需要约 **15 GB 空闲磁盘**（中间层 + 9.91 GB 镜像）：本机 C 盘曾只剩 0.5 GB，
   构建直接以 `OSError: [Errno 5] Input/output error` 失败。
 
+### 一键启动 + 控制台页（2026-10-14）
+
+新增两个面向"人真的要用它"的东西，过程中又抓到 **3 个新缺陷**。
+
+**新增：**
+
+- **`start.cmd`（Windows 一键启动窗口）**：挑端口（8080 起往后找第一个空闲的）→ 起服务
+  → 轮询 `/healthz` 直到服务**真的健康且索引非空** → 打开控制台页。服务跑在**前台**，
+  所以 Ctrl+C 和关窗口都能真的停掉它，不会留下孤儿进程占着端口。
+  8080 上已有可用实例时默认**附着**过去（`--force` 强制另起）；附着判据要求
+  `n_chunks` 非零——实测遇到过"容器活着但后端是空表"的实例，附着上去比另起一个更糟。
+- **`/console` 控制台页**（`data/web/console.html`）：与演示页 `/` 并存（职责不同，
+  共用同一套设计令牌）、**零外部依赖**（离线可用，样式脚本全内联）。内容：索引体检、
+  `/metrics` 摘要（含**非 2xx 单独计数**——只看端点会把 404 混进正常流量）、
+  每条的**各路检索名次**（bm25/dense）、`/ask` 的降级原因、问诊 SSE 的工具轨迹与急诊高亮。
+  新增路由 `GET /console`，与 `/` 共用 `_serve_page`（缺文件同样返回 **200** 说明页）。
+  必须由同一个 app 提供：API 没开 CORS，页面要直接对同源发 `/search`、`/chat`。
+
+**修复：**
+
+- **`KUBEDOCS_DATABASE_URL` 是个假开关**。compose 给 api 设了它指向 `db` 服务，
+  但 `Settings.store` 默认值是 `sqlite-vec`，而它**不读** `database_url` ⇒ 容器实际去读
+  bind-mount 的 `./data/index/<domain>/kubedocs.db`，把旁边那个灌满 18811 块的 Postgres
+  **完全晾着**（`db` 服务白起）。表现同样是"服务是绿的、`n_chunks` 是 0"：SQLite 跑在
+  Windows bind-mount 上会报 `OperationalError: disk I/O error`，而 `/healthz` 照样 200。
+  修：compose 里 `KUBEDOCS_STORE: pgvector` 与 `DATABASE_URL` **成对**给出。修后容器内
+  `stats --verify` → 1720 文档 / 18811 块、FTS 与向量一致性均 `ok`，`/search`
+  `overlap=13`（关键词路与向量路都参与融合）、`degraded` 为空。
+- **`has_api_key()` 会被 `.env` 里的说明文本骗过**。它原先只判"非空"。本机 `.env`
+  里留的是一句中文说明（38 字符 / 78 字节，**20 个非 ASCII 字符**），于是判为"已配置"
+  ⇒ `/ask` 拿着它发起真实请求，LiteLLM 把它放进 HTTP 头时抛
+  `'ascii' codec can't encode characters in position 9-24`，`degraded` 里回显的就是这条。
+  **这比直接降级更坏**：用户以为模型坏了，实际是配置里写了一句中文。修：两条判据——
+  `_PLACEHOLDER_MARKERS` 词表（`your-` / `placeholder` / `changeme` / `example` /
+  `xxxx` / `<` / `>`）与**必须全是 ASCII**（密钥要进 `Authorization` 头，非 ASCII
+  在那里根本无法编码；真密钥都是可打印 ASCII，不会误伤）。修后同一条请求变成干净的
+  "未配置 LLM 密钥，仅返回检索结果"，且**不再发起网络调用**；日志明说
+  "含 20 个非 ASCII 字符，不可能是密钥"。
+- **预算 gauge 在"一次都没调用过"时谎报"不限"**。`kubedocs_llm_budget_usd` 原先只在
+  `observe_llm_call()` 里被设值，于是在"配了 $2.00 上限、但还没调用过 LLM"的进程里
+  它暴露的是 gauge 默认值 **0**，而这个 gauge 的约定恰恰是"**0 表示不限**"——
+  控制台如实读指标，就会把一个真实存在的花费上限显示成"不限"。这不是少显示一个字段，
+  是显示**错的**金额控制。修：`publish_config_gauges()` 在 `create_app` 装配点发布一次
+  （与有没有密钥无关）。容器内实测启动即为 `kubedocs_llm_budget_usd 2.0`。
+
+**新增 `tests/unit/test_observability.py`（12 项）**：此前**整个观测面没有任何一行测试**，
+而 README 与 SECURITY 都把它当作已实现的能力对外声明（"开关不再是假开关"）——
+声明的唯一证据是"手工 curl 过一次"，而手工 curl 证明不了回归：把中间件的标签从
+**路由模板**改回原始 URL，页面照样出数，只有 Prometheus 侧的聚合会悄悄碎掉。
+现在把口径写死成断言：日志级别真的落到 root logger、`/metrics` 的六个指标名真的出现在
+**暴露文本**里、HTTP 计数按路由模板打标签（带查询串的两次请求必须累加到同一条序列）、
+状态码进标签（否则 404 会混进正常流量）。
+
+**实测（本机，16 GB / Windows 11）**：主机直跑与容器两条路都完整验过。检索冷启动
+墙钟 **69 s**（加载嵌入模型，暖机 0.1 s）——`create_app()` 有意不加载模型以保持启动廉价，
+所以 `/console` 的检索面板会把等待秒数实时抖出来，而不是让页面看上去"点了没反应"。
+另记一条环境事实：本机同时跑 Docker Desktop 时提交内存只剩约 1.6 GB，此时**主机**进程
+加载 torch 会以 `os error 1455`（paging file too small）失败、检索降级成纯 BM25
+（HTTP 仍 200、`diagnostics.degraded` 写明原因）；内存宽裕后同一条路 `overlap=13`、
+无降级。⇒ 属瞬时资源问题，不是代码问题。
+
 ---
 
 ## [0.1.0] - 未发布（no tag yet）

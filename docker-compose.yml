@@ -7,10 +7,18 @@
 #     而项目真正实现的观测路径是 **OTel（console/otlp）+ Prometheus `/metrics`**，
 #     它们都不需要这两个服务。
 #
-# ⚠️ 本文件的**运行**尚未在本机实测（`db` 服务只做过**等价演练**：同镜像 + 同卷 +
-#    同 `-c shared_preload_libraries=pg_search`，跑在独立容器/独立端口上，见
-#    docs/adr/0004 第十节；`docker compose up` 本身没跑，因为那会重建本机
-#    已有的 `kubedocs-db-1`）。标记为「未完整验证」，不假装它能跑。
+# ✅ 本文件已在 2026-10-13/14 于本机实跑（`docker compose up -d`，db + api 均 healthy）；
+#    仍然成立的两条保留意见：
+#      · `db` 容器**没有**被重建过（`up -d` 报的是 "Running"），沿用着原有的数据卷——
+#        这是**有意**的，那个卷里的索引是有价值的资产。所以"全新 initdb 从零起"这条
+#        路径没有在本机走过（镜像自带的 `postgresql.conf.sample` 里有 preload 配置，
+#        而 `command:` 里的 `-c` 是给**沿用旧数据目录**的场景兜底的，两条路都覆盖到了，
+#        但只有后者实测过）。
+#      · **镜像没有从零重建成功**：外网大文件下载反复停滞（详见 README「Docker 全栈实测」）。
+#        那次容器验证是挂载当前源码跑的（`_kd_verify.yml`），所以修复本身被完整验证了，
+#        而"干净环境一次构建成功"仍未跑通。
+#    历史记录：`db` 服务早先做过**等价演练**（同镜像 + 同卷 + 同 `-c`，独立容器/端口），
+#    见 docs/adr/0004 第十节。
 #
 # 版本都**钉死**：工业项目里 "latest" 会让半年后的自己无法复现。
 
@@ -34,9 +42,9 @@ services:
     #
     # 实测 2026-10-11：本镜像**沿用 pgvector:pg16 初始化的那个卷**起来后，
     # 18861 块一块不少、无需 dump/restore（演练明细见 ADR 第十节）。
-    # ⚠️ 但本文件**没有**在 `kubedocs-db-1` 上跑过 `docker compose up -d db`
-    #（那会重建这个容器，而它里面那份索引是有价值的资产）。上机前的第一步是：
-    #   docker compose up -d db                                # 复用同一个卷
+    # ✅ 2026-10-14 补测：`docker compose up -d api` 对该容器报 `Running`，
+    # 即它**没有**被重建，卷与索引都还在（仍是有意为之：那份索引是资产）。
+    # 当前 status 的自检命令：
     #   docker compose exec db psql -U kubedocs -d kubedocs -c 'select count(*) from k8s_docs.chunks'
     # 换镜像后第一次构造 store 会自动补建 BM25 索引（幂等，见 PgVectorStore._setup_fts）。
     image: paradedb/paradedb:0.26.1-pg16
@@ -95,6 +103,14 @@ services:
     env_file:
       - .env
     environment:
+      # **这一行是必需的，不是可选的**：`Settings.store` 默认值是 `sqlite-vec`，
+      # 而它**不读** `database_url`。只设 DATABASE_URL 不设 STORE 的话，api 会去读
+      # bind-mount 进来的 `./data/index/<domain>/kubedocs.db`，把旁边那个灌满
+      # 18811 块的 Postgres 晾着——`db` 服务白起。实测后果：SQLite 跑在 Windows
+      # bind-mount 上会报 `OperationalError: disk I/O error`，而 `/healthz` 仍然
+      # 返回 200、`n_chunks` 却是 0（"服务是绿的但什么都搜不到"的老毛病）。
+      # "设了却没人读的配置"正是本仓库明确反对的假开关，所以这里必须成对给出。
+      KUBEDOCS_STORE: pgvector
       # 容器内互访用服务名（.env 里的示例值就是按 compose 写的）
       KUBEDOCS_DATABASE_URL: postgresql://kubedocs:kubedocs@db:5432/kubedocs
       # **必须显式给出挂载点**：容器里包是 `pip install .` 装进 venv 的，

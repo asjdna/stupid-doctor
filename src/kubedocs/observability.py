@@ -164,3 +164,17 @@ def observe_llm_call(*, cost_usd: float, priced: bool, budget_usd: float | None 
         LLM_COST.inc(cost_usd)
     if budget_usd is not None:
         LLM_BUDGET.set(budget_usd)
+
+
+def publish_config_gauges(settings: Settings) -> None:
+    """把配置里"应当可见"的值在**启动时**发布成 gauge。
+
+    为什么必须补这一步：`LLM_BUDGET` 原先只在真有 LLM 调用时才被 `observe_llm_call`
+    设值。于是"配了 $2.00 上限、但一次都还没调用过"的进程里它是 **0**，而这个
+    gauge 的约定恰恰是"**0 表示不限**"——控制台如实读指标，就会把一个真实存在的
+    上限显示成"不限"。这不是"少显示一个字段"，是显示**错的**金额控制，
+    所以要在装配点补一次，而不是等第一次调用。
+
+    没密钥、纯检索的部署同样受益：预算上限与有没有密钥无关。
+    """
+    LLM_BUDGET.set(float(settings.llm_daily_budget_usd or 0.0))

@@ -199,7 +199,7 @@ WHITELIST: dict[tuple[str, int, str], White] = {
         reason="同上（表格行，单元格里只有数字与锚点）",
         expect='"accuracy"',
     ),
-    ("SECURITY.md", 316, "docker-compose.yml:107"): White(
+    ("SECURITY.md", 324, "docker-compose.yml:123"): White(
         reason="这一句在说端口映射，反引号里只有端口号与这个锚点",
         expect="8080:8080",
     ),

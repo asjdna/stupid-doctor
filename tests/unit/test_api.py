@@ -491,3 +491,46 @@ class TestIndexPage:
 
         assert resp.status_code == 200
         assert STARTUP_PAGE in resp.text
+
+
+class TestConsolePage:
+    """`/console` 控制台页。
+
+    和演示页共用 `_serve_page`，所以这里既测"缺文件时的降级"，也测"仓库里的
+    真文件真的被端到端送达"——后者是防路径写错的那一道闸：路由里写的是
+    `("data", "web", "console.html")`，拼错了在浏览器里才发现就太晚了。
+    """
+
+    def test_missing_html_returns_200_explanation(self, api_settings: Settings, tmp_path: Path) -> None:
+        app = create_app(api_settings)
+        app.state.console_html = tmp_path / "no-such-console.html"
+        with TestClient(app) as client:
+            resp = client.get("/console")
+
+        assert resp.status_code == 200
+        assert "text/html" in resp.headers["content-type"]
+        assert "kubedocs" in resp.text
+
+    def test_existing_html_is_served_verbatim(self, api_settings: Settings, tmp_path: Path) -> None:
+        page = tmp_path / "console.html"
+        page.write_text(STARTUP_PAGE, encoding="utf-8")
+        app = create_app(api_settings)
+        app.state.console_html = page
+        with TestClient(app) as client:
+            resp = client.get("/console")
+
+        assert resp.status_code == 200
+        assert STARTUP_PAGE in resp.text
+
+    def test_repo_asset_is_reachable_and_self_contained(self, api_settings: Settings) -> None:
+        """仓库里真有 data/web/console.html，且送达时没有外链依赖（离线可用）。"""
+        app = create_app(api_settings)
+        assert app.state.console_html.is_file(), f"控制台页缺失：{app.state.console_html}"
+        with TestClient(app) as client:
+            resp = client.get("/console")
+
+        assert resp.status_code == 200
+        assert "kubedocs" in resp.text
+        # 页面必须自带样式与脚本：容器里没有外网，CDN 一挂就是白板。
+        assert "<style>" in resp.text and "<script>" in resp.text
+        assert "http://cdn" not in resp.text and "https://cdn" not in resp.text

@@ -35,8 +35,9 @@ python -m kubedocs.cli --hf-offline eval --gate   # 评测并卡闸门
 | **clinic 检索轨真正接通** | ✅ 已验证（`DomainPack` 自报语料/归一化/嵌入，`ingest` 走 `pack.build_index()`）：`--domain clinic` 自动用 **jieba 分词 + `bge-small-zh-v1.5`（512 维）**，全量 **31,592 块**已建成，`verify_fts()`/`verify_vec()` 均 ok，中文查询真实命中。**此前 `--domain` 只换索引目录**，语料/归一化/嵌入仍是 k8s 默认值 |
 | 观测：`/metrics` + OTel + `log_level` 生效 | ✅ 已完成（`src/kubedocs/observability.py`）；`otel_enable` 默认关，显式打开才导出 |
 | P2 agent 内核（图 / 工具 / 持久化 / 中断） | ✅ 已完成（`agent/` 13 个模块：LangGraph `StateGraph` + 工具循环 + `InMemorySaver` + `interrupt` 续跑；单测在闸门内） |
-| P5 FastAPI + 对话前端 | ✅ 已完成（`api/app.py` **8 个**端点：`/healthz` `/metrics` `/domains` `/tools` `/search` `/ask` `/chat` `/`，+ `data/web/index.html` + `scripts/smoke_api.py` 冒烟） |
-| `docker compose up` 全栈 | ✅ **已实测**（2026-10-13，Docker 29.8）：db + api 起来、健康检查通过、`/healthz` 报 **18811 块**、`/metrics` 200、`/search` 真实命中、`/chat` 的 SSE 红线**确定性转急诊**。过程中发现并修掉 3 个真实缺陷，见下面「Docker 全栈实测」 |
+| P5 FastAPI + 对话前端 | ✅ 已完成（`api/app.py` **9 个**端点：`/healthz` `/metrics` `/domains` `/tools` `/search` `/ask` `/chat` `/` `/console`，+ `data/web/index.html` 演示页 + `data/web/console.html` 控制台 + `scripts/smoke_api.py` 冒烟） |
+| 一键启动（Windows） | ✅ 已验证（`start.cmd`：挑端口 → 起服务 → 轮询到**索引非空** → 开控制台页）。实测：8080 被占时自动跳到 8081；已有可用实例时默认附着（`--force` 强制另起） |
+| `docker compose up` 全栈 | ✅ **已实测**（2026-10-13/14，Docker 29.8）：db + api 起来、健康检查通过、`/healthz` 报 **18811 块**、`/metrics` 200、`/search` 真实命中（`overlap=13`，两路都参与融合）、`/chat` 的 SSE 红线**确定性转急诊**。过程中发现并修掉 4 个真实缺陷，见下面「Docker 全栈实测」 |
 
 > 本项目坚持一件事：**没跑过的就不写"已完成"**。
 
@@ -257,6 +258,30 @@ python -m kubedocs.cli eval --write-baseline      # 首次冻结基线
 python -m kubedocs.cli eval --gate                # 之后每次回归检查
 ```
 
+### 一键启动窗口（Windows）
+
+上面这套手动步骤在 Windows 上被包成了一个脚本，双击即可：
+
+```bat
+start.cmd
+```
+
+它做四件事：挑端口（从 8080 起找第一个空闲的）→ 起服务 → 轮询 `/healthz` 直到**真的**健康 →
+打开控制台页面。那个窗口就是服务的控制台，日志打在里面；Ctrl+C 或关窗口即停止
+（前台运行，不会留下一个孤儿进程占着端口）。
+
+- 8080 上**已经有**一个 kubedocs 在跑时（比如 `docker compose up -d` 起的），它默认直接
+  附着过去、只打开页面，不再另起一个；要强制另起用 `start.cmd --force`。
+- 其它开关：`--domain clinic`、`--port 9000`、`--no-browser`、`--online`
+  （默认带 `--hf-offline`，因为模型已在本地缓存里；原因见下方"环境约束"）。
+
+两个页面职责不同，不要互相替代：
+
+| 路径 | 是什么 |
+|---|---|
+| `/console` | 控制台：索引体检、`/metrics` 摘要（含非 2xx 单独计数）、每路检索名次、`/ask` 的降级原因、问诊 SSE 轨迹 |
+| `/` | 演示页：检索 / 工具清单 / 问诊的最小示例 |
+
 不想下载模型（离线/受限网络）时，用确定性哈希向量跑通管道：
 
 ```bash
@@ -405,11 +430,13 @@ python -m kubedocs.cli --provider hashing ingest --limit-files 100
 | `api` 容器 | healthy，非 root（`USER app`，uid 10001），8080 已映射 |
 | `GET /healthz` | `{"ok":true,"domain":"k8s_docs","n_chunks":18811}` |
 | `GET /metrics` | 200 + `text/plain; version=1.0.0`；`kubedocs_http_requests_total` 等按**路由模板**打标签，计数随请求增长 |
-| `POST /search` | 3 条真实命中、`degraded` 为空（模型从挂载卷加载成功） |
+| `POST /search` | 3 条真实命中、`degraded` 为空（模型从挂载卷加载成功）；`overlap=13` ⇒ 关键词路与向量路**都**参与了融合 |
 | `POST /chat` | SSE 200：`thread` → `tool`（`check_red_line` 命中「胸痛」）→ `message`（`status: emergency`）→ `done` |
 | `GET /tools?domain=clinic` | `book_appointment, check_citations, get_availability, list_departments` |
+| `GET /console` | 200，控制台页（`data` 是挂载卷 ⇒ 改 HTML **不用重建镜像**，重启进程即可） |
+| 容器实际用的后端 | `pgvector`（`KUBEDOCS_STORE=pgvector`）；容器内 `stats --verify`：1720 文档 / 18811 块，FTS 与向量一致性均 `ok` |
 
-**这次实测抓到 3 个只有真起容器才会暴露的缺陷（都已修）：**
+**这次实测抓到 4 个只有真起容器才会暴露的缺陷（都已修）：**
 
 1. **容器内 `repo_root()` 解析错**（最严重）。`repo_root()` 从 `__file__` 上溯三层，而容器里包是
    `pip install .` 装进 venv 的 ⇒ 解析成 `/opt/venv/lib/python3.10`，`data/` 指向一个不存在、
@@ -426,6 +453,14 @@ python -m kubedocs.cli --provider hashing ingest --limit-files 100
    （64 个包 / 87 MB），但依赖其实全是 manylinux wheel，在受限网络下这一层实测
    **>18 分钟仍没下完**。修：先装依赖（空占位包）再 `COPY src` + `pip install --no-deps .`；
    编译器改成 `BUILD_TOOLS=1` 按需开启（默认不装）。
+4. **`KUBEDOCS_DATABASE_URL` 是个假开关**。compose 给 api 设了 `DATABASE_URL` 指向
+   `db` 服务，但 `Settings.store` 的默认值是 `sqlite-vec`，而它**不读** `database_url`——
+   于是容器实际去读 bind-mount 进来的 `./data/index/<domain>/kubedocs.db`，
+   把旁边那个灌满 18811 块的 Postgres 完全晾着（`db` 服务白起）。表现同样是
+   "服务是绿的、`n_chunks` 是 0"：SQLite 跑在 Windows bind-mount 上会报
+   `OperationalError: disk I/O error`，而 `/healthz` 照样 200。修：compose 里
+   `KUBEDOCS_STORE: pgvector` 与 `DATABASE_URL` **成对**给出。修后容器内
+   `stats --verify` → 1720/18811、FTS 与向量一致性均 `ok`，`/search` 两路都参与融合。
 
 **镜像体积（如实记录，未在本机跑完）**：PyPI 上的 `torch` 默认是 **CUDA 版**，
 会多拉约 2.5 GB 的 `nvidia-*` / `triton` / `cuda-toolkit`，实测镜像 **9.91 GB**——
@@ -457,6 +492,8 @@ Docker 的数据目录在 C 盘时尤其容易撞上。构建还**不消费 `req
 | **容器内 `download.pytorch.org`** | ⚠️ 同上（TCP 通、传输挂死）→ CPU-only torch 不能从官方源拿；阿里云 `pytorch-wheels/cpu/` 目录可用（cp310 有 54 个 `+cpu` wheel） |
 | **外网大文件传输（通用）** | ⚠️ **反复停滞**：同一构建里 tuna 镜像能把 553 MB 的 torch 拉完，另一条 184 MB 的 wheel 却卡死 6 分钟零字节。构建脚本必须可重跑，不能假设一次成功 |
 | 已缓存模型的联网校验 | ❌ **挂死 >10 分钟** → 必须 `--hf-offline`（载入 0.8s） |
+| **宿主提交内存（16 GB 机器）** | ⚠️ 本机同时跑着 Docker Desktop 时，提交上限只剩约 1.6 GB；此时**主机进程**加载 torch 会以 `OSError: 页面文件太小 (os error 1455)` 失败，`/search` 降级成纯 BM25（`diagnostics.degraded` 会写明原因、HTTP 仍是 200）。内存宽裕后同一条路完全正常：实测 `overlap=13`、`degraded` 为空。⇒ 这是**瞬时资源**问题，不是代码问题；`/console` 的降级条会直接告诉你当前走的是哪条 |
+| 检索冷启动 | ⚠️ 首次检索要加载嵌入模型，本机实测**墙钟 69 s**（之后 0.1 s）。`create_app()` 有意不加载模型（保持启动廉价），所以 `/console` 的检索面板会把等待秒数实时抖出来 |
 
 ⇒ 取语料唯一可行路径是 tarball 流式解包，见 [`scripts/fetch_corpus.py`](scripts/fetch_corpus.py)。
 
@@ -548,12 +585,17 @@ Docker 的数据目录在 C 盘时尤其容易撞上。构建还**不消费 `req
       **本机复测（2026-10-12）**：默认 DSN 上的容器已经是 ParadeDB 镜像，
       `--store pgvector eval --gate` 退出码 0、hit@10 0.8600、`verify_fts()` 无 DEGRADED。
       早先这里写的是"默认 DSN 还是旧镜像 ⇒ 走 DEGRADED ⇒ 退出码 2"，那已经过时。
-      （同一次复测期间 Docker 守护进程随后被停掉，pgvector 的**集成测试**因此转为 skip，
-      见 SECURITY.md 第 6 节。）
+      （同一次复测期间 Docker 守护进程随后被停掉，pgvector 的**集成测试**一度转为 skip；
+      2026-10-14 守护进程恢复后**重跑为真跑**：`test_pgvector_store.py` 15 项 +
+      `test_store_contract.py` 的 pgvector 参数，**0 skipped**。）
 - [ ] 精排（cross-encoder）用真实模型实测收益（里程碑 9）
 - [ ] 嵌入量化/ONNX 提速 + k6 压测 + P95/成本 SLO（里程碑 10）
-- [x] **Docker 全栈实测**（2026-10-13）：见下面「Docker 全栈实测」一节。修掉了 3 个只有真起容器才会暴露的缺陷
-      （容器内 `repo_root` 解析错、`HF_HOME` 落在非 root 用户读不到的地方、依赖层与源码层耦合）
+- [x] **Docker 全栈实测**（2026-10-13）：见下面「Docker 全栈实测」一节。修掉了 4 个只有真起容器才会暴露的缺陷
+      （容器内 `repo_root` 解析错、`HF_HOME` 落在非 root 用户读不到的地方、依赖层与源码层耦合、
+      `KUBEDOCS_DATABASE_URL` 假开关）
+- [x] **一键启动窗口 + 控制台页**（2026-10-14）：`start.cmd` + `GET /console`；顺带修掉
+      `has_api_key()` 被占位符骗过、预算 gauge 在"未调用过"时谎报"不限"，并补上
+      `tests/unit/test_observability.py`（此前整个观测面没有测试）
 
 ---
 

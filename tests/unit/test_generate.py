@@ -375,6 +375,66 @@ class TestApiKeyDetection:
         monkeypatch.setenv("DEEPSEEK_API_KEY", "   ")
         assert has_api_key("deepseek/deepseek-chat") is False
 
+    def test_env_example_placeholder_is_not_a_key(self, monkeypatch):
+        """`.env` 里留着占位符时必须算"没配密钥"。
+
+        回归的是一个**真实踩到的**坑：占位/说明文本原先会被判为"已配置"，
+        于是 `/ask` 拿着它发起一次注定失败的请求，`degraded` 里回显的是
+        LiteLLM 的原始异常，用户看到的是"模型报错"而不是"你没配密钥"。
+        """
+        monkeypatch.setenv("DEEPSEEK_API_KEY", "your-deepseek-api-key-placeholder-here")
+        assert has_api_key("deepseek/deepseek-chat") is False
+
+    def test_non_ascii_value_is_not_a_key(self, monkeypatch):
+        """**实测逼出来的那条**：本机 `.env` 里留的是一句中文说明（38 字符 / 78 字节，
+        20 个非 ASCII 字符）。
+
+        当时链路是：`has_api_key` 只判非空 ⇒ True ⇒ LiteLLM 把这段值放进 HTTP 头
+        ⇒ 抛 `'ascii' codec can't encode characters in position 9-24`。用户看到的
+        是"模型报错"，指不到"你 `.env` 里写的是一句中文"。
+
+        任何真密钥都是可打印 ASCII（要进 `Authorization` 头），所以这条判据不会误伤。
+        """
+        monkeypatch.setenv("DEEPSEEK_API_KEY", "请把你的 DeepSeek 密钥填在这里，留空则不用大模型")
+        assert has_api_key("deepseek/deepseek-chat") is False
+
+    def test_non_ascii_check_matches_the_real_env_shape(self, monkeypatch):
+        """把本机真实那段的**形态**钉住：38 字符、非全 ASCII、且不含词表里的词。
+
+        这条是上一条的"为什么词表不够"的证据：那段值一个占位符关键词都不含，
+        只有非 ASCII 判据能挡住它。
+        """
+        shape = "ab" + "填" * 16 + "a" * 11 + "填" * 3 + "a" * 5 + "填"
+        assert len(shape) == 38
+        assert not shape.isascii()
+        assert not any(
+            marker in shape.lower() for marker in ("your", "placeholder", "changeme", "example", "xxxx")
+        )
+        monkeypatch.setenv("DEEPSEEK_API_KEY", shape)
+        assert has_api_key("deepseek/deepseek-chat") is False
+
+    @pytest.mark.parametrize(
+        "value",
+        [
+            "your-openai-key",
+            "YOUR_API_KEY_HERE",
+            "changeme",
+            "CHANGE-ME",
+            "sk-xxxxxxxxxxxxxxxx",
+            "<your-key>",
+            "my-example-key",
+        ],
+    )
+    def test_placeholder_markers(self, monkeypatch, value):
+        monkeypatch.setenv("DEEPSEEK_API_KEY", value)
+        assert has_api_key("deepseek/deepseek-chat") is False
+
+    def test_real_looking_key_still_passes(self, monkeypatch):
+        """黑名单不能误伤真密钥：DeepSeek 的形态是 `sk-` + 32 位随机串。"""
+        fake = "sk-" + "0123456789abcdef" * 2
+        monkeypatch.setenv("DEEPSEEK_API_KEY", fake)
+        assert has_api_key("deepseek/deepseek-chat") is True
+
 
 # --------------------------------------------------------------------- 主流程（用打桩检索器）
 class StubRetriever:

@@ -510,8 +510,55 @@ def required_api_key_env(model: str) -> str:
     return special.get(provider, f"{provider.upper()}_API_KEY")
 
 
+_PLACEHOLDER_MARKERS = (
+    "your-",
+    "your_",
+    "placeholder",
+    "changeme",
+    "change-me",
+    "example",
+    "xxxx",
+    "<",
+    ">",
+)
+"""明显不是密钥的占位符片段（大小写不敏感）。
+
+为什么要专门挡这一手：`has_api_key` 原先只判断"非空"，于是 `.env` 里
+一段说明文字会让它返回 True。后果不是"少一个功能"，而是**更坏**——调用方
+会拿着它去发起一次注定失败的真实请求，然后把底层异常抛给用户，用户根本
+看不出真正的原因（配置没填对）。
+
+真正的判据有两条，词表只是其中一条：另一条是"**必须全是 ASCII**"
+（见 `has_api_key`，那条是实测逼出来的、也更强）。词表保留是因为它能把
+话说得更具体（"看起来是占位符" vs "含非 ASCII"），日志里更有指导性。
+"""
+
+
 def has_api_key(model: str) -> bool:
-    return bool(os.environ.get(required_api_key_env(model), "").strip())
+    """该模型所需的环境变量是否**真的**配了密钥。
+
+    "配了"= 非空 **且** 不像占位符 **且**全是 ASCII。后两条原先都没有，
+    于是 `.env` 里任何一段说明文字都会被当成密钥——见下面两条注释。
+    """
+    env = required_api_key_env(model)
+    value = os.environ.get(env, "").strip()
+    if not value:
+        return False
+    low = value.lower()
+    if any(marker in low for marker in _PLACEHOLDER_MARKERS):
+        logger.warning("%s 看起来是占位符（长度 %d），按未配置处理", env, len(value))
+        return False
+    if not value.isascii():
+        # 这一条是**实测逼出来的**，不是洁癖：密钥最终要进 HTTP 头
+        # （`Authorization: ...`），而非 ASCII 字符在头部无法编码。本机 `.env` 里
+        # 留了一句中文说明时，链路是"`has_api_key` 返回 True → litellm 拿着它发请求
+        # → 抛 `'ascii' codec can't encode characters in position 9-24`"，
+        # 用户看到的是"模型报错"，完全指不到真正的原因（配置里留了中文）。
+        # 反过来，任何真密钥都是可打印 ASCII，这条判据不会误伤。
+        bad = sum(1 for c in value if not c.isascii())
+        logger.warning("%s 含 %d 个非 ASCII 字符，不可能是密钥，按未配置处理", env, bad)
+        return False
+    return True
 
 
 class LiteLLMClient:
