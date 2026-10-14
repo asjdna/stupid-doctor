@@ -149,9 +149,10 @@
   `/metrics` 200（`kubedocs_*` 指标按**路由模板**打标签、计数随请求增长）；
   `/search` **3 条真实命中、无降级**；`/chat` 的 SSE 里 `check_red_line` 命中「胸痛」
   并转 `status: emergency`。
-- ✅ **pgvector 集成测试从 skip 变为真跑**：`test_pgvector_store.py` +
-  `test_store_contract.py` 的 pgvector 参数 **90 passed / 0 skipped**；
-  当前索引（18811 块）重灌进 pgvector 后全文/向量自检 ok、抽样 200 块向量**逐位一致**、
+- ✅ **pgvector 集成测试从 skip 变为真跑**：`test_pgvector_store.py` **15 条** +
+  `test_store_contract.py` 的 pgvector 参数 **18 条** = **33 passed / 0 skipped**
+  （此处原先写的是"90 passed / 0 skipped"，与任何可复现命令都对不上，已更正）；
+  当前索引重灌进 pgvector 后全文/向量自检 ok、抽样 200 块向量**逐位一致**、
   字符总数两边相同，`cli --store pgvector eval --top-k 10 --gate` **退出码 0**
   （hybrid hit@10 0.8600 ≥ 冻结基线 0.8400）。
 - ⚠️ **镜像"从零重建"没有在本机跑完**：重建需要的外网大文件下载**反复停滞**
@@ -228,6 +229,67 @@
 加载 torch 会以 `os error 1455`（paging file too small）失败、检索降级成纯 BM25
 （HTTP 仍 200、`diagnostics.degraded` 写明原因）；内存宽裕后同一条路 `overlap=13`、
 无降级。⇒ 属瞬时资源问题，不是代码问题。
+
+### 自洽性检查：CI 本地流程 + 闸门精确判据 + 语料漂移（2026-10-14）
+
+一轮以"查项目自身的逻辑自洽、完整流程能否走通、md 声明与代码是否冲突"为目标的改动。
+
+**新增：**
+
+- **`scripts/ci_local.py` + `make ci-local`**：本地按 CI 口径把**三个 job** 都跑一遍。
+  此前本地只有 `make check`（= `quality` job 的静态+测试部分），`pipeline` 与 `gate`
+  本地没有入口 —— 而这两个 job 在 CI 里都是**阻塞**的，所以"本地 `make check` 全绿"
+  **并不等于** "CI 会绿"（何况仓库没有 remote，`ci.yml` 至今没在任何 runner 上跑过）。
+  三条设计：**Postgres 不可达就直接失败**（CI 里那族用例有 service、必须真跑，而
+  "skip"与"pass"在日志里长得几乎一样）；**失败即停**（与 `needs: [quality]` 一致）；
+  pipeline 的 hashing 索引建到**临时目录**（不碰那份重建要 35 分钟的真实索引）。
+  实测 **3/3 job 通过**，失败路径退出码 1。
+
+**修复：**
+
+- **`corpus_sha` 从未被比较**（`evaluation/harness.py`）。它的 docstring 一直写着
+  "用于判断两次评测是否同一批数据"，但它只被**计算与落盘**（报告里有、基线里有），
+  闸门里一次都没用过 —— 实际把关的只是 **2% 的块数容差**。
+  实测触发：重拉上游语料后文档 1720→1722、块数 18811→18822（**+0.058%**），
+  落在容差内 ⇒ **静默通过、一个字都不打印**，而 CONTRIBUTING 与 `ci.yml`
+  都声称闸门会拒绝跨语料比较。修：`corpus_sha` 进必需字段并**精确**比较，
+  不等即拒绝（退出码 2），逃生口 `--allow-corpus-drift` 放行但**留警告**；
+  块数容差降级为"变了多少"的细节提供者（原先它是唯一判据，且近似）。
+- **`eval_sets` 的 docstring 说反了**（`domains/base.py`）：原文是"内核据此跑评测与闸门"，
+  但全仓只有 `cli domains` 的打印与 `/domains` 响应读它，评测走的是显式路径参数。
+- **clinic 的 `eval_sets` 注释已过时**（`domains/clinic/domain.py`）：原注释说金标集
+  "要在 P4 才建"，而 `data/eval/clinic_gold.jsonl`（**37 条**）与
+  `data/eval/clinic_baseline.json` **都已存在**、`scripts/eval_clinic.py --gate` 也在跑。
+  仍返回空，但理由更正为"clinic 金标是另一种形状、不走这个协议字段"。
+- **过期数字**（写死的数会腐烂，而腐烂的注释会被当成现状）：
+  SECURITY/CHANGELOG 里 pgvector 用例"**90 passed / 0 skipped**"与任何可复现命令都对不上
+  → 改为 **33**（`test_pgvector_store.py` 15 + `test_store_contract.py` 的 pgvector 参数 18，
+  含可复制的命令）；`ci.yml` 里写死的 18861 / "12 条" / "30 条" / "706 passed、736 passed"
+  一律改成**判据或规则**（只保留"milvus 那一族可 skip"这类不随用例增删变化的表述）；
+  Makefile 的"本机 Docker Hub 不可达、未实测" → 已实测（并注明 `up --build` 与
+  "镜像里那份旧源码"的关系）；CONTRIBUTING 的"12 条"→15 条。
+
+**尺子变更（按 CONTRIBUTING 第 5 节留档）：**
+
+上游语料取自 `main`、没有钉版本，因此索引规模变化，基线重冻：
+
+| | 重冻前 | 重冻后 |
+|---|---|---|
+| 文档 | 1720 | 1722 |
+| 块数 | 18811 | 18822 |
+| `corpus_sha` | `f6be8d659a348c60` | `f9ffa225825bd593` |
+| hybrid hit@10 | 0.8400 | **0.8400（不变）** |
+| mrr@10 | 0.5205 | 0.5239 |
+| ndcg@10 | 0.5469 | 0.5495 |
+
+**这是一次口径变更，不是把指标"修绿"**：hit@10 前后完全相同，mrr/ndcg 略升。
+pgvector 侧按同一口径重灌（抽样 200 块向量逐位一致、字符总数 14762302 两边相同）后
+hit@10 = **0.8600**、`--gate` 退出码 0。
+
+**审计结论（这些项查过、没有改动）：** `Settings` 的 **49 个字段全部**有真实读者
+（无假开关；注意自动扫描会对"字段名 vs 派生属性名"误报，`llm_fallbacks` 就是一个假阳性）；
+退出码 `0/1/2/3` 与 README 声称**完全一致**；`agent/` **13** 个模块、
+**4** 个 Store 后端实现、**9** 个端点，均与文档声明相符。
 
 ---
 

@@ -2,7 +2,7 @@
 #
 # 本机直跑（默认，不需要 Docker）与 compose 是两条**并列**的路径：
 #   make ingest / make search / make eval   -> 本地嵌入式索引（默认 sqlite-vec，可切 sqlite / pgvector）
-#   make up / make down / make logs         -> compose 全栈（需 Docker；本机 Docker Hub 不可达，未实测）
+#   make up / make down / make logs         -> compose 全栈（需 Docker；**已实测**，见 README「Docker 全栈实测」）
 # 详见 docs/adr/0002。
 
 # venv 解释器按平台取路径，不能写死一种：
@@ -31,7 +31,7 @@ RUN = $(PY)
 # 于是照着 Makefile 跑会在本机卡住——Makefile 与 README 的命令因此是不一致的。
 HF := --hf-endpoint https://hf-mirror.com --hf-offline
 
-.PHONY: help install check lint fmt type refs test lock corpus cstats ingest ingest-hash search stats \
+.PHONY: help install check ci-local lint fmt type refs test lock corpus cstats ingest ingest-hash search stats \
         gold eval eval-baseline up down logs clean
 
 # help 也用 $(PY) -c 实现，与 clean 同一手法、同一理由：
@@ -53,8 +53,16 @@ install:  ## 建 venv 并安装（含 dev 依赖）
 	python -m venv --system-site-packages .venv
 	$(PY) -m pip install -e ".[dev]"
 
-check: lint fmt type test refs  ## 跑完所有静态闸门（与 CI 的 quality job 等价）
+check: lint fmt type test refs  ## 所有静态闸门（= ci.yml 的 quality job，不含 pipeline/gate）
 	@echo "所有闸门通过"
+
+# `make check` 只覆盖 quality job 的**静态+测试**部分：ci.yml 里另外两个 job
+# （pipeline 全链路自检、gate 质量闸门）本地原先没有对应目标，于是"本地全绿"并不
+# 等于"CI 会绿"。这个目标把三个 job 按 CI 的口径都跑一遍（见 scripts/ci_local.py）。
+# 它还会**强制要求 Postgres 可达**：那族用例在 CI 里有 service 容器、必须真跑，
+# 而 skip 与 pass 在日志里长得几乎一样。
+ci-local:  ## 本地按 CI 口径跑三个 job（quality + pipeline + gate）
+	$(RUN) scripts/ci_local.py
 
 lint:  ## ruff（阻塞）
 	$(RUN) -m ruff check .
@@ -119,7 +127,10 @@ eval:  ## 评测 + 单路消融 + 卡闸门（质量闸门用真实模型跑）
 eval-baseline:  ## 冻结新基线（改了标注集/模型/语料后必须重建）
 	$(RUN) -m kubedocs.cli $(HF) eval --write-baseline
 
-# ---------------------------------------------------------------- 容器（未实测）
+# ---------------------------------------------------------------- 容器（已实测）
+# ⚠️ `up` 用 `--build`：不重建的话跑的是**镜像里那份旧源码**。本机镜像至今没能从零重建成功
+# （外网大文件下载反复停滞，见 README），所以本地验证阶段是用覆盖文件把 `./src` 挂进容器的
+# ——那套做法与"干净环境一次构建成功"不是一回事，别把它当成前者。
 up:  ## 起全栈（需 Docker）
 	docker compose up -d --build
 

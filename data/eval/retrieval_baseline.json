@@ -3,29 +3,29 @@
   "gold_sha256": "3eee2503682df8ca",
   "embedding_model": "BAAI/bge-small-en-v1.5",
   "embedding_provider": "bge",
-  "n_chunks": 18811,
-  "n_docs": 1720,
+  "n_chunks": 18822,
+  "n_docs": 1722,
   "top_k": 10,
   "n_gold": 50,
   "metrics": {
     "hit": 0.84,
-    "mrr": 0.5205,
-    "ndcg": 0.5469,
+    "mrr": 0.5239,
+    "ndcg": 0.5495,
     "recall": 0.76
   },
   "ablation": {
     "hybrid": {
       "overall": {
         "hit": 0.84,
-        "mrr": 0.5205,
-        "ndcg": 0.5469,
+        "mrr": 0.5239,
+        "ndcg": 0.5495,
         "recall": 0.76
       },
       "by_kind": {
         "identifier": {
           "hit": 1.0,
-          "mrr": 0.5767,
-          "ndcg": 0.6866,
+          "mrr": 0.5878,
+          "ndcg": 0.6953,
           "recall": 1.0
         },
         "paraphrase": {
@@ -42,8 +42,8 @@
         }
       },
       "latency_ms": {
-        "p50": 107.8,
-        "p95": 228.1
+        "p50": 80.6,
+        "p95": 92.1
       },
       "n_misses": 8,
       "n_citation_violations": 0
@@ -76,8 +76,8 @@
         }
       },
       "latency_ms": {
-        "p50": 18.1,
-        "p95": 35.1
+        "p50": 12.3,
+        "p95": 25.4
       },
       "n_misses": 14,
       "n_citation_violations": 0
@@ -85,15 +85,15 @@
     "dense-only": {
       "overall": {
         "hit": 0.78,
-        "mrr": 0.4346,
-        "ndcg": 0.4818,
+        "mrr": 0.4446,
+        "ndcg": 0.4892,
         "recall": 0.71
       },
       "by_kind": {
         "identifier": {
           "hit": 0.9333,
-          "mrr": 0.5856,
-          "ndcg": 0.6765,
+          "mrr": 0.6189,
+          "ndcg": 0.7011,
           "recall": 0.9333
         },
         "paraphrase": {
@@ -110,13 +110,13 @@
         }
       },
       "latency_ms": {
-        "p50": 78.5,
-        "p95": 197.7
+        "p50": 66.8,
+        "p95": 69.3
       },
       "n_misses": 11,
       "n_citation_violations": 0
     }
   },
   "n_citation_violations": 0,
-  "corpus_sha": "f6be8d659a348c60"
+  "corpus_sha": "f9ffa225825bd593"
 }

@@ -37,7 +37,7 @@ python -m kubedocs.cli --hf-offline eval --gate   # 评测并卡闸门
 | P2 agent 内核（图 / 工具 / 持久化 / 中断） | ✅ 已完成（`agent/` 13 个模块：LangGraph `StateGraph` + 工具循环 + `InMemorySaver` + `interrupt` 续跑；单测在闸门内） |
 | P5 FastAPI + 对话前端 | ✅ 已完成（`api/app.py` **9 个**端点：`/healthz` `/metrics` `/domains` `/tools` `/search` `/ask` `/chat` `/` `/console`，+ `data/web/index.html` 演示页 + `data/web/console.html` 控制台 + `scripts/smoke_api.py` 冒烟） |
 | 一键启动（Windows） | ✅ 已验证（`start.cmd`：挑端口 → 起服务 → 轮询到**索引非空** → 开控制台页）。实测：8080 被占时自动跳到 8081；已有可用实例时默认附着（`--force` 强制另起） |
-| `docker compose up` 全栈 | ✅ **已实测**（2026-10-13/14，Docker 29.8）：db + api 起来、健康检查通过、`/healthz` 报 **18811 块**、`/metrics` 200、`/search` 真实命中（`overlap=13`，两路都参与融合）、`/chat` 的 SSE 红线**确定性转急诊**。过程中发现并修掉 4 个真实缺陷，见下面「Docker 全栈实测」 |
+| `docker compose up` 全栈 | ✅ **已实测**（2026-10-13/14，Docker 29.8）：db + api 起来、健康检查通过、`/healthz` 报 **18822 块**（2026-10-14 重灌后）、`/metrics` 200、`/search` 真实命中（`overlap=13`，两路都参与融合）、`/chat` 的 SSE 红线**确定性转急诊**。过程中发现并修掉 4 个真实缺陷，见下面「Docker 全栈实测」 |
 
 > 本项目坚持一件事：**没跑过的就不写"已完成"**。
 
@@ -297,6 +297,23 @@ python -m kubedocs.cli --provider hashing ingest --limit-files 100
 
 ## 实测数字
 
+> ### ⚠️ 先读这一段：本节数字绑定"当时抓到的那份语料"
+>
+> **上游语料取自 `main`，没有钉版本**（`scripts/fetch_corpus.py` 下 codeload tarball），
+> 所以"重跑一遍文档里的命令"**不保证**得到同一批数据。实测：
+>
+> | | 2026-10-12（本节留档） | 2026-10-14 重拉后 |
+> |---|---|---|
+> | 文档 | 1720 篇 | **1722 篇**（上游多了 2 篇） |
+> | 块数 | 18811 | **18822** |
+> | `corpus_sha` | `f6be8d659a348c60` | `f9ffa225825bd593` |
+> | hybrid hit@10 / mrr@10 | 0.8400 / 0.5205 | 0.8400 / **0.5239**（未退化） |
+>
+> 语料变了就**必须**重冻基线（CONTRIBUTING 第 5 节），已在 2026-10-14 执行；
+> 闸门现在会用 `corpus_sha` **精确**拒绝跨语料比较，逃生口是 `--allow-corpus-drift`。
+> **读本节时请把数字当"某次实测的留档"，而不是"永远如此"**——
+> 想知道当前值就跑那条命令（每张表都写了命令）。
+
 ### 语料与切块（`python scripts/chunk_stats.py`，1720 篇官方文档）
 
 | 项 | 值 |
@@ -372,6 +389,11 @@ python -m kubedocs.cli --provider hashing ingest --limit-files 100
 > 3. `n_chunks` 从 18861 变成 18811（−0.27%），所以基线已按 CONTRIBUTING 第 5 节的纪律
 >    重新冻结（`eval --write-baseline`）；**金标指纹没有变**（`gold_sha256` 仍是
 >    `3eee2503682df8ca`）——变的只是索引规模，不是尺子。
+> 4. **第二次重冻（2026-10-14）**：上游语料变了（1720→1722 篇、18811→18822 块、
+>    `corpus_sha` `f6be8d65…`→`f9ffa225…`），再次按同一条纪律重冻。
+>    hit@10 前后**都是 0.8400**，mrr 0.5205→0.5239、ndcg 0.5469→0.5495。
+>    同时把闸门的语料判据从"2% 块数容差"换成 `corpus_sha` 精确比较——
+>    因为正是那次 +0.058% 的漂移暴露了旧判据会**静默放行**跨语料比较。
 
 > 延迟是在 P0 里**顺带修掉一个一直存在的缺陷**之后的数字：`keyword_search` 原先在 FTS 上
 > 直接 `JOIN chunks` 取 `chunk_id`，导致执行计划变成"把 9000 多行命中全连上再排序"。
@@ -428,13 +450,13 @@ python -m kubedocs.cli --provider hashing ingest --limit-files 100
 |---|---|
 | `db`（`paradedb/paradedb:0.26.1-pg16`） | healthy；扩展 `pg_search` + `vector` 齐全 |
 | `api` 容器 | healthy，非 root（`USER app`，uid 10001），8080 已映射 |
-| `GET /healthz` | `{"ok":true,"domain":"k8s_docs","n_chunks":18811}` |
+| `GET /healthz` | `{"ok":true,"domain":"k8s_docs","n_chunks":18822}` |
 | `GET /metrics` | 200 + `text/plain; version=1.0.0`；`kubedocs_http_requests_total` 等按**路由模板**打标签，计数随请求增长 |
 | `POST /search` | 3 条真实命中、`degraded` 为空（模型从挂载卷加载成功）；`overlap=13` ⇒ 关键词路与向量路**都**参与了融合 |
 | `POST /chat` | SSE 200：`thread` → `tool`（`check_red_line` 命中「胸痛」）→ `message`（`status: emergency`）→ `done` |
 | `GET /tools?domain=clinic` | `book_appointment, check_citations, get_availability, list_departments` |
 | `GET /console` | 200，控制台页（`data` 是挂载卷 ⇒ 改 HTML **不用重建镜像**，重启进程即可） |
-| 容器实际用的后端 | `pgvector`（`KUBEDOCS_STORE=pgvector`）；容器内 `stats --verify`：1720 文档 / 18811 块，FTS 与向量一致性均 `ok` |
+| 容器实际用的后端 | `pgvector`（`KUBEDOCS_STORE=pgvector`）；容器内 `stats --verify`：1722 文档 / 18822 块，FTS 与向量一致性均 `ok` |
 
 **这次实测抓到 4 个只有真起容器才会暴露的缺陷（都已修）：**
 
@@ -460,7 +482,7 @@ python -m kubedocs.cli --provider hashing ingest --limit-files 100
    "服务是绿的、`n_chunks` 是 0"：SQLite 跑在 Windows bind-mount 上会报
    `OperationalError: disk I/O error`，而 `/healthz` 照样 200。修：compose 里
    `KUBEDOCS_STORE: pgvector` 与 `DATABASE_URL` **成对**给出。修后容器内
-   `stats --verify` → 1720/18811、FTS 与向量一致性均 `ok`，`/search` 两路都参与融合。
+   `stats --verify` → 1722/18822、FTS 与向量一致性均 `ok`，`/search` 两路都参与融合。
 
 **镜像体积（如实记录，未在本机跑完）**：PyPI 上的 `torch` 默认是 **CUDA 版**，
 会多拉约 2.5 GB 的 `nvidia-*` / `triton` / `cuda-toolkit`，实测镜像 **9.91 GB**——

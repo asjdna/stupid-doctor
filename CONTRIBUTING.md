@@ -32,7 +32,41 @@ pip install -e ".[dev]"
 
 ---
 
-## 2. 跑门禁：`make check`
+## 2. 跑门禁
+
+CI 有**三个 job**（`.github/workflows/ci.yml`），它们都是**阻塞**的，而本地原先只有
+一个入口（`make check`），只覆盖了第一个：
+
+| CI job | 本地入口 | 跑什么 |
+|---|---|---|
+| `quality` | `make check`（= 下面 2.2 那五条） | 静态检查 + 单元测试（含**需要真实 Postgres** 的用例） |
+| `pipeline` | `make ci-local` | 全量语料 + **哈希向量**全链路自检（不下载模型；**不卡**质量闸门） |
+| `gate` | `make ci-local` | **真实模型** + 冻结基线：指标退化 → 退出码 2 → 红 |
+
+> 只有 `quality` 有本地等价物时，"`make check` 全绿"**并不等于** "CI 会绿"——
+> 而且这个仓库没有 remote，`ci.yml` 至今没在任何 runner 上跑过（SECURITY.md §6）。
+
+### 2.1 三个 job 一起跑：`make ci-local`
+
+```bash
+make ci-local                      # = python scripts/ci_local.py
+python scripts/ci_local.py --jobs gate        # 只跑一个
+python scripts/ci_local.py --keep-going       # 失败后不停止，跑完全部
+```
+
+`scripts/ci_local.py` 顶部有一张表，逐条列出它**与 CI 的差异**（不重新 checkout、
+不建环境、不缓存、不覆盖矩阵与 service 语义）。三条要点：
+
+1. **前置条件比 CI 更严**：Postgres 不可达就**直接失败**。CI 里那族用例有 service
+   容器、必须真跑，而本地连不上时它们会 skip —— "skip" 与 "pass" 在日志里长得几乎一样，
+   所以这里不许它悄悄过去。起库：`docker compose up -d db`。
+2. **失败即停**，与 CI 的 `needs: [quality]` 一致（quality 挂了 pipeline/gate 根本不会启动）。
+   想看全貌加 `--keep-going`。
+3. **副作用隔离**：`pipeline` job 用 hashing 建索引，它会建到**临时目录**——
+   本地那份 `data/index/<domain>` 是 35 分钟才能重建的资产，绝不能被覆盖。
+   `gate` job 只读不写。
+
+### 2.2 逐条跑：`make check`
 
 ```bash
 make check          # = lint + fmt + type + test + refs，与 CI 的 quality job 等价
@@ -73,11 +107,14 @@ python scripts/check_doc_refs.py
 它们才是真相，`make` 只是把它们串起来。
 
 **单元测试绝不能联网、不能花钱**：`tests/` 用哈希向量与打桩 LLM。
-唯一需要外部进程的是 `tests/unit/test_pgvector_store.py`（12 条）：它要一条真实
+唯一需要外部进程的是 `tests/unit/test_pgvector_store.py`（**15 条**）：它要一条真实
 Postgres——CI 用 `paradedb/paradedb:0.26.1-pg16` service 起它（**必须是带 `pg_search` 的镜像**，
 否则关键字路降级成 `ts_rank`、这几条用例测的就不是产品路；见 `ci.yml` 的 quality job 与
-ADR-0004 第十节。同一条 service 也让 `test_store_contract.py` 的 `pgvector` 参数真正出现），
+ADR-0004 第十节。同一条 service 也让 `test_store_contract.py` 的 `pgvector` 参数
+**18 条**真正出现——库不可达时那 18 条不是 skip，而是**从参数化里悄悄消失**），
 本地没起库时整个文件 skip 并把探测到的错误写进 `reason`（`-rs` 能看到）。
+两者合起来是 **33 条**，`python scripts/ci_local.py --jobs quality` 就是因为这个才
+把"Postgres 可达"写成硬前置条件。
 如果你要写一个"真的调模型/真的加载模型"的测试，标 `@pytest.mark.slow`
 （`pyproject.toml` 的 markers 已声明 `integration` 与 `slow`，且开了 `--strict-markers`，
 **没声明的 mark 会直接失败**）。
@@ -129,7 +166,18 @@ P8：用例工厂 + 样本扩到 46 条 —— 多跳被**有统计意义地**�
    **把修正前后的数字都留在文档里**，并写清每条标注为什么改。
    只留修完之后的漂亮数字，等于把尺子调松了再宣称进步。
 2. **跨标注集/跨模型/跨语料的分数不可比**，闸门会拒绝比较（这是刻意的）。
-   改了问题、嵌入模型或索引规模，就必须重建基线：`make eval-baseline`。
+   语料这一条由 **`corpus_sha`**（文档路径 + 每文档块数的 sha256，两个后端都按
+   `ORDER BY rel_path` 迭代 ⇒ 确定性）**精确**判定：指纹不等即拒绝（退出码 2），
+   逃生口是 `--allow-corpus-drift`（放行但打印警告，不静默）。
+   > 此前它只被计算、写进报告、写进基线，**闸门里一次都没比较过**——实际把关的
+   > 只是 2% 的块数容差，于是容差之内的语料变化会被**静默**放过。
+   > 2026-10-14 实测踩到：重拉上游语料后文档 1720→1722、块数 18811→18822（+0.058%），
+   > 旧实现一声不响地通过了。**上游语料取自 `main`、没有钉版本**，所以这件事会反复发生。
+
+   改了问题、嵌入模型或**语料/索引规模**，就必须重建基线：`make eval-baseline`，
+   并照第 1 条**把前后数字都留档**（2026-10-14 那次重冻：`n_chunks` 18811→18822、
+   `n_docs` 1720→1722、`corpus_sha` `f6be8d65…`→`f9ffa225…`，
+   hit@10 0.8400 不变、mrr 0.5205→0.5239、ndcg 0.5469→0.5495）。
 3. **不许把 `hashing` 向量的分数当质量结论**（它只擅长字面重合）。
    质量结论必须用真实模型跑，并写清跑它的机器与耗时。
 4. **闸门绿 ≠ 什么都好**（但反过来说也成立：**闸门红 ≠ 一定是你改坏了**）。
@@ -143,6 +191,8 @@ P8：用例工厂 + 样本扩到 46 条 —— 多跳被**有统计意义地**�
    而非 0.84）。**这一条已在 2026-10-11 修好**：关键字路换成 ParadeDB `pg_search` 真 BM25 之后
    hit@10 = 0.8600、`--gate` 退出码 **0**，所以它现在**不再是红的**（见 ADR-0004 第十节）。
    而**默认后端**的 `cli eval --gate` 一直是绿的（本机实测 hit@10 = 0.8400、退出码 0）。
+   ⚠️ 2026-10-14 因为上游语料变动重冻过一次基线（见第 2 条与 CHANGELOG），
+   重冻前后 hit@10 都是 0.8400 —— 那是一次**口径**变更，不是把指标"修绿"。
 5. **没有实测就不要写数字。** 宁可写"未验证"，这一条比任何格式要求都重要。
 
 ---

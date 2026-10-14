@@ -40,6 +40,10 @@ SECURITY.md 顶部写着"所有结论都标了代码出处（`文件:行`），�
 里并写明理由，运行时打印条数。白名单**不是**免死金牌：每条都要给出 `expect`——
 锚点范围里必须出现的字符串，锚点一旦漂走它就会失败。**既校验不过、又不在白名单里
 ⇒ 非零退出。**
+白名单的键是 `(文档名, 锚点文本)`，**不含"引用所在的行号"**：位置不是身份，
+把行号放进键里只会让每次改文档都要手工重算（实测被这个绊过 4 次）。
+每条豁免还必须**真的被扫描命中**——`tests/unit/test_doc_refs.py` 会为此失败，
+所以陈旧条目不会静默留着。
 
 用法：
     python scripts/check_doc_refs.py              # 全仓文档
@@ -178,28 +182,35 @@ class White:
     expect: str | None = None
 
 
-WHITELIST: dict[tuple[str, int, str], White] = {
+WHITELIST: dict[tuple[str, str], White] = {
     # 只登记"整句里除锚点外没有任何源码标识符"的引用，而且每条都带 `expect`
     # （锚点漂走时它必须失败——白名单不是免死金牌）。
-    # 键里的行号是**引用所在的 SECURITY.md 行号**：改写文档会移动它，所以这几条
-    # 在重锚时同步更新过。
-    ("SECURITY.md", 30, ".gitignore:53-54"): White(
+    #
+    # ⚠️ 键是 `(文档名, 锚点文本)`，**刻意不含"引用所在的行号"**。
+    # 原先键是 `(文档名, 行号, 锚点文本)`，后果是：只要在文档**上方**插一行，
+    # 豁免就失效并报"锚点已漂移"，而真正防漂移的是 `expect`（它校验的是**目标文件**
+    # 在锚点处的内容）。行号在键里只贡献"每次改文档都要手工重算"——
+    # **本轮实测被这个机制拦下 4 次**，每次都是纯粹的重算开销，不是发现了真问题。
+    # 位置不是身份：键里去掉行号后，"改写被豁免的那句话"仍然会让它失效（因为锚点文本变了）。
+    # 安全性由 tests/unit/test_doc_refs.py 兜住：每条豁免都必须**真的被扫描命中**，
+    # 陈旧条目会直接测试失败，不会静默留着。
+    ("SECURITY.md", ".gitignore:53-54"): White(
         reason="这一句在说 clinic 卡片语料不入库，反引号里只有这个锚点",
         expect="clinic",
     ),
-    ("SECURITY.md", 168, "clinic_baseline.json:8"): White(
+    ("SECURITY.md", "clinic_baseline.json:8"): White(
         reason="markdown 表格行：单元格里只有指标名与数字、以及这个锚点，没有源码符号",
         expect='"recall"',
     ),
-    ("SECURITY.md", 169, "clinic_baseline.json:9"): White(
+    ("SECURITY.md", "clinic_baseline.json:9"): White(
         reason="同上（表格行，单元格里只有数字与锚点）",
         expect='"false_positive_rate"',
     ),
-    ("SECURITY.md", 170, "clinic_baseline.json:18"): White(
+    ("SECURITY.md", "clinic_baseline.json:18"): White(
         reason="同上（表格行，单元格里只有数字与锚点）",
         expect='"accuracy"',
     ),
-    ("SECURITY.md", 324, "docker-compose.yml:123"): White(
+    ("SECURITY.md", "docker-compose.yml:123"): White(
         reason="这一句在说端口映射，反引号里只有端口号与这个锚点",
         expect="8080:8080",
     ),
@@ -550,7 +561,7 @@ def check_paths(
     root: Path,
     docs: list[str],
     *,
-    whitelist: dict[tuple[str, int, str], White] | None = None,
+    whitelist: dict[tuple[str, str], White] | None = None,
     window: int = DEFAULT_WINDOW,
 ) -> Report:
     """校验 `root` 下这些文档（仓内相对路径）里的全部引用。"""
@@ -572,7 +583,7 @@ def check_paths(
 def _check_one(
     root: Path,
     anchor: Anchor,
-    whitelist: dict[tuple[str, int, str], White],
+    whitelist: dict[tuple[str, str], White],
     window: int,
     cache: dict[str, list[str]],
     index: list[str],
@@ -600,7 +611,7 @@ def _check_one(
             )
 
     detail = f"{where} -> {target}:{_format_ranges(anchor.ranges)}"
-    white = whitelist.get((anchor.doc, anchor.line, anchor.text))
+    white = whitelist.get((anchor.doc, anchor.text))
 
     # 白名单优先：这些引用的判据由人在表里写死（`expect`），机器不再自己抽标识符。
     # `expect` 是**强断言**——锚点漂走时它必须失败，否则白名单就成了免死金牌。
@@ -651,9 +662,11 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.whitelist:
         print(f"白名单 {len(WHITELIST)} 条：")
-        for (doc, line, text), white in sorted(WHITELIST.items()):
+        # 不打印行号：键里已经没有它，而打印一个"会漂移的位置"只会误导。
+        # 想知道它现在在哪一行，看正常输出里的 `SECURITY.md:<实际行号>`。
+        for (doc, text), white in sorted(WHITELIST.items()):
             expect = f"须含 {white.expect!r}" if white.expect else "**无内容断言**"
-            print(f"  - {doc}:{line} `{text}` [{expect}]：{white.reason}")
+            print(f"  - {doc} `{text}` [{expect}]：{white.reason}")
         return 0
 
     root = Path(args.root).resolve()

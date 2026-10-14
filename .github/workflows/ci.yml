@@ -14,11 +14,14 @@ name: CI
 # `cli eval --gate` 比较的是**冻结基线**，而基线绑定了嵌入模型
 # （data/eval/retrieval_baseline.json 的 embedding_model = BAAI/bge-small-en-v1.5）。
 # pipeline job 刻意用 hashing（不下载模型），索引里记的模型名会是 `hashing-384`：
-# 本机实测用 `--provider hashing` 建同一份 18861 块索引后跑 `eval --top-k 10 --gate` →
+# 本机实测用 `--provider hashing` 建索引后跑 `eval --top-k 10 --gate` →
 # 打印「嵌入模型变了（BAAI/bge-small-en-v1.5 -> hashing-384），向量空间不可比」，退出码 2；
 # 即使忽略这一关，hashing 的 hybrid hit@10 = 0.6200 也远低于基线的 0.8400。
 # 也就是说：把 `--gate` 加在 hashing 那一步上，CI 会**永远红**——那是假红，
 # 比没有闸门更糟（红着的门没人会再看）。所以闸门单独一个 job，用真实模型跑。
+#
+# ⚠️ 别在这里写死"当时是多少块"：块数随上游语料变动（实测 2026-10-14 重拉后
+#    文档 1720→1722、块数 18811→18822），写死的数字会腐烂，而腐烂的注释会被当成现状。
 
 on:
   push:
@@ -36,8 +39,9 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     # 需要真实 Postgres 的用例此前在 CI 里一直是 skip 的——"测过"与"没测"在日志里长得一样。
-    # 起了这条 service 之后它们必须真跑（本机对照：库不可达 706 passed/61 skipped；
-    # 库可达 736 passed/49 skipped，少掉的 12 条正是 test_pgvector_store.py）。
+    # 起了这条 service 之后它们必须真跑。
+    # 判据用**数量关系**而不是写死的通过数（那个数会随用例增删而腐烂）：
+    #   `pytest -rs` 的汇总里，Postgres 可达时**不该出现** pgvector 那一族的 skip。
     # 另外两条容易被忽略的事实：
     #   · tests/unit/test_store_contract.py 的 `pgvector` 参数在库不可达时**根本不出现在参数化里**
     #     （不是 skip，是"悄悄消失"，见该文件顶部注释）——那 18 条用例同样以这条 service 为前提；
@@ -45,7 +49,7 @@ jobs:
     #     PgVectorStore._ensure_schema() 建（service 的 POSTGRES_USER 在官方镜像里是超级用户）。
     #   · **镜像必须是带 pg_search 的那个**（2026-10-11 换）：pgvector 后端的关键字路已从
     #     ts_rank 换成 pg_search 的真 BM25，不带 pg_search 的镜像会让 _setup_fts() 走
-    #     DEGRADED 分支——那样这 30 条 pgvector 用例测的是降级路，不是产品路。
+    #     DEGRADED 分支——那样这 18+15 条 pgvector 用例测的是降级路，不是产品路。
     #     这里**不需要**额外的 -c：service 每次都是全新 initdb，而 ParadeDB 镜像的
     #     postgresql.conf.sample 里已经写了 `shared_preload_libraries='pg_search,...'`（实测）。
     #     沿用已有数据目录的场景（compose 里那份）才必须显式传，见 docker-compose.yml。
@@ -82,11 +86,14 @@ jobs:
       # 会把 "N passed" 汇总行一起吞掉（CI 日志里就看不到实际通过数了）。
       # `-p no:cacheprovider` 与 `make test`、CONTRIBUTING.md 的命令保持一致（CI 不需要缓存）。
       # `-rs` 让每条 skip 的**原因**进日志。可接受的 skip **只有**下面这一族，别的一律算回归：
-      #   · milvus，49 条 = test_milvus_store.py 29 + test_store_contract.py 的 milvus 参数 18
-      #     + test_store_backend.py 2。理由是 `pymilvus` / `milvus-lite` 属**可选**依赖，
+      #   · milvus 那一族 = `test_milvus_store.py` 整文件 + `test_store_contract.py` 的
+      #     `milvus` 参数 + `test_store_backend.py` 里引用 milvus 的用例。
+      #     **故意不写具体条数**：这个数每次增删用例都会变，而腐烂的数字会被当成现状
+      #     （本仓库已吃过两次亏）。要看实际条数就读 `-rs` 汇总，别读注释。
+      #     理由是 `pymilvus` / `milvus-lite` 属**可选**依赖，
       #     pyproject.toml 没有声明、CI 也就不装（它们是本地文件模式，不需要服务端）。
       #     真要在 CI 里跑，就得在这里显式 `pip install "pymilvus>=2.5" "milvus-lite>=2.4"`。
-      #   · **Postgres 曾在这一族里（12 条），现在不在**：有 service 了，它们必须真跑。
+      #   · **Postgres 曾在这一族里，现在不在**：有 service 了，它们必须真跑。
       - name: 单元测试（含需要真实 Postgres 的用例）
         run: pytest tests/unit -p no:cacheprovider -rs
       - name: ruff（阻塞）
@@ -153,9 +160,10 @@ jobs:
     name: 检索质量闸门（真实模型 + 冻结基线）
     runs-on: ubuntu-latest
     needs: [quality]
-    # 缓存未命中时要装 torch、下 bge-small、真的编码 18861 块（本机 i7-13700H 实测
+    # 缓存未命中时要装 torch、下 bge-small、真的把上万块全部编码（本机 i7-13700H 实测
     # 全量摄取约 35 分钟，见 README「实测数字」/ ADR-0002）；runner 更慢，所以给足上限。
     # 命中缓存后这一步只剩评测本身（分钟级）。
+    # ⚠️ 这里**故意不写死块数**：它随上游语料变动（2026-10-14 实测 18811 → 18822）。
     timeout-minutes: 120
     env:
       # 冻结基线绑定的是真实嵌入模型；hashing 的分数与它不可比（见文件顶部注释）。
@@ -175,8 +183,10 @@ jobs:
           key: hf-${{ runner.os }}-bge-small-en-v1.5
 
       # 语料与索引**一起缓存、同一个键**：它俩共同构成"冻结基线口径"的可复现载体
-      # （基线绑定了 n_chunks=18861 与 embedding_model，语料一变块数就变，闸门会正确地
+      # （基线绑定了 `corpus_sha` 与 `embedding_model`；语料一变指纹就变，闸门会正确地
       # 拒绝比较——ADR-0002 说的问题正是这个，所以把口径钉在缓存里而不是每次重拉 main）。
+      # ⚠️ **上游语料取自 `main`、没有钉版本**，所以"每次重拉"必然漂移；这个缓存键
+      # 是 CI 侧的唯一防线，而本地没有等价保护（本地重拉就会改变指纹并（正确地）让闸门变红）。
       # 键里**只有**切块/嵌入/标注集，故意**不含** retrieve/ 与 store/：那两处正是闸门要守的
       # 东西，把它们放进键里会让缓存每次都失效、每个 PR 都重编码 35 分钟，等于用缓存把闸门绕过去。
       # 改了切块/嵌入/标注集 → 键变 → 重建；那种情况下基线本来就该重新冻结（CONTRIBUTING 第 5 节）。
@@ -203,14 +213,17 @@ jobs:
       # 这里**不**把索引灌进 pgvector（`python scripts/load_pgvector.py --index-dir data/index
       # --domain k8s_docs`）：那要给本 job 再起一条 Postgres service，并且每次 run 都得把
       # 1.9 万块重灌一遍（分钟级 → 十分钟级），而它验证的是"镜像完整性"、与质量闸门无关。
-      # 生产后端的**契约**已由 quality job 里那 30 条 pgvector 用例覆盖（test_pgvector_store.py
-      # 12 条 + test_store_contract.py 的 pgvector 参数 18 条）。pgvector 的**指标**对照冻结基线
+      # 生产后端的**契约**已由 quality job 里那一族 pgvector 用例覆盖（`test_pgvector_store.py`
+      # 整文件 + `test_store_contract.py` 的 `pgvector` 参数；**不写死条数**，理由同 quality job）。
+      # pgvector 的**指标**对照冻结基线
       # **已经不是红的**：2026-10-11 关键字路换成 pg_search 真 BM25 后 hit@10 = 0.8600、退出码 0
       # （ADR-0004 第十节）。这里仍然**不**把 pgvector 灌进这个 job——那要给本 job 再起一条
-      # Postgres service 并每次重灌 1.9 万块，而它验证的是镜像完整性、与质量闸门无关。
+      # Postgres service 并每次重灌上万块，而它验证的是镜像完整性、与质量闸门无关。
       - name: 质量闸门（指标退化 → 退出码 2 → CI 红）
-        # 比 hit@10 / mrr@10（容差各 0.02），并拒绝跨标注集/跨模型/跨语料的比较。
+        # 比 hit@10 / mrr@10（容差各 0.02），并拒绝跨标注集/跨模型/跨语料的比较：
+        # 语料身份由 `corpus_sha` 精确判定（逃生口 `--allow-corpus-drift`），不再是
+        # "块数差得不多就照比"——那个近似曾让 +0.058% 的语料漂移**静默通过**（2026-10-14 实测）。
         # 本机实测（同一份冻结索引）：`eval --top-k 10 --gate` → hybrid hit@10 = 0.8400，退出码 0。
         # 负例（闸门真的会红）：`eval --top-k 20 --gate`（拿 hit@20 去比基线的 hit@10）→ 退出码 2；
-        # 缺字段的旧格式基线（没有 top_k）同样退出码 2——**缺字段不等于"不用比"**。
+        # 缺字段的旧格式基线（没有 top_k / corpus_sha）同样退出码 2——**缺字段不等于"不用比"**。
         run: python -m kubedocs.cli eval --top-k 10 --gate

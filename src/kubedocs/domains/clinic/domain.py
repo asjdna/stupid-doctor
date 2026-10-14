@@ -174,10 +174,18 @@ class ClinicPack:
         return [make_search_tool(None, domain=self.name), make_citation_check_tool()]
 
     def eval_sets(self) -> list[Path]:
-        # **刻意返回空**：clinic 的金标集要在 P4 与 A/B 对照一起建（需要
-        # "查询 -> 期望科室/期望红线判定"的标注，且 self-ask 与单轮的对照要跑真实 LLM）。
-        # 在集子建好之前声明一个不存在的路径，只会让 `domains` 自省输出一个
-        # 看起来存在、实则没有的评测承诺。
+        """**刻意返回空**——但理由与原先写的不一样了，如实更正：
+
+        原注释说"clinic 的金标集要在 P4 才建"。现在 `data/eval/clinic_gold.jsonl`
+        （37 条）与 `data/eval/clinic_baseline.json` **都已经存在**，`scripts/eval_clinic.py --gate`
+        也在跑（当前红，退出码 2，原因见 SECURITY.md S-4）。
+
+        仍然在这里返回空，是因为这个字段的语义是"**`cli eval` 那套检索金标**"，
+        而 clinic 的金标是另一种形状（`查询 -> 期望科室/期望红线判定`），
+        由 `scripts/eval_clinic.py` 直接按路径读，**不走这个协议字段**。
+        把一个形状不同的文件挂在这里，等于让 `domains` 输出一个
+        "看起来能 `cli eval`、实则不行"的承诺——那正是本字段要防的事。
+        """
         return []
 
     def triage_links(

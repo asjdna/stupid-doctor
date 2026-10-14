@@ -113,6 +113,7 @@ def _base(**kw) -> dict:
     base = {
         "schema": BASELINE_SCHEMA,
         "gold_sha256": "abc",
+        "corpus_sha": "c0ffee",
         "embedding_model": "m1",
         "n_chunks": 1000,
         "top_k": 10,
@@ -125,6 +126,7 @@ def _base(**kw) -> dict:
 def _current(**kw) -> dict:
     cur = {
         "gold_sha256": "abc",
+        "corpus_sha": "c0ffee",
         "embedding_model": "m1",
         "n_chunks": 1000,
         "top_k": 10,
@@ -175,6 +177,28 @@ class TestGate:
     def test_same_top_k_still_passes(self):
         """上一条不能把正常路径一起打死。"""
         assert _hard(check_gate(_base(), _current(top_k=10), allow_drift=False)) == []
+
+    def test_corpus_sha_change_refuses_comparison(self):
+        """**核心回归**：语料换了就必须拒绝，而不是"块数差得不多所以照比"。
+
+        修之前 `corpus_sha` 只被计算与落盘、从未被比较，实际把关的只是 2% 的块数容差；
+        实测（2026-10-14）重拉上游语料后文档 1720→1722、块数 18811→18822（+0.058%），
+        落在容差内 ⇒ **静默通过、一个字都不打印**，而文档却声称闸门会拒绝跨语料比较。
+        """
+        fails = _hard(check_gate(_base(), _current(corpus_sha="deadbeef"), allow_drift=False))
+        assert any("语料指纹变了" in f for f in fails)
+
+    def test_corpus_sha_change_allowed_with_flag_but_warns(self):
+        """逃生口仍然存在，但必须留下痕迹（而不是静默）。"""
+        fails = check_gate(_base(), _current(corpus_sha="deadbeef"), allow_drift=True)
+        assert _hard(fails) == []
+        assert any(f.startswith("警告") and "语料指纹" in f for f in fails)
+
+    def test_corpus_sha_mismatch_is_detected_even_when_chunk_count_is_close(self):
+        """**这就是那条静默路径**：块数只差一点点（容差内），指纹仍然必须拦住它。"""
+        cur = _current(corpus_sha="deadbeef", n_chunks=1002)  # +0.2%，远在 2% 容差内
+        fails = _hard(check_gate(_base(), cur, allow_drift=False))
+        assert any("语料指纹变了" in f for f in fails), "容差内的语料变化被静默放过了"
 
     def test_corpus_drift_refused_by_default(self):
         fails = _hard(check_gate(_base(), _current(n_chunks=2000), allow_drift=False))

@@ -319,7 +319,7 @@ class TestUnverifiableRefsNeedTheWhitelist:
         _write(tmp_path, "docs/security.md", self._doc())
         _write(tmp_path, "svc/alpha.py", "# 本文件尚未在本机实测。\n")
         table = {
-            ("docs/security.md", 3, "svc/alpha.py:1"): script.White(
+            ("docs/security.md", "svc/alpha.py:1"): script.White(
                 reason="散文里只有这个锚点，没有任何符号名", expect="尚未在本机实测"
             )
         }
@@ -331,6 +331,26 @@ class TestUnverifiableRefsNeedTheWhitelist:
         assert report.whitelisted[0].matched == "尚未在本机实测"
         assert "散文里只有这个锚点" in report.whitelisted[0].detail
 
+    def test_whitelist_survives_lines_inserted_above_it(self, script: ModuleType, tmp_path: Path) -> None:
+        """**核心回归**：在文档上方插行不该让豁免失效。
+
+        键里原先带"引用所在的行号"，于是任何在上方插入内容的编辑都会让豁免失效并报
+        "锚点已漂移" —— 而真正防漂移的是 `expect`（它校验**目标文件**在锚点处的内容）。
+        实测被这个机制拦下 4 次，每次都是纯重算开销。位置不是身份。
+        """
+        _write(tmp_path, "docs/security.md", self._doc())
+        _write(tmp_path, "svc/alpha.py", "# 本文件尚未在本机实测。\n")
+        table = {("docs/security.md", "svc/alpha.py:1"): script.White(reason="同上", expect="尚未在本机实测")}
+
+        before = script.check_paths(tmp_path, ["docs/security.md"], whitelist=table)
+        # 在引用上方插入若干行：引用被推到更靠下的行号
+        _write(tmp_path, "docs/security.md", "新的一行。\n\n又一行。\n" + self._doc())
+        after = script.check_paths(tmp_path, ["docs/security.md"], whitelist=table)
+
+        assert [f.status for f in before.findings] == ["white"]
+        assert [f.status for f in after.findings] == ["white"], "上方插行让豁免失效了（键里还有行号？）"
+        assert not after.failures
+
     def test_whitelist_is_not_a_free_pass_when_its_expectation_drifts(
         self, script: ModuleType, tmp_path: Path
     ) -> None:
@@ -338,9 +358,7 @@ class TestUnverifiableRefsNeedTheWhitelist:
         `expect` 一旦在锚点范围里找不到，仍然必须红。"""
         _write(tmp_path, "docs/security.md", self._doc())
         _write(tmp_path, "svc/alpha.py", "# 完全无关的一行。\n")
-        table = {
-            ("docs/security.md", 3, "svc/alpha.py:1"): script.White(reason="同上", expect="尚未在本机实测")
-        }
+        table = {("docs/security.md", "svc/alpha.py:1"): script.White(reason="同上", expect="尚未在本机实测")}
 
         report = script.check_paths(tmp_path, ["docs/security.md"], whitelist=table)
 

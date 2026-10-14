@@ -37,7 +37,13 @@ BASELINE_SCHEMA = 1
 # 太松则失去意义。2 个百分点对 40+ 条标注集是"约 1 条查询"的量级。
 GATE_TOL_HIT = 0.02
 GATE_TOL_MRR = 0.02
-CORPUS_DRIFT_TOL = 0.02  # 索引块数变化超过 2% 视为换了语料
+CORPUS_DRIFT_TOL = 0.02
+"""块数变化的粗判阈值。
+
+**它现在是次要判据**：语料身份由 `corpus_sha`（`(rel_path, n_chunks)` 的 sha256）
+精确判定，两者不等就直接拒绝比较。这个阈值只在**已经用 `--allow-corpus-drift`
+放行**之后才起作用，用来把"变了多少"写进输出——它单独存在时是近似的
+（容差之内的语料变化会被静默放过，实测踩过），所以不要再把它当主判据。"""
 
 KINDS = ("identifier", "paraphrase", "concept")
 MODES: dict[str, tuple[str, ...]] = {
@@ -212,7 +218,7 @@ def check_gate(base: dict, current: dict, *, allow_drift: bool) -> list[str]:
     # 实现却让它依赖"基线恰好带了这个字段"。**缺字段 = 不可比，不是"不用比"。**
     missing = [
         key
-        for key in ("schema", "gold_sha256", "embedding_model", "top_k", "n_chunks", "metrics")
+        for key in ("schema", "gold_sha256", "corpus_sha", "embedding_model", "top_k", "n_chunks", "metrics")
         if key not in base
     ]
     if missing:
@@ -248,6 +254,27 @@ def check_gate(base: dict, current: dict, *, allow_drift: bool) -> list[str]:
         return fails
     b_chunks = int(base["n_chunks"])
     c_chunks = int(current["n_chunks"])
+    # ---- 语料身份：**精确**判据，优先于下面的块数容差 ----
+    #
+    # `_corpus_fingerprint()` 的 docstring 一直写着"用于判断两次评测是否同一批数据"，
+    # 但它此前**只被计算、落盘，从未被比较**：报告里有、基线里有，闸门里没有。
+    # 于是文档（CONTRIBUTING 第 5 节、ci.yml 的 gate job 注释）声称的"拒绝跨语料比较"
+    # 实际上只是靠下面那条 2% 的块数容差近似，而容差之内的语料变化**一个字都不打印**。
+    #
+    # 实测触发（2026-10-14）：重拉上游语料后文档 1720 -> 1722、块数 18811 -> 18822
+    # （+0.058%），旧实现落在容差内 ⇒ 静默通过，而"索引已经不是基线那一批数据"
+    # 这件事在输出里完全看不到。指纹是 (rel_path, n_chunks) 的 sha256，
+    # 两个后端都按 `ORDER BY rel_path` 迭代（确定性），所以它可以直接当判据。
+    if str(base["corpus_sha"]) != str(current["corpus_sha"]):
+        msg = (
+            f"语料指纹变了（corpus_sha {base['corpus_sha']} -> {current['corpus_sha']}）："
+            f"文档/块数 {base['n_chunks']} -> {current['n_chunks']}，跨语料的分数不可比"
+        )
+        if not allow_drift:
+            fails.append(msg + "；确认无误后加 --allow-corpus-drift")
+            return fails
+        fails.append("警告(已用 --allow-corpus-drift 放行)：" + msg)
+
     if abs(c_chunks - b_chunks) / b_chunks > CORPUS_DRIFT_TOL:
         msg = (
             f"索引规模变化 {(c_chunks - b_chunks) / b_chunks:+.1%}"

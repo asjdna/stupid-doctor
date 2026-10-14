@@ -89,7 +89,13 @@ class DomainPack(Protocol):
         """
 
     def eval_sets(self) -> list[Path]:
-        """该域的金标集路径（相对仓库根）。内核据此跑评测与闸门。"""
+        """该域声明的金标集路径（相对仓库根）。
+
+        **它只被"自省"消费**：`cli domains` 的打印与 `/domains` 的响应
+        （`base.py` 的 `describe()`）。这里原先写的是"内核据此跑评测与闸门"，
+        但全仓没有任何一行评测代码读它——`cli eval` 走的是显式路径参数
+        （`cli.py` 的 `eval` 子命令）。所以别把"声明了金标集"当成"闸门会跑它"。
+        """
 
 
 class DomainRegistry:

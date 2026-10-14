@@ -269,7 +269,8 @@
 | **号源归属来自调用方** | `patient_id` 经 `context=` 注入执行体，**不在工具 schema 里**（模型无法伪造） | `agent/tool_loop.py:489`、`agent/clinic_react.py:226` |
 | 存储层故障降级 | 向量路不可用时（嵌入**或**存储抛错）退化为纯全文并记录原因，不再把 `StoreError` 直接抛给用户 | `retrieve/hybrid.py:131` |
 | **向量与块行错位不可静默存在** | `_reload_index` 校验 `vector_row` 连续性与矩阵行数，不一致就大声失败（成因通常是"纯删除的一轮 ingest 没调 `finalize()`"） | `store/sqlite_store.py:281`、`ingest.py:222` |
-| **评测闸门缺字段 = 拒绝比较** | 基线缺 `top_k`/`n_chunks`/`metrics`/`gold_sha256`/`embedding_model`/`schema` 任一即拒绝，不再"缺了就跳过校验"（那正是 `top_k` 假绿洞的成因） | `evaluation/harness.py:202-213` |
+| **评测闸门缺字段 = 拒绝比较** | 基线缺 `top_k`/`n_chunks`/`corpus_sha`/`metrics`/`gold_sha256`/`embedding_model`/`schema` 任一即拒绝，不再"缺了就跳过校验"（那正是 `top_k` 假绿洞的成因） | `evaluation/harness.py:219-227` |
+| **跨语料比较被精确拦住** | `corpus_sha`（`(rel_path, n_chunks)` 的 sha256，两个后端都按 `ORDER BY rel_path` 迭代 ⇒ 确定性）不等即拒绝，逃生口是 `--allow-corpus-drift`（放行但留警告）。此前它**只被计算与落盘、从未被比较**，实际把关的只是 2% 的块数容差 ⇒ 容差内的语料变化被**静默**放过（实测踩过：+0.058%） | `evaluation/harness.py:268-278`、`harness.py:461` 的 `_corpus_fingerprint` |
 | 请求体越界 / 未知字段 | pydantic 校验，越界 422、`extra="forbid"` | `api/schemas.py` |
 | 工具同名冲突 | 注册表（`registry`）按名索引，重名直接报错而不是静默覆盖 | `agent/tool_loop.py:289-290` |
 | 副作用工具默认行为 | **默认拒绝执行**，不是默认执行后再回滚（见 `_confirm_side_effect`） | `agent/tool_loop.py:460` |
@@ -364,11 +365,25 @@
   这条红**没有被"修绿"**。
 - **多副本下的 LLM 花费上限未验证**：跨进程账本仍未原子（S-2），
   当前部署形态是单进程所以不生效，但**没有实测过多副本**。
-- **pgvector 的集成测试已重跑**（2026-10-13，Docker 起来之后）：`test_pgvector_store.py`
-  + `test_store_contract.py` 的 pgvector 参数 **90 passed / 0 skipped**（不再有 skip）。
-  同一天把当前本地索引（18811 块）重灌进 pgvector：全文/向量自检都 ok、抽样 200 块向量
+- **pgvector 的集成测试已重跑**（2026-10-13 起，Docker 可达时）：`test_pgvector_store.py`
+  **15 条** + `test_store_contract.py` 的 pgvector 参数 **18 条**，合起来
+  **33 passed / 0 skipped**（命令：`pytest tests/unit/test_pgvector_store.py tests/unit/test_store_contract.py -k "pgvector or not (sqlite or milvus)"`）。
+  此处原先写的是"**90 passed / 0 skipped**"——那个数字与任何一次可复现的命令都对不上，
+  已更正。注意这 18 条在库不可达时**不是 skip，而是从参数化里消失**，
+  所以"0 skipped"本身不足以证明它们跑过，要看收集到的条数。
+  同一天把当前本地索引重灌进 pgvector：全文/向量自检都 ok、抽样 200 块向量
   **逐位一致**、字符总数两边相同，`cli --store pgvector eval --top-k 10 --gate`
   **退出码 0**（hybrid hit@10 0.8600 ≥ 冻结基线 0.8400）。
 - **多副本 / 容器化下的 LLM 花费上限仍未实测**（与上一条的多进程限制同源）。
+- **上游语料没有钉版本**（新增，2026-10-14 实测暴露）：`scripts/fetch_corpus.py` 从
+  codeload 取 `main` 的 tarball，**不记录 commit / 不校验摘要**。于是"照文档重跑一遍"
+  会得到**不同**的语料：实测 2026-10-14 重拉后文档 1720→1722、块数 18811→18822
+  （`corpus_sha` `f6be8d65…`→`f9ffa225…`）。后果与缓解：
+  · 评测的**可比性**已由 `corpus_sha` 精确把关（不等即拒绝，`--allow-corpus-drift` 才放行），
+    所以这条**不会**再静默污染指标比较；
+  · 但"复现某一次的分数"需要那份语料本身，而它没有可寻址的标识——**这一点仍未解决**。
+    想彻底解决就得钉上游 commit 或把语料摘要写进仓库并在抓取时校验。
+- **PG / 语料之外，评测链路已无"静默"环节**：闸门缺字段拒绝、跨语料指纹拒绝、
+  超预算拒绝、向量与块行错位大声失败（详见第 3 节）——**唯一剩下的静默面就是上面这条语料来源**。
 - 依赖的 PyPI 可达性与 CVE 状态**未测**。
 - 没有做过任何渗透测试、模糊测试或负载测试。
