@@ -40,9 +40,9 @@
 
 ### S-1 全部 HTTP 端点无认证、无鉴权（严重，未修复）
 
-`src/kubedocs/api/app.py` 的 8 个端点全部没有认证：`GET /healthz`、`GET /metrics`、
-`GET /domains`、`GET /tools`、`POST /search`、`POST /ask`、`POST /chat`、`GET /`
-（`api/app.py:636-748`）。
+`src/kubedocs/api/app.py` 的 9 个端点全部没有认证：`GET /healthz`、`GET /metrics`、
+`GET /domains`、`GET /tools`、`POST /search`、`POST /ask`、`POST /chat`、`GET /`、
+`GET /console`（`api/app.py:649-763`）。
 
 代码可核的"没有"：全仓 `src/` 下搜不到 `CORSMiddleware` / `TrustedHostMiddleware`，
 也搜不到任何 `Depends(...)` 形式的凭据校验（唯一的中间件是观测用的
