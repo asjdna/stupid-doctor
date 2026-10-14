@@ -1,0 +1,15 @@
+{
+  "base_url": "http://127.0.0.1:8082",
+  "endpoint": "/search",
+  "method": "POST",
+  "payload": {
+    "q": "how do I stop a container using too much memory",
+    "top_k": 10
+  },
+  "levels": [],
+  "cold": {
+    "ready_s": 0.03286130000196863,
+    "first_request_ms": 25466.91550000105,
+    "ok": true
+  }
+}

@@ -124,6 +124,9 @@ CONSOLE_HTML = ("data", "web", "console.html")
 两者共用同一套设计令牌，视觉上是一家的，但职责不同、可以各自演进。
 """
 
+STATS_TTL_S = 2.0
+"""`_DomainRuntime.stats()` 的缓存有效期（秒）。取值理由见该方法 docstring。"""
+
 
 # ===========================================================================
 # 运行期资源：一个域一份，只构造一次
@@ -144,6 +147,10 @@ class _DomainRuntime:
         # 惰性构造持锁：同步端点跑在线程池里，两个并发请求不该各自构造一遍
         # 嵌入器（bge 那一次就够贵了），也不该各自开一个回答器（会重复读预算文件）
         self._lock = threading.Lock()
+        # 统计缓存：见 `stats()` 的 docstring（探针与检索热路径共用这条）
+        self._stats_cache: StoreStats | None = None
+        self._stats_at = 0.0
+        self._stats_lock = threading.Lock()
         try:
             self.store: Store | None = from_settings(settings)
         except (StoreError, sqlite3.Error, OSError) as e:
@@ -152,16 +159,49 @@ class _DomainRuntime:
             self.index_error = f"{type(e).__name__}: {e}"
 
     # ------------------------------------------------------------------ 只读
-    def stats(self) -> StoreStats | None:
-        """取索引统计；索引不可用或库读坏了都返回 None（不让探针 500）。"""
+    def stats(self, *, max_age_s: float = STATS_TTL_S) -> StoreStats | None:
+        """取索引统计（**带短 TTL 缓存**）；索引不可用或库读坏了都返回 None。
+
+        ## 为什么必须缓存（这是实测出来的性能缺陷，不是优化洁癖）
+
+        `StoreStats` 里有一个 `n_with_code`，SQLite 侧是用
+        `SELECT COUNT(*) FROM chunks WHERE body LIKE '%```%'` 算的 ——
+        **18822 行大文本列的全表扫描**。实测（store 自己的连接、同一口径）：
+
+        | 查询 | ms/次 |
+        |---|---|
+        | `COUNT(documents)` | 0.01 |
+        | `COUNT + SUM(n_chars)` | 3.94 |
+        | `COUNT WHERE body LIKE '%```%'` | **17.31** |
+        | `SELECT meta` | 0.01 |
+        | **`stats()` 合计** | **24.40** |
+
+        而 `/healthz` **每个请求**都走 `n_chunks()` → `stats()`，`/search` 也会
+        （`_index_note` 只为拼一句提示），并且整段都在 store 的 `threading.Lock` 里。
+        后果实测：本地直跑 `/healthz` 的吞吐被硬卡在 **≈19.6 req/s**，
+        并发从 1 升到 16 时 p50 从 54.6 ms 线性涨到 802 ms（**并发完全没有收益**）——
+        典型的"每个请求都要过一次 20ms 串行临界区"。
+
+        TTL 取 2 秒的取舍：探针间隔是 10 s（compose 的 healthcheck），所以探针看到的
+        仍是"最多 2 秒前"的真实状态；代价是"索引刚坏掉"到"探针报错"之间最多差 2 秒。
+        **这个取舍是显式的**：要即时值就传 `max_age_s=0`（CLI `stats` 走的是 store 直连，
+        不经过这里，所以 `cli stats --verify` 的语义一个字都没变）。
+        """
         if self.store is None:
             return None
-        try:
-            return self.store.stats()
-        except (StoreError, sqlite3.Error, OSError) as e:
-            self.index_error = f"{type(e).__name__}: {e}"
-            logger.warning("读索引统计失败：%s", self.index_error)
-            return None
+        now = time.monotonic()
+        with self._stats_lock:
+            if self._stats_cache is not None and (now - self._stats_at) < max_age_s:
+                return self._stats_cache
+            try:
+                fresh = self.store.stats()
+            except (StoreError, sqlite3.Error, OSError) as e:
+                self.index_error = f"{type(e).__name__}: {e}"
+                logger.warning("读索引统计失败：%s", self.index_error)
+                return None
+            self._stats_cache = fresh
+            self._stats_at = now
+            return fresh
 
     def n_chunks(self) -> int:
         st = self.stats()

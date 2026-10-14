@@ -1,0 +1,67 @@
+{
+  "base_url": "http://127.0.0.1:8082",
+  "endpoint": "/search",
+  "method": "POST",
+  "payload": {
+    "q": "how do I stop a container using too much memory",
+    "top_k": 10
+  },
+  "levels": [
+    {
+      "concurrency": 1,
+      "requests": 32,
+      "ok": 32,
+      "err": 0,
+      "throughput_per_s": 12.22,
+      "p50_ms": 82.2,
+      "p95_ms": 84.5,
+      "p99_ms": 85.4,
+      "mean_ms": 81.7,
+      "server_p50_ms_bucket": 100.0,
+      "server_p95_ms_bucket": 100.0
+    },
+    {
+      "concurrency": 2,
+      "requests": 32,
+      "ok": 32,
+      "err": 0,
+      "throughput_per_s": 14.13,
+      "p50_ms": 133.0,
+      "p95_ms": 195.2,
+      "p99_ms": 195.9,
+      "mean_ms": 141.3,
+      "server_p50_ms_bucket": 250.0,
+      "server_p95_ms_bucket": 250.0
+    },
+    {
+      "concurrency": 4,
+      "requests": 32,
+      "ok": 32,
+      "err": 0,
+      "throughput_per_s": 14.27,
+      "p50_ms": 273.7,
+      "p95_ms": 350.0,
+      "p99_ms": 351.4,
+      "mean_ms": 274.2,
+      "server_p50_ms_bucket": 500.0,
+      "server_p95_ms_bucket": 500.0
+    },
+    {
+      "concurrency": 8,
+      "requests": 32,
+      "ok": 32,
+      "err": 0,
+      "throughput_per_s": 13.27,
+      "p50_ms": 597.8,
+      "p95_ms": 773.1,
+      "p99_ms": 808.7,
+      "mean_ms": 578.3,
+      "server_p50_ms_bucket": 750.0,
+      "server_p95_ms_bucket": 1000.0
+    }
+  ],
+  "server_side": {
+    "requests_total_delta": 144,
+    "non_2xx_delta": 0
+  }
+}

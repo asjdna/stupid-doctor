@@ -281,12 +281,18 @@ class SqliteStore:
                 f"索引不一致：{len(rows)} 个块的 vector_row 不是连续的 0..{len(rows) - 1}"
                 f"（实际 {min(rows) if rows else '-'}..{max(rows) if rows else '-'}）。"
                 "成因通常是**删除文档后没有调用 finalize()**（纯删除的一轮 ingest 曾漏掉它）。"
-                "向量与块已经错位，继续查询会返回错误内容，请重建：`kubedocs ingest --rebuild`"
+                "向量与块已经错位，继续查询会返回错误内容。\n"
+                "⚠️ 重建时**必须指定同一个后端**：`vector_row` 与 `chunk_vectors.npy` 是 "
+                "`sqlite` 后端独有的，**`sqlite-vec` / `pgvector` / `milvus` 后端不维护它们**"
+                "（在那些后端上这一列是 -1，本后端因此打不开）。所以「照默认重建」会原样再失败：\n"
+                "    kubedocs --store sqlite ingest --rebuild      # 要读这份索引就得用 sqlite 后端重建\n"
+                "    # 或者：继续用 sqlite-vec/pgvector，改回对应后端即可（那份数据本来就是它们的）"
             )
         if mat.shape[0] != len(rows):
             raise StoreError(
                 f"索引不一致：向量矩阵有 {mat.shape[0]} 行，chunks 表有 {len(rows)} 行。"
-                "成因通常是删除文档后没有调用 finalize()。请重建：`kubedocs ingest --rebuild`"
+                "成因通常是删除文档后没有调用 finalize()。"
+                "重建时要指定同一个后端：`kubedocs --store sqlite ingest --rebuild`"
             )
         self._matrix: np.ndarray = np.ascontiguousarray(mat, dtype=np.float32)
 

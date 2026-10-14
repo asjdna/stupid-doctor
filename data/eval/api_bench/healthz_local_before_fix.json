@@ -1,0 +1,54 @@
+{
+  "base_url": "http://127.0.0.1:8082",
+  "endpoint": "/healthz",
+  "method": "GET",
+  "payload": {
+    "q": "how do I stop a container using too much memory",
+    "top_k": 10
+  },
+  "levels": [
+    {
+      "concurrency": 1,
+      "requests": 64,
+      "ok": 64,
+      "err": 0,
+      "throughput_per_s": 19.04,
+      "p50_ms": 54.6,
+      "p95_ms": 63.3,
+      "p99_ms": 90.7,
+      "mean_ms": 52.5,
+      "server_p50_ms_bucket": 75.0,
+      "server_p95_ms_bucket": 75.0
+    },
+    {
+      "concurrency": 8,
+      "requests": 64,
+      "ok": 64,
+      "err": 0,
+      "throughput_per_s": 19.24,
+      "p50_ms": 415.5,
+      "p95_ms": 428.5,
+      "p99_ms": 431.4,
+      "mean_ms": 391.9,
+      "server_p50_ms_bucket": 500.0,
+      "server_p95_ms_bucket": 500.0
+    },
+    {
+      "concurrency": 16,
+      "requests": 64,
+      "ok": 64,
+      "err": 0,
+      "throughput_per_s": 19.56,
+      "p50_ms": 802.2,
+      "p95_ms": 831.2,
+      "p99_ms": 834.0,
+      "mean_ms": 717.9,
+      "server_p50_ms_bucket": 1000.0,
+      "server_p95_ms_bucket": 1000.0
+    }
+  ],
+  "server_side": {
+    "requests_total_delta": 216,
+    "non_2xx_delta": 0
+  }
+}

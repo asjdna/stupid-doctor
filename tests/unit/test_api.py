@@ -17,6 +17,7 @@ import json
 import time
 from collections.abc import Iterator
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -491,6 +492,77 @@ class TestIndexPage:
 
         assert resp.status_code == 200
         assert STARTUP_PAGE in resp.text
+
+
+class TestStatsCache:
+    """`_DomainRuntime.stats()` 的短 TTL 缓存。
+
+    回归的是一个**实测出来的性能缺陷**：`stats()` 里那条
+    `COUNT(*) FROM chunks WHERE body LIKE '%```%'` 是 18822 行大文本列的全表扫描
+    （本机实测 17.3 ms，占 `stats()` 的 24.4 ms 里的绝大部分），而 `/healthz`
+    **每个请求**都走它、`/search` 也会走（`_index_note`），且全程持 store 锁。
+    实测后果：本地直跑 `/healthz` 吞吐被硬卡在 ≈19.6 req/s，并发 1→16 时
+    p50 从 54.6 ms 线性涨到 802 ms（并发毫无收益）。
+    """
+
+    def _runtime_with_counting_store(self, api_settings: Settings) -> tuple[object, list[int]]:
+        from kubedocs.api.app import _DomainRuntime
+
+        runtime = _DomainRuntime(api_settings)
+        calls: list[int] = []
+
+        class _CountingStore:
+            def stats(self) -> object:
+                calls.append(1)
+                return SimpleNamespace(n_chunks=18822, n_docs=1722)
+
+            def close(self) -> None:
+                """lifespan 关闭时会调用它 —— 桩少了这个会让测试在 teardown 炸。"""
+
+        runtime.store = _CountingStore()  # type: ignore[assignment]
+        return runtime, calls
+
+    def test_second_call_within_ttl_does_not_hit_the_store(self, api_settings: Settings) -> None:
+        runtime, calls = self._runtime_with_counting_store(api_settings)
+        first = runtime.stats()
+        second = runtime.stats()
+
+        assert len(calls) == 1, "TTL 内又查了一次库（探针又变成全表扫描了）"
+        assert first is second, "TTL 内应当返回同一个对象"
+
+    def test_max_age_zero_bypasses_the_cache(self, api_settings: Settings) -> None:
+        """逃生口：要即时值时必须能拿到（缓存不是不可绕过的）。"""
+        runtime, calls = self._runtime_with_counting_store(api_settings)
+        runtime.stats()
+        runtime.stats(max_age_s=0.0)
+
+        assert len(calls) == 2
+
+    def test_healthz_uses_the_cache(self, api_settings: Settings) -> None:
+        """端到端：连打三次 `/healthz` 只应查一次库。"""
+        app = create_app(api_settings)
+        calls: list[int] = []
+        runtime = app.state.runtimes["k8s_docs"] if hasattr(app.state, "runtimes") else None
+        if runtime is None:  # 运行期表是惰性建的，先触发一次
+            with TestClient(app) as client:
+                client.get("/healthz")
+            runtime = app.state.runtimes["k8s_docs"]
+
+        class _CountingStore:
+            def stats(self) -> object:
+                calls.append(1)
+                return SimpleNamespace(n_chunks=18822, n_docs=1722)
+
+            def close(self) -> None:
+                """同上：lifespan 会调用。"""
+
+        runtime.store = _CountingStore()
+        runtime._stats_cache = None  # noqa: SLF001 - 清掉上一次的缓存，让计数从 0 开始
+        with TestClient(app) as client:
+            for _ in range(3):
+                assert client.get("/healthz").json()["n_chunks"] == 18822
+
+        assert len(calls) == 1, f"三次 /healthz 查了 {len(calls)} 次库（缓存没生效）"
 
 
 class TestConsolePage:
