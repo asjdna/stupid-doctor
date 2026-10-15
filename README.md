@@ -1,7 +1,7 @@
 # kubedocs
 
-> 面向**两个域**的检索问答与 Agent 平台：`k8s_docs`（Kubernetes 官方文档，英文）与
-> `clinic`（医疗问诊 / 挂号 / 紧急，中文）。
+> **A Rough Architecture for a Medical Agent** —— 面向**两个域**的检索问答与 Agent 平台：
+> `k8s_docs`（Kubernetes 官方文档，英文）与 `clinic`（医疗问诊 / 挂号 / 紧急，中文）。
 > 检索走混合召回（BM25 + 向量）+ RRF 融合 + 可选重排，回答**必须带可点击引用**，查不到就明说。
 > **本机零容器即可跑通全链路**。
 
