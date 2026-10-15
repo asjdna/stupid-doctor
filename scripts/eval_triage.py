@@ -11,13 +11,19 @@
 于是可以派生：**用卡片自己的内容当查询、用它的 `departments` 当期望**。
 这是"查询症状名应能召回自己的卡片"那类**语料自洽性**测法 —— 与原型 `rag_gold.jsonl` 同一思路。
 
-## 三个集，口径由松到紧（**必须分开报，不许混成一个数**）
+## 四个集，口径由松到紧（**必须分开报，不许混成一个数**）
 
 | 集 | 查询 | 性质 |
 |---|---|---|
 | A 规范名 | 卡片的 `key`（如 `纤毛结构缺陷`） | **上限**：规范名与索引里的键几乎逐字相同，最容易被召回 |
 | **B 去答案描述** | 卡片正文**剥掉「建议就诊科室」那句** | **主口径**：症状描述里不含答案，比 A 接近真实 |
-| C 人工金标 | 5 条真实问法（"我咳嗽还有点发热"） | 最接近真实，但**只有 5 条**，不足以支撑结论 |
+| C 人工金标 | 5 条真实问法（"我咳嗽还有点发热"） | 人手写、最接近真实，但**只有 5 条**，不足以支撑结论 |
+| **C2 标准派生** | 71 条口语变体（"一直咳"、"拉黑便"） | 由 `scripts/build_triage_gold.py` 按原型 `department_scope.md` 标准派生，**未经医学复核** |
+
+**C2 是本节新增的主力口径**：它把样本量从 5 提到 71，且查询是**口语**（这是 C 的意义所在）。
+但它的答案来自标准文档的规则 + 挖掘来的口语变体表，`human_verified=false`——
+**它测的是"对原型标准的符合度"，不是诊断正确性，也不是上线准确率。**
+构造过程中的三道质量闸与它们各自拦下的错例，见 `build_triage_gold.py` 的模块文档。
 
 **B 也不是真实问法的替代品**：真实患者会说"咳了三天有点烧"，而 B 用的仍是规范表述。
 所以本脚本报的是**语料自洽性与可测基线**，不是"上线准确率"。任何引用这些数字的地方
@@ -55,6 +61,8 @@ from kubedocs.clinical.triage import DEFAULT_PRECISION_K  # noqa: E402
 
 CARDS = REPO / "data" / "clinic" / "cards.json"
 GOLD = REPO / "data" / "eval" / "clinic_gold.jsonl"
+TRIAGE_GOLD = REPO / "data" / "eval" / "triage_gold.jsonl"
+"""标准派生的分诊金标（`scripts/build_triage_gold.py` 生成，`human_verified=false`）。"""
 SEED = 42
 _DEPT_CLAUSE = re.compile(r"建议就诊科室：[^。]+。")
 """剥掉答案用。与 `clinical.triage` 里那条同源——两处都依赖 `clinic_build_cards.py` 的格式。"""
@@ -181,8 +189,24 @@ def main(argv: list[str] | None = None) -> int:
             if row.get("kind") == "triage_department" and row.get("expect_department"):
                 gold_cases.append((str(row["text"]), [str(row["expect_department"])]))
 
+    # C2：按原型标准派生的口语金标（71 条）。首行是 kind=meta 头，自然被下面的过滤跳过。
+    derived_cases: list[tuple[str, list[str]]] = []
+    if TRIAGE_GOLD.is_file():
+        for line in TRIAGE_GOLD.read_text(encoding="utf-8").splitlines():
+            if not line.strip():
+                continue
+            row = json.loads(line)
+            if row.get("kind") == "triage_department" and row.get("expect_department"):
+                derived_cases.append((str(row["text"]), [str(row["expect_department"])]))
+        print(f"标准派生金标 C2：{len(derived_cases)} 条（human_verified=false）")
+
     results: dict[str, Any] = {}
-    for name, cases in (("A 规范名", set_a), ("B 去答案描述", set_b), ("C 人工金标", gold_cases)):
+    for name, cases in (
+        ("A 规范名", set_a),
+        ("B 去答案描述", set_b),
+        ("C 人工金标", gold_cases),
+        ("C2 标准派生", derived_cases),
+    ):
         if not cases:
             continue
         t0 = time.perf_counter()
@@ -214,8 +238,10 @@ def main(argv: list[str] | None = None) -> int:
 
     print(
         "\n口径说明：A 是**上限**（规范名与索引键几乎逐字相同）；B 是**主口径**"
-        "（症状描述里已剥掉答案），但仍用规范表述；\nC 最接近真实问法，但只有 "
-        f"{len(gold_cases)} 条，不足以支撑结论。**这些都不是「上线准确率」。**"
+        "（症状描述里已剥掉答案），但仍用规范表述；\nC 是手工写的真实问法，"
+        f"只有 {len(gold_cases)} 条；C2 是按原型标准派生的口语金标，"
+        f"{len(derived_cases)} 条但 **human_verified=false**（测的是对标准的符合度）。\n"
+        "**这些都不是「上线准确率」。**"
     )
 
     if dep_map:

@@ -284,9 +284,7 @@ class TestTriageFromCardLabels:
         `scripts/clinic_derive_departments.py` 从原始三元组推导。若这条测试挂了，
         说明分诊又退化成"只信正文"，那批卡片会集体弃权。
         """
-        engine = triage_mod.RetrievalTriage(
-            known_departments=None, department_map={"耳朵里疼": ["耳鼻喉科"]}
-        )
+        engine = triage_mod.RetrievalTriage(known_departments=None, department_map={"耳朵里疼": ["耳鼻喉科"]})
         chunk = rag.RetrievedChunk(
             chunk_id="c1", title="耳朵里疼", body="耳朵里疼。可能相关的疾病：暂无。建议就诊科室：未标注。"
         )
@@ -307,7 +305,11 @@ class TestTriageFromCardLabels:
                     "meta": {},
                     "map": {
                         "权威": {"departments": ["心内科"], "source": "alias:心脏病", "confidence": "high"},
-                        "模糊": {"departments": ["产科"], "source": "fuzzy:血流:0.50", "confidence": "medium"},
+                        "模糊": {
+                            "departments": ["产科"],
+                            "source": "fuzzy:血流:0.50",
+                            "confidence": "medium",
+                        },
                     },
                 },
                 ensure_ascii=False,

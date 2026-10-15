@@ -12,6 +12,24 @@
 | `noise_ood_gold.jsonl` | `data/eval/` | 60 | 非医疗噪音文本（`label: non_medical`）：不得触发急诊或医学建议 |
 | `rag_gold.jsonl` | `data/eval/` | 121（meta 1 + 三类各 40） | 检索 / 卡内容 / 卡类型。**⚠️ 见下方"不可迁移"一节** |
 | `departments.json` | `data/knowledge/` | 54 个科室名 | 分诊的科室词表（含"减肥""其他科室"这类真实脏数据） |
+| `department_scope.md` | `data/docs/科室导诊范围.md` | 1 份 | **科室导诊范围标准**：显式给出「症状 → 科室」判据，是 C2 金标的答案依据 |
+| `phenomenon_to_symptom.json` | `data/knowledge/` | 300 个规范症状 | 口语现象 → 规范症状；C2 的**口语查询文本**来源。⚠️ 挖掘而来，含伪变体，见下 |
+| `disease_to_department.json` | `data/knowledge/` | 8,819 条 | 疾病 → 科室（C2 用于交叉校验） |
+| `manual_annotation.csv` | `data/raw/OpenCMKG/` | 853 行（552 条判 1） | 人工实体等价标注。**实测对本环节无用**：装的是疾病名等价（`妊娠合并糖尿病`↔`妊娠期糖尿病`），不含口语症状，给 C2 的背书数为 **0** |
+
+## ⚠️ `phenomenon_to_symptom.json` 是**挖掘**来的，不能直接当同义词典
+
+C2 金标用它作口语查询来源，但**必须过质量闸**才可用。实测见过的伪变体：
+
+- `腰痛 -> 腿疼`（部位就不同）
+- `头痛 -> 乳头疼`、`头痛 -> 全部痛`
+- `口臭 -> 胃热`、`口臭 -> 喉咙有痰`
+- `咳痰 -> 吐好多`、`腹痛 -> 一侧疼`
+- `通痛`、`拉胡弦`、`啦肚子` 这类 OCR/输入噪声
+
+所以 `scripts/build_triage_gold.py` 要过三道闸（部位冲突、起首总括/否定词、
+单字规范症状不建、变体须对标准关键词也成立），并且**默认只信 `high` 档的科室补全**。
+把这张表直接当同义词表用，会把假答案写进金标。
 
 ## 为什么 `symptom_status_gold` 最有价值
 
