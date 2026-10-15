@@ -833,3 +833,9 @@ dense 路贡献了 **~80%** 的端到端延迟。
 
 本项目以 [MIT 许可证](LICENSE) 发布。
 
+⚠️ **`LICENSE` 只覆盖软件代码**：`data/eval/prototype/` 下是**第三方派生数据**
+（其中 `disease_to_department.json` 是 OpenCMKG 关系的直接导出，上游标注
+"仅用于学术研究，不得用于商用"），**不在 MIT 覆盖范围内**。
+它们只用于研究与评测、不参与任何运行时路径；完整清单与使用边界见 **[NOTICE.md](NOTICE.md)**。
+`data/clinic/` 与 `data/raw/`（语料本体）**没有入库** —— `git ls-files data/clinic data/raw` 输出为空。
+
