@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import json
 import re
+from typing import Any
 
 import pytest
 
@@ -714,11 +715,20 @@ class _FakeToolLoop:
         self.final_text = final_text
         self.calls = 0
         self.questions: list[str] = []
+        self.histories: list[object] = []
 
-    def run(self, *, system: str, question: str, intake: object) -> object:
+    def run(
+        self,
+        *,
+        system: str,
+        question: str,
+        intake: object,
+        history: list[dict[str, Any]] | None = None,
+    ) -> object:
         del system, intake
         self.calls += 1
         self.questions.append(question)
+        self.histories.append(history)
 
         from kubedocs.clinical.evidence import EvidenceBundle
 

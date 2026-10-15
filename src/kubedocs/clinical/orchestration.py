@@ -215,7 +215,16 @@ class ClinicalToolLoop:
         question: str,
         intake: IntakeState,
         schemas: list[dict[str, Any]] | None = None,
+        history: list[dict[str, Any]] | None = None,
     ) -> ToolLoopResult:
+        """跑工具循环。
+
+        `history` 是**本会话之前的对话**（`[{"role","content"}, ...]`，由调用方持有）。
+        为什么必须有它：产品要求"科室/用药作为回答之后的可选扩展项，等用户来问"——
+        患者追问"那该挂哪个科"时，模型若看不到自己上一轮说过什么，
+        就会把整个判断重跑一遍，**同一个病例可能问出另一个科室**。
+        上文是"可选扩展项"能成立的前提，不是锦上添花。
+        """
         tools = (
             schemas
             if schemas is not None
@@ -223,10 +232,10 @@ class ClinicalToolLoop:
         )
         catalogue = describe_tools(domain=self._domain, allow_side_effects=self._allow_side_effects)
         system_full = f"{system}\n\n---\n\n{catalogue}" if catalogue else system
-        messages: list[dict[str, Any]] = [
-            {"role": "system", "content": system_full},
-            {"role": "user", "content": f"{intake.render()}\n\n【患者这一轮说的话】\n{question}"},
-        ]
+        messages: list[dict[str, Any]] = [{"role": "system", "content": system_full}]
+        if history:
+            messages.extend(history)
+        messages.append({"role": "user", "content": f"{intake.render()}\n\n【患者这一轮说的话】\n{question}"})
         items: list[EvidenceItem] = []
         calls: list[ToolCallRecord] = []
 

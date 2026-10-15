@@ -111,8 +111,14 @@ class ClinicalPipeline:
         booking_params: dict[str, object] | None = None,
         confirmed: bool = False,
         patient_id: str = "anon",
+        history: list[dict[str, Any]] | None = None,
     ) -> ClinicalTurn:
-        """推进一轮。`state` 由调用方持有（会话状态属于会话层，不属于流程）。"""
+        """推进一轮。`state` 与 `history` 由调用方持有（会话状态属于会话层，不属于流程）。
+
+        `history` 是之前的对话（`[{"role","content"}, ...]`）。产品要求"科室/用药
+        作为回答之后的可选扩展项、等用户来问"，而**追问要答得一致就必须有上文**——
+        否则模型会把判断重跑一遍，同一个病例可能问出另一个科室。
+        """
         intake = state if state is not None else IntakeState()
         intake.merge(question, self._extractor)
 
@@ -151,7 +157,7 @@ class ClinicalPipeline:
         # **工具循环路径**：证据由模型自己取证得来（`build_evidence` 的那份只留作
         # 红线/分诊的**降级提示**，不进模型上下文——见 evidence.render 的说明）。
         if self._tool_loop is not None:
-            return self._tool_loop_turn(question, intake, evidence, patient_id)
+            return self._tool_loop_turn(question, intake, evidence, patient_id, history)
 
         if want_booking:
             turn = self._booking_turn(evidence, intake, patient_id, booking_params or {}, confirmed)
@@ -195,6 +201,7 @@ class ClinicalPipeline:
         intake: IntakeState,
         fallback_evidence: EvidenceBundle,
         patient_id: str,
+        history: list[dict[str, Any]] | None = None,
     ) -> ClinicalTurn:
         """让模型自己取证，再把它的最终答复按契约解析。
 
@@ -208,7 +215,7 @@ class ClinicalPipeline:
 
         loop = self._tool_loop
         try:
-            result = loop.run(system=system_prompt(), question=question, intake=intake)
+            result = loop.run(system=system_prompt(), question=question, intake=intake, history=history)
         except Exception as e:  # noqa: BLE001 - 工具循环失败要退回到降级产物，不崩对话
             logger.warning("工具循环失败，走降级：%s: %s", type(e).__name__, e)
             degraded_evidence = fallback_evidence.model_copy(

@@ -60,10 +60,12 @@ class _FakePipeline:
         self.red_line = red_line
         self.degraded = degraded
         self.seen: list[str] = []
+        self.histories: list[Any] = []
 
-    def advance(self, question: str, *, state: Any = None, **_: Any) -> ClinicalTurn:
+    def advance(self, question: str, *, state: Any = None, history: Any = None, **_: Any) -> ClinicalTurn:
         intake = state if state is not None else IntakeState()
         self.seen.append(question)
+        self.histories.append(history)
         # 判定依据必须是**该会话自己的状态**，不能用跨会话的计数器——
         # 否则"会话隔离"这条测试会因桩写错而假阴性（实测踩过一次）。
         if "duration" not in intake.filled:
@@ -162,6 +164,39 @@ def test_sessions_are_isolated(client_factory: Any) -> None:
     other = c.post("/consult", json={"question": "我头痛", "session_id": "b"}).json()
     assert other["action"] == "ask"
     assert other["turns"] == 1
+
+
+def test_conversation_history_is_threaded_into_the_next_turn(client_factory: Any) -> None:
+    """**产品前提**：追问要答得一致，就必须带上文。
+
+    "科室/用药作为回答之后的可选扩展项、等用户来问"——患者追问"那该挂哪个科"时，
+    模型若看不到自己上一轮说过什么，就会重跑判断，**同一个病例可能问出另一个科室**。
+    """
+    pipe = _FakePipeline()
+    c = client_factory(pipe)
+    first = c.post("/consult", json={"question": "我咳嗽", "session_id": "h1"}).json()
+    # 第一轮没有上文
+    assert pipe.histories[0] == []
+
+    c.post("/consult", json={"question": "那该挂哪个科", "session_id": "h1"})
+    second_history = pipe.histories[1]
+    assert [m["role"] for m in second_history] == ["user", "assistant"]
+    assert second_history[0]["content"] == "我咳嗽"
+    assert second_history[1]["content"] == first["message"]
+
+
+def test_history_is_bounded(client_factory: Any) -> None:
+    """上文有上界：不设界等于每次调用都把整段对话重新计费。"""
+    from kubedocs.api.consult import MAX_HISTORY_TURNS
+
+    pipe = _FakePipeline()
+    c = client_factory(pipe)
+    for i in range(MAX_HISTORY_TURNS + 3):
+        c.post("/consult", json={"question": f"第{i}问", "session_id": "h2"})
+    last = pipe.histories[-1]
+    assert len(last) == MAX_HISTORY_TURNS * 2
+    # 第 N 轮拿到的上文是「第 1..N-1 轮」，裁到最近 MAX_HISTORY_TURNS 轮
+    assert last[-2]["content"] == f"第{MAX_HISTORY_TURNS + 1}问"
 
 
 def test_reset_clears_the_session(client_factory: Any) -> None:

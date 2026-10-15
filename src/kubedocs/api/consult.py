@@ -60,6 +60,14 @@ CONSULT_HTML = ("data", "web", "consult.html")
 MAX_SESSIONS = 200
 """进程内会话上限（超出按最久未用淘汰）。取值只为"别把内存撑爆"，不是容量规划。"""
 
+MAX_HISTORY_TURNS = 6
+"""保留的最近问答轮数（一轮 = 用户一句 + 助手一句）。
+
+产品要求"科室/用药作为回答之后的可选扩展项、等用户来问"，追问要答得一致就得有上文。
+取 6 轮：够覆盖"主诉→追问→结论→再问科室→再问用药"，又不至于让上下文无限增长
+（每条消息都要计费，历史越长每次调用越贵）。
+"""
+
 EMERGENCY_NOTE = (
     "检测到需要立即处理的危险信号（如胸痛、呼吸困难、意识不清、大出血等）。"
     "**请立即拨打 120 或直接前往最近医院急诊科**，不要等待在线建议。"
@@ -107,6 +115,20 @@ class _Session:
     turns: int = 0
     created_at: float = field(default_factory=time.time)
     last_used: float = field(default_factory=time.time)
+    history: list[dict[str, Any]] = field(default_factory=list)
+    """本会话的对话上文（user/assistant 成对）。
+
+    没有它，"科室/用药留待用户追问"就做不成：模型看不到自己上一轮说过什么，
+    追问时会重跑一遍判断，**同一个病例可能问出另一个科室**。
+    `MAX_HISTORY_TURNS` 只是上界——不设上界等于每次调用都把整段对话重新计费。
+    """
+
+    def remember(self, question: str, answer: str) -> None:
+        self.history.append({"role": "user", "content": question})
+        self.history.append({"role": "assistant", "content": answer})
+        keep = MAX_HISTORY_TURNS * 2
+        if len(self.history) > keep:
+            del self.history[: len(self.history) - keep]
 
 
 class ConsultRuntime:
@@ -229,6 +251,11 @@ class ConsultRuntime:
             sess = self._sessions.get(session_id or "anon")
             return sess.turns if sess else 0
 
+    def session_history(self, session_id: str) -> list[dict[str, Any]]:
+        with self._sessions_lock:
+            sess = self._sessions.get(session_id or "anon")
+            return list(sess.history) if sess else []
+
     # ---------------------------------------------------------------- 推进
     def advance(
         self,
@@ -246,8 +273,11 @@ class ConsultRuntime:
             want_booking=want_booking,
             confirmed=confirmed,
             patient_id="anon",
+            history=list(sess.history),
         )
         sess.turns += 1
+        # 记住这一轮：下一轮追问（"那该挂哪个科"）要在上文里看到本轮结论
+        sess.remember(question, turn.message)
         turn_typed: ClinicalTurn = turn
         return turn_typed
 

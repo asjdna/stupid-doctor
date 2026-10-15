@@ -1,0 +1,5540 @@
+[
+ {
+  "severity": "mild",
+  "style": "formal",
+  "description": "近两日出现轻微咽干和偶发干咳，无发热及明显疼痛，日常活动未受影响。",
+  "gold_department": "呼吸内科",
+  "gold_diseases": [
+   "上呼吸道感染",
+   "急性咽炎"
+  ],
+  "id": "mild_0000"
+ },
+ {
+  "severity": "mild",
+  "style": "formal",
+  "description": "最近一周偶有轻度鼻塞和清水样鼻涕，无发热，工作和睡眠基本不受影响。",
+  "gold_department": "耳鼻喉科",
+  "gold_diseases": [
+   "过敏性鼻炎",
+   "普通感冒"
+  ],
+  "id": "mild_0001"
+ },
+ {
+  "severity": "mild",
+  "style": "formal",
+  "description": "近三天上腹部偶有轻微不适，多于进食后出现，无呕吐、黑便及明显疼痛。",
+  "gold_department": "消化内科",
+  "gold_diseases": [
+   "功能性消化不良",
+   "慢性胃炎"
+  ],
+  "id": "mild_0002"
+ },
+ {
+  "severity": "mild",
+  "style": "formal",
+  "description": "近两日出现轻度皮肤瘙痒，局部可见少量红色小丘疹，无渗出及发热。",
+  "gold_department": "皮肤科",
+  "gold_diseases": [
+   "接触性皮炎",
+   "荨麻疹"
+  ],
+  "id": "mild_0003"
+ },
+ {
+  "severity": "mild",
+  "style": "formal",
+  "description": "近期偶有轻度头晕，休息后可缓解，无晕厥、视物旋转及肢体无力。",
+  "gold_department": "神经内科",
+  "gold_diseases": [
+   "疲劳综合征",
+   "良性位置性眩晕"
+  ],
+  "id": "mild_0004"
+ },
+ {
+  "severity": "mild",
+  "style": "formal",
+  "description": "近一周偶有轻度眼干和异物感，无明显眼痛、畏光及视力下降。",
+  "gold_department": "眼科",
+  "gold_diseases": [
+   "干眼症",
+   "结膜炎"
+  ],
+  "id": "mild_0005"
+ },
+ {
+  "severity": "mild",
+  "style": "formal",
+  "description": "近日偶有轻度尿频，无尿痛、血尿及发热，饮水量较前无明显变化。",
+  "gold_department": "泌尿科",
+  "gold_diseases": [
+   "轻度尿路感染",
+   "膀胱过度活动症"
+  ],
+  "id": "mild_0006"
+ },
+ {
+  "severity": "mild",
+  "style": "formal",
+  "description": "近两日出现轻微膝关节酸胀，活动后稍明显，休息后缓解，无红肿及外伤史。",
+  "gold_department": "骨外科",
+  "gold_diseases": [
+   "膝关节劳损",
+   "轻度关节炎"
+  ],
+  "id": "mild_0007"
+ },
+ {
+  "severity": "mild",
+  "style": "formal",
+  "description": "近期偶有轻度心慌感，多于熬夜后出现，持续数分钟可自行缓解，无胸痛及气促。",
+  "gold_department": "心内科",
+  "gold_diseases": [
+   "窦性心动过速",
+   "心脏神经症"
+  ],
+  "id": "mild_0008"
+ },
+ {
+  "severity": "mild",
+  "style": "formal",
+  "description": "近一周偶有轻度乏力，无发热、体重下降及明显食欲减退，日常活动正常。",
+  "gold_department": "内分泌科",
+  "gold_diseases": [
+   "轻度贫血",
+   "甲状腺功能异常"
+  ],
+  "id": "mild_0009"
+ },
+ {
+  "severity": "mild",
+  "style": "formal",
+  "description": "近两日偶有咽干、轻度鼻塞，无发热及明显咳嗽，精神与食欲基本正常，不影响日常工作。",
+  "gold_department": "呼吸内科",
+  "gold_diseases": [
+   "普通感冒",
+   "急性上呼吸道感染"
+  ],
+  "id": "mild_0010"
+ },
+ {
+  "severity": "mild",
+  "style": "formal",
+  "description": "近日偶感乏力，睡眠稍差，无胸闷、气促及心悸，日常活动未受明显影响。",
+  "gold_department": "神经内科",
+  "gold_diseases": [
+   "疲劳综合征",
+   "睡眠障碍"
+  ],
+  "id": "mild_0011"
+ },
+ {
+  "severity": "mild",
+  "style": "formal",
+  "description": "进食辛辣后出现轻微上腹不适，偶有反酸，无呕吐、黑便及剧烈腹痛，症状可自行缓解。",
+  "gold_department": "消化内科",
+  "gold_diseases": [
+   "功能性消化不良",
+   "胃食管反流"
+  ],
+  "id": "mild_0012"
+ },
+ {
+  "severity": "mild",
+  "style": "formal",
+  "description": "双侧前臂皮肤轻度瘙痒，可见少量淡红色小丘疹，无渗液及发热，夜间稍明显。",
+  "gold_department": "皮肤科",
+  "gold_diseases": [
+   "湿疹",
+   "接触性皮炎"
+  ],
+  "id": "mild_0013"
+ },
+ {
+  "severity": "mild",
+  "style": "formal",
+  "description": "近一周偶有轻度头晕，持续时间短暂，无黑矇、晕厥及肢体无力，休息后可缓解。",
+  "gold_department": "神经内科",
+  "gold_diseases": [
+   "良性眩晕",
+   "体位性低血压"
+  ],
+  "id": "mild_0014"
+ },
+ {
+  "severity": "mild",
+  "style": "formal",
+  "description": "咽部干燥伴轻微异物感两日，无明显吞咽困难、发热及声音嘶哑，饮水后稍缓解。",
+  "gold_department": "耳鼻喉科",
+  "gold_diseases": [
+   "慢性咽炎",
+   "咽部不适"
+  ],
+  "id": "mild_0015"
+ },
+ {
+  "severity": "mild",
+  "style": "formal",
+  "description": "双眼干涩、轻度异物感，长时间用眼后加重，无眼红、眼痛及视力明显下降。",
+  "gold_department": "眼科",
+  "gold_diseases": [
+   "干眼症",
+   "视疲劳"
+  ],
+  "id": "mild_0016"
+ },
+ {
+  "severity": "mild",
+  "style": "formal",
+  "description": "右膝活动后轻度酸胀，上下楼时稍明显，无红肿、发热及关节畸形，休息后可减轻。",
+  "gold_department": "骨外科",
+  "gold_diseases": [
+   "膝关节劳损",
+   "髌骨软化症"
+  ],
+  "id": "mild_0017"
+ },
+ {
+  "severity": "mild",
+  "style": "formal",
+  "description": "近三日偶有轻微咳嗽，少痰，无发热、胸痛及呼吸困难，饮食睡眠正常。",
+  "gold_department": "呼吸内科",
+  "gold_diseases": [
+   "急性支气管炎",
+   "上呼吸道感染"
+  ],
+  "id": "mild_0018"
+ },
+ {
+  "severity": "mild",
+  "style": "formal",
+  "description": "排尿时偶有轻微灼热感，无尿频、尿急、血尿及发热，症状间断出现。",
+  "gold_department": "泌尿科",
+  "gold_diseases": [
+   "轻度尿路刺激",
+   "非特异性尿道炎"
+  ],
+  "id": "mild_0019"
+ },
+ {
+  "severity": "mild",
+  "style": "formal",
+  "description": "近三日出现轻微咽干、偶有鼻塞，无发热及咳嗽，不影响日常工作和睡眠。",
+  "gold_department": "耳鼻喉科",
+  "gold_diseases": [
+   "急性上呼吸道感染",
+   "慢性咽炎"
+  ],
+  "id": "mild_0020"
+ },
+ {
+  "severity": "mild",
+  "style": "formal",
+  "description": "双侧手背皮肤轻度瘙痒，伴少量干燥脱屑，无明显红肿渗液。",
+  "gold_department": "皮肤科",
+  "gold_diseases": [
+   "湿疹",
+   "接触性皮炎"
+  ],
+  "id": "mild_0021"
+ },
+ {
+  "severity": "mild",
+  "style": "formal",
+  "description": "近一周偶有轻度反酸、嗳气，餐后上腹不适，无呕血黑便及明显疼痛。",
+  "gold_department": "消化内科",
+  "gold_diseases": [
+   "胃食管反流病",
+   "功能性消化不良"
+  ],
+  "id": "mild_0022"
+ },
+ {
+  "severity": "mild",
+  "style": "formal",
+  "description": "近期工作后自觉轻度乏力，休息后可缓解，无发热、心悸及体重明显变化。",
+  "gold_department": "内分泌科",
+  "gold_diseases": [
+   "疲劳综合征",
+   "甲状腺功能异常"
+  ],
+  "id": "mild_0023"
+ },
+ {
+  "severity": "mild",
+  "style": "formal",
+  "description": "晨起时右侧膝关节轻微酸胀，活动后减轻，无肿胀、交锁及外伤史。",
+  "gold_department": "骨外科",
+  "gold_diseases": [
+   "膝关节劳损",
+   "轻度骨关节炎"
+  ],
+  "id": "mild_0024"
+ },
+ {
+  "severity": "mild",
+  "style": "natural",
+  "description": "这几天嗓子有点干痒，老想清嗓子，也没别的啥大毛病。",
+  "gold_department": "耳鼻喉科",
+  "gold_diseases": [
+   "急性咽炎",
+   "慢性咽炎"
+  ],
+  "id": "mild_0025"
+ },
+ {
+  "severity": "mild",
+  "style": "natural",
+  "description": "可能是吹空调凉着了，鼻子堵堵的，偶尔打两个喷嚏，精神还行。",
+  "gold_department": "呼吸内科",
+  "gold_diseases": [
+   "普通感冒",
+   "过敏性鼻炎"
+  ],
+  "id": "mild_0026"
+ },
+ {
+  "severity": "mild",
+  "style": "natural",
+  "description": "最近脸上冒了几颗小痘痘，有点油，不疼不痒的，想问问要不要涂点啥。",
+  "gold_department": "皮肤科",
+  "gold_diseases": [
+   "痤疮",
+   "脂溢性皮炎"
+  ],
+  "id": "mild_0027"
+ },
+ {
+  "severity": "mild",
+  "style": "natural",
+  "description": "这两天肚子有点胀，吃完饭老打嗝，放屁多了点，不太舒服但也没到疼。",
+  "gold_department": "消化内科",
+  "gold_diseases": [
+   "功能性消化不良",
+   "胃肠功能紊乱"
+  ],
+  "id": "mild_0028"
+ },
+ {
+  "severity": "mild",
+  "style": "natural",
+  "description": "脖子肩膀有点酸酸的，坐久了更明显，活动活动能好点，不算太难受。",
+  "gold_department": "骨外科",
+  "gold_diseases": [
+   "颈肩肌筋膜炎",
+   "肌肉劳损"
+  ],
+  "id": "mild_0029"
+ },
+ {
+  "severity": "mild",
+  "style": "natural",
+  "description": "这几天老觉得困，白天没劲儿，睡一觉也缓不太过来，别的倒没啥。",
+  "gold_department": "内分泌科",
+  "gold_diseases": [
+   "轻度贫血",
+   "甲状腺功能减退"
+  ],
+  "id": "mild_0030"
+ },
+ {
+  "severity": "mild",
+  "style": "natural",
+  "description": "眼睛有点干涩，看电脑久了发酸，滴点润眼液好像能舒服些。",
+  "gold_department": "眼科",
+  "gold_diseases": [
+   "干眼症",
+   "视疲劳"
+  ],
+  "id": "mild_0031"
+ },
+ {
+  "severity": "mild",
+  "style": "natural",
+  "description": "头皮屑有点多，头皮偶尔痒痒的，洗头勤点能好一些，不太影响生活。",
+  "gold_department": "皮肤科",
+  "gold_diseases": [
+   "头皮脂溢性皮炎",
+   "头皮糠疹"
+  ],
+  "id": "mild_0032"
+ },
+ {
+  "severity": "mild",
+  "style": "natural",
+  "description": "这两天小便稍微有点频，但尿的时候不疼，喝水多了更明显，心里有点嘀咕。",
+  "gold_department": "泌尿科",
+  "gold_diseases": [
+   "膀胱过度活动症",
+   "轻度尿路感染"
+  ],
+  "id": "mild_0033"
+ },
+ {
+  "severity": "mild",
+  "style": "natural",
+  "description": "膝盖上下楼的时候有点咯咯响，偶尔酸一下，不肿也不红，是不是缺钙啊？",
+  "gold_department": "骨外科",
+  "gold_diseases": [
+   "髌骨软化症",
+   "膝关节骨关节炎早期"
+  ],
+  "id": "mild_0034"
+ },
+ {
+  "severity": "mild",
+  "style": "natural",
+  "description": "这两天嗓子有点干，老是忍不住想清嗓子，也没别的啥事。",
+  "gold_department": "耳鼻喉科",
+  "gold_diseases": [
+   "急性咽炎",
+   "慢性咽炎"
+  ],
+  "id": "mild_0035"
+ },
+ {
+  "severity": "mild",
+  "style": "natural",
+  "description": "鼻子有点不通气，偶尔打两个喷嚏，感觉像着凉了，不太严重。",
+  "gold_department": "呼吸内科",
+  "gold_diseases": [
+   "普通感冒",
+   "过敏性鼻炎"
+  ],
+  "id": "mild_0036"
+ },
+ {
+  "severity": "mild",
+  "style": "natural",
+  "description": "最近老觉得身上没劲儿，睡一觉也还是有点累，别的倒没啥。",
+  "gold_department": "内分泌科",
+  "gold_diseases": [
+   "疲劳综合征",
+   "轻度贫血"
+  ],
+  "id": "mild_0037"
+ },
+ {
+  "severity": "mild",
+  "style": "natural",
+  "description": "胳膊上有一小块皮肤有点痒，挠了会红，过会儿又好了。",
+  "gold_department": "皮肤科",
+  "gold_diseases": [
+   "荨麻疹",
+   "接触性皮炎"
+  ],
+  "id": "mild_0038"
+ },
+ {
+  "severity": "mild",
+  "style": "natural",
+  "description": "眼睛看电脑时间长了有点干涩，眨眨眼能好点，休息一下也还行。",
+  "gold_department": "眼科",
+  "gold_diseases": [
+   "干眼症",
+   "视疲劳"
+  ],
+  "id": "mild_0039"
+ },
+ {
+  "severity": "mild",
+  "style": "natural",
+  "description": "肚子偶尔咕噜叫两声，放几个屁，也不疼，就是感觉有点胀。",
+  "gold_department": "消化内科",
+  "gold_diseases": [
+   "功能性消化不良",
+   "肠易激综合征"
+  ],
+  "id": "mild_0040"
+ },
+ {
+  "severity": "mild",
+  "style": "natural",
+  "description": "后脖颈子有点酸，坐久了会觉得僵，起来动动就好多了。",
+  "gold_department": "骨外科",
+  "gold_diseases": [
+   "颈肌劳损",
+   "颈椎病"
+  ],
+  "id": "mild_0041"
+ },
+ {
+  "severity": "mild",
+  "style": "natural",
+  "description": "小便的时候稍微有点热热的感觉，不是很疼，喝水多了好像就没事。",
+  "gold_department": "泌尿科",
+  "gold_diseases": [
+   "轻度尿路感染",
+   "尿道炎"
+  ],
+  "id": "mild_0042"
+ },
+ {
+  "severity": "mild",
+  "style": "natural",
+  "description": "这几天头有点蒙蒙的，不是晕，就是感觉不太清爽，睡一觉会好些。",
+  "gold_department": "神经内科",
+  "gold_diseases": [
+   "紧张性头痛",
+   "睡眠障碍"
+  ],
+  "id": "mild_0043"
+ },
+ {
+  "severity": "mild",
+  "style": "natural",
+  "description": "吃完饭老觉得嗓子眼有点堵，打两个嗝就舒服点，也不影响吃饭。",
+  "gold_department": "消化内科",
+  "gold_diseases": [
+   "胃食管反流病",
+   "功能性消化不良"
+  ],
+  "id": "mild_0044"
+ },
+ {
+  "severity": "mild",
+  "style": "natural",
+  "description": "最近两天嗓子有点干，偶尔咳两声，不发烧，也没觉得特别累。",
+  "gold_department": "呼吸内科",
+  "gold_diseases": [
+   "急性上呼吸道感染",
+   "咽炎"
+  ],
+  "id": "mild_0045"
+ },
+ {
+  "severity": "mild",
+  "style": "natural",
+  "description": "身上有点痒，特别是胳膊和腿，挠了会起小红点，过一会儿又消下去。",
+  "gold_department": "皮肤科",
+  "gold_diseases": [
+   "荨麻疹",
+   "过敏性皮炎"
+  ],
+  "id": "mild_0046"
+ },
+ {
+  "severity": "mild",
+  "style": "natural",
+  "description": "这几天感觉有点累，睡一觉也还是没精神，吃饭什么的都正常。",
+  "gold_department": "内分泌科",
+  "gold_diseases": [
+   "疲劳综合征",
+   "轻度贫血"
+  ],
+  "id": "mild_0047"
+ },
+ {
+  "severity": "mild",
+  "style": "natural",
+  "description": "鼻子有点堵，早上起来老打喷嚏，眼睛也有点痒，不发烧。",
+  "gold_department": "耳鼻喉科",
+  "gold_diseases": [
+   "过敏性鼻炎",
+   "普通感冒"
+  ],
+  "id": "mild_0048"
+ },
+ {
+  "severity": "mild",
+  "style": "natural",
+  "description": "肚子偶尔咕噜叫，大便有点稀，一天两次，没有肚子疼，也没发烧。",
+  "gold_department": "消化内科",
+  "gold_diseases": [
+   "功能性消化不良",
+   "轻度肠炎"
+  ],
+  "id": "mild_0049"
+ },
+ {
+  "severity": "mild",
+  "style": "vague",
+  "description": "就是感觉嗓子有点不得劲，说不上来具体啥感觉，也不疼，就是不太舒服。",
+  "gold_department": "耳鼻喉科",
+  "gold_diseases": [
+   "慢性咽炎",
+   "咽部异物感"
+  ],
+  "id": "mild_0050"
+ },
+ {
+  "severity": "mild",
+  "style": "vague",
+  "description": "这两天浑身有点不得劲，也说不上来哪不舒服，就是感觉累累的。",
+  "gold_department": "呼吸内科",
+  "gold_diseases": [
+   "上呼吸道感染",
+   "普通感冒"
+  ],
+  "id": "mild_0051"
+ },
+ {
+  "severity": "mild",
+  "style": "vague",
+  "description": "身上这儿痒那儿痒的，也说不清具体哪块，反正就是不太舒服。",
+  "gold_department": "皮肤科",
+  "gold_diseases": [
+   "皮肤瘙痒症",
+   "荨麻疹"
+  ],
+  "id": "mild_0052"
+ },
+ {
+  "severity": "mild",
+  "style": "vague",
+  "description": "肚子有点不得劲，说不上来是胀还是怎么着，反正就是不太对劲。",
+  "gold_department": "消化内科",
+  "gold_diseases": [
+   "功能性消化不良",
+   "胃肠功能紊乱"
+  ],
+  "id": "mild_0053"
+ },
+ {
+  "severity": "mild",
+  "style": "vague",
+  "description": "脑袋有点蒙蒙的，也不是疼，就是感觉不太清爽，说不上来。",
+  "gold_department": "神经内科",
+  "gold_diseases": [
+   "紧张性头痛",
+   "神经性头晕"
+  ],
+  "id": "mild_0054"
+ },
+ {
+  "severity": "mild",
+  "style": "vague",
+  "description": "眼睛有点不舒服，说不上来是干还是涩，反正就是不得劲。",
+  "gold_department": "眼科",
+  "gold_diseases": [
+   "干眼症",
+   "视疲劳"
+  ],
+  "id": "mild_0055"
+ },
+ {
+  "severity": "mild",
+  "style": "vague",
+  "description": "鼻子这块有点不得劲，也说不上来是堵还是怎么着，就是不太舒服。",
+  "gold_department": "耳鼻喉科",
+  "gold_diseases": [
+   "过敏性鼻炎",
+   "慢性鼻炎"
+  ],
+  "id": "mild_0056"
+ },
+ {
+  "severity": "mild",
+  "style": "vague",
+  "description": "腰这块有点不得劲，说不上来是酸还是疼，就是感觉不太对。",
+  "gold_department": "骨外科",
+  "gold_diseases": [
+   "腰肌劳损",
+   "腰椎退行性变"
+  ],
+  "id": "mild_0057"
+ },
+ {
+  "severity": "mild",
+  "style": "vague",
+  "description": "总觉得人没精神，说不上来哪出问题了，就是浑身不得劲。",
+  "gold_department": "内分泌科",
+  "gold_diseases": [
+   "轻度贫血",
+   "亚健康状态"
+  ],
+  "id": "mild_0058"
+ },
+ {
+  "severity": "mild",
+  "style": "vague",
+  "description": "小便的时候有点说不上来的感觉，也不疼，就是不太得劲。",
+  "gold_department": "泌尿科",
+  "gold_diseases": [
+   "轻度尿路感染",
+   "尿道综合征"
+  ],
+  "id": "mild_0059"
+ },
+ {
+  "severity": "mild",
+  "style": "vague",
+  "description": "就是感觉浑身不得劲，说不上来哪儿不舒服，也没耽误吃饭睡觉。",
+  "gold_department": "内科",
+  "gold_diseases": [
+   "功能性不适",
+   "亚健康状态"
+  ],
+  "id": "mild_0060"
+ },
+ {
+  "severity": "mild",
+  "style": "vague",
+  "description": "嗓子有点怪怪的，像有东西又像没有，不太舒服。",
+  "gold_department": "耳鼻喉科",
+  "gold_diseases": [
+   "慢性咽炎",
+   "咽异感症"
+  ],
+  "id": "mild_0061"
+ },
+ {
+  "severity": "mild",
+  "style": "vague",
+  "description": "这两天总觉得迷迷糊糊的，睡也睡不踏实，浑身没劲。",
+  "gold_department": "神经内科",
+  "gold_diseases": [
+   "睡眠障碍",
+   "疲劳综合征"
+  ],
+  "id": "mild_0062"
+ },
+ {
+  "severity": "mild",
+  "style": "vague",
+  "description": "身上有点痒，说不上具体哪儿，挠挠也就过去了。",
+  "gold_department": "皮肤科",
+  "gold_diseases": [
+   "皮肤瘙痒症",
+   "荨麻疹"
+  ],
+  "id": "mild_0063"
+ },
+ {
+  "severity": "mild",
+  "style": "vague",
+  "description": "肚子不太对劲，隐隐的，说不上来是胀还是疼。",
+  "gold_department": "消化内科",
+  "gold_diseases": [
+   "功能性消化不良",
+   "肠易激综合征"
+  ],
+  "id": "mild_0064"
+ },
+ {
+  "severity": "mild",
+  "style": "vague",
+  "description": "眼睛有点不舒服，不是疼也不是痒，就是感觉怪怪的。",
+  "gold_department": "眼科",
+  "gold_diseases": [
+   "干眼症",
+   "视疲劳"
+  ],
+  "id": "mild_0065"
+ },
+ {
+  "severity": "mild",
+  "style": "vague",
+  "description": "心里有点慌慌的，又好像不是慌，说不太清楚。",
+  "gold_department": "心内科",
+  "gold_diseases": [
+   "心脏神经官能症",
+   "窦性心动过速"
+  ],
+  "id": "mild_0066"
+ },
+ {
+  "severity": "mild",
+  "style": "vague",
+  "description": "鼻子有点不太通气，说不上来是堵还是干，反正不舒服。",
+  "gold_department": "耳鼻喉科",
+  "gold_diseases": [
+   "慢性鼻炎",
+   "干燥性鼻炎"
+  ],
+  "id": "mild_0067"
+ },
+ {
+  "severity": "mild",
+  "style": "vague",
+  "description": "身上有点发热的感觉，又不是真发烧，就是不得劲。",
+  "gold_department": "感染科",
+  "gold_diseases": [
+   "低热待查",
+   "自主神经功能紊乱"
+  ],
+  "id": "mild_0068"
+ },
+ {
+  "severity": "mild",
+  "style": "vague",
+  "description": "最近老觉得累，睡醒了也不解乏，说不上来哪里出了问题。",
+  "gold_department": "内分泌科",
+  "gold_diseases": [
+   "甲状腺功能减退",
+   "慢性疲劳综合征"
+  ],
+  "id": "mild_0069"
+ },
+ {
+  "severity": "mild",
+  "style": "vague",
+  "description": "说不上来哪里难受，就是嗓子有点干干的，喝水也不太管用，不碍事。",
+  "gold_department": "耳鼻喉科",
+  "gold_diseases": [
+   "慢性咽炎",
+   "急性咽炎"
+  ],
+  "id": "mild_0070"
+ },
+ {
+  "severity": "mild",
+  "style": "vague",
+  "description": "浑身有点不得劲，说不上来具体哪儿不舒服，可能有点累，不太影响做事情。",
+  "gold_department": "内分泌科",
+  "gold_diseases": [
+   "疲劳综合征",
+   "亚健康状态"
+  ],
+  "id": "mild_0071"
+ },
+ {
+  "severity": "mild",
+  "style": "vague",
+  "description": "皮肤总觉得有点不对劲，说不上来是不是痒，也没什么明显疙瘩，就是有点不舒服。",
+  "gold_department": "皮肤科",
+  "gold_diseases": [
+   "皮肤瘙痒症",
+   "轻度过敏性皮炎"
+  ],
+  "id": "mild_0072"
+ },
+ {
+  "severity": "mild",
+  "style": "vague",
+  "description": "鼻子有点闷闷的，说不上来是不是堵，就是不太通气，偶尔打个喷嚏，不太要紧。",
+  "gold_department": "耳鼻喉科",
+  "gold_diseases": [
+   "轻度过敏性鼻炎",
+   "慢性鼻炎"
+  ],
+  "id": "mild_0073"
+ },
+ {
+  "severity": "mild",
+  "style": "vague",
+  "description": "肚子有点说不清的不舒服，不是疼，就是怪怪的，过一会儿又好了，吃饭也还行。",
+  "gold_department": "消化内科",
+  "gold_diseases": [
+   "功能性消化不良",
+   "肠易激综合征"
+  ],
+  "id": "mild_0074"
+ },
+ {
+  "severity": "mild",
+  "style": "erroneous",
+  "description": "大夫，我嗓子有点干痒，还老咳嗖，好几天了，也不发烧，就是不太舒服。",
+  "gold_department": "呼吸内科",
+  "gold_diseases": [
+   "急性上呼吸道感染",
+   "咽喉炎"
+  ],
+  "id": "mild_0075"
+ },
+ {
+  "severity": "mild",
+  "style": "erroneous",
+  "description": "我这两天鼻子老流鼻剃，打喷嚏，头有点晕晕的，可能是感冒了。",
+  "gold_department": "耳鼻喉科",
+  "gold_diseases": [
+   "过敏性鼻炎",
+   "急性上呼吸道感染"
+  ],
+  "id": "mild_0076"
+ },
+ {
+  "severity": "mild",
+  "style": "erroneous",
+  "description": "肚齐眼周围有点隐隐作痛，拉希两次，不太想吃东西。",
+  "gold_department": "消化内科",
+  "gold_diseases": [
+   "急性胃肠炎",
+   "消化不良"
+  ],
+  "id": "mild_0077"
+ },
+ {
+  "severity": "mild",
+  "style": "erroneous",
+  "description": "皮肤上起了些小红点，有点羊，抓了之后更红，不知道是不是过敏。",
+  "gold_department": "皮肤科",
+  "gold_diseases": [
+   "荨麻疹",
+   "接触性皮炎"
+  ],
+  "id": "mild_0078"
+ },
+ {
+  "severity": "mild",
+  "style": "erroneous",
+  "description": "眼睛有点干涩，看东西时间长了会模糊，还有点磨得荒。",
+  "gold_department": "眼科",
+  "gold_diseases": [
+   "干眼症",
+   "视疲劳"
+  ],
+  "id": "mild_0079"
+ },
+ {
+  "severity": "mild",
+  "style": "erroneous",
+  "description": "最近老觉得心慌慌的，其实也不是很严重，就是偶尔心跳快一下，休息会就好。",
+  "gold_department": "心内科",
+  "gold_diseases": [
+   "窦性心动过速",
+   "心脏神经症"
+  ],
+  "id": "mild_0080"
+ },
+ {
+  "severity": "mild",
+  "style": "erroneous",
+  "description": "腰有点酸，坐久了更明显，没干重活，贴了膏药稍微好点。",
+  "gold_department": "骨外科",
+  "gold_diseases": [
+   "腰肌劳损",
+   "腰椎退行性变"
+  ],
+  "id": "mild_0081"
+ },
+ {
+  "severity": "mild",
+  "style": "erroneous",
+  "description": "小便的时候有点热热的感觉，不疼，就是不太舒服，喝水多了会好点。",
+  "gold_department": "泌尿科",
+  "gold_diseases": [
+   "轻度尿路感染",
+   "尿道刺激症状"
+  ],
+  "id": "mild_0082"
+ },
+ {
+  "severity": "mild",
+  "style": "erroneous",
+  "description": "每个月那几天肚子有点胀痛，腰也酸，例假走了就没事了，不算严重。",
+  "gold_department": "妇科",
+  "gold_diseases": [
+   "原发性痛经",
+   "经前期综合征"
+  ],
+  "id": "mild_0083"
+ },
+ {
+  "severity": "mild",
+  "style": "erroneous",
+  "description": "孩子有点流鼻剃，偶尔咳嗖两声，精神还好，吃饭也正常，就是有点担心。",
+  "gold_department": "儿科",
+  "gold_diseases": [
+   "急性上呼吸道感染",
+   "轻度支气管炎"
+  ],
+  "id": "mild_0084"
+ },
+ {
+  "severity": "mild",
+  "style": "erroneous",
+  "description": "嗓子有点干，老咳嗖，也不发烧，就是不太舒服。",
+  "gold_department": "呼吸内科",
+  "gold_diseases": [
+   "急性上呼吸道感染",
+   "咽喉炎"
+  ],
+  "id": "mild_0085"
+ },
+ {
+  "severity": "mild",
+  "style": "erroneous",
+  "description": "鼻子老是堵到，还流清鼻剃，头有点晕晕的。",
+  "gold_department": "耳鼻喉科",
+  "gold_diseases": [
+   "过敏性鼻炎",
+   "急性鼻炎"
+  ],
+  "id": "mild_0086"
+ },
+ {
+  "severity": "mild",
+  "style": "erroneous",
+  "description": "肚脐眼周维有点胀气，吃多了就爱打咯。",
+  "gold_department": "消化内科",
+  "gold_diseases": [
+   "功能性消化不良",
+   "胃肠胀气"
+  ],
+  "id": "mild_0087"
+ },
+ {
+  "severity": "mild",
+  "style": "erroneous",
+  "description": "手背上起了几个小红点，有点痒痒，不疼。",
+  "gold_department": "皮肤科",
+  "gold_diseases": [
+   "接触性皮炎",
+   "湿疹"
+  ],
+  "id": "mild_0088"
+ },
+ {
+  "severity": "mild",
+  "style": "erroneous",
+  "description": "右眼睛有点磨得慌，看东西时间长了就干涩。",
+  "gold_department": "眼科",
+  "gold_diseases": [
+   "干眼症",
+   "结膜炎"
+  ],
+  "id": "mild_0089"
+ },
+ {
+  "severity": "mild",
+  "style": "erroneous",
+  "description": "这两天感觉浑身没劲，有点犯困，不想吃东西。",
+  "gold_department": "内分泌科",
+  "gold_diseases": [
+   "轻度疲劳综合征",
+   "低血糖反应"
+  ],
+  "id": "mild_0090"
+ },
+ {
+  "severity": "mild",
+  "style": "erroneous",
+  "description": "膝盖蹲下起来的时候有点咯咯响，不疼，就是发酸。",
+  "gold_department": "骨外科",
+  "gold_diseases": [
+   "膝关节劳损",
+   "髌骨软化症"
+  ],
+  "id": "mild_0091"
+ },
+ {
+  "severity": "mild",
+  "style": "erroneous",
+  "description": "小便的时候有点烫烫的，次数比平常多一点点。",
+  "gold_department": "泌尿科",
+  "gold_diseases": [
+   "轻度尿路感染",
+   "尿道炎"
+  ],
+  "id": "mild_0092"
+ },
+ {
+  "severity": "mild",
+  "style": "erroneous",
+  "description": "牙银有点肿，刷牙的时候会出一点点血。",
+  "gold_department": "耳鼻喉科",
+  "gold_diseases": [
+   "牙龈炎",
+   "牙周炎"
+  ],
+  "id": "mild_0093"
+ },
+ {
+  "severity": "mild",
+  "style": "erroneous",
+  "description": "最近老是打喷嚏，鼻子痒，眼睛也跟着痒，可能是换季了。",
+  "gold_department": "耳鼻喉科",
+  "gold_diseases": [
+   "过敏性鼻炎",
+   "季节性过敏"
+  ],
+  "id": "mild_0094"
+ },
+ {
+  "severity": "mild",
+  "style": "erroneous",
+  "description": "嗓子有点干，咳嗖好几天了，也没痰，就是痒痒的",
+  "gold_department": "呼吸内科",
+  "gold_diseases": [
+   "急性上呼吸道感染",
+   "咽喉炎"
+  ],
+  "id": "mild_0095"
+ },
+ {
+  "severity": "mild",
+  "style": "erroneous",
+  "description": "肚脐眼周围有点拉希，一天两三次，不疼，就是咕噜咕噜叫",
+  "gold_department": "消化内科",
+  "gold_diseases": [
+   "急性胃肠炎",
+   "肠易激综合征"
+  ],
+  "id": "mild_0096"
+ },
+ {
+  "severity": "mild",
+  "style": "erroneous",
+  "description": "胳膊上起了几个小红点，有点痒痒，挠了以后有点肿，不知道是不是过敏",
+  "gold_department": "皮肤科",
+  "gold_diseases": [
+   "荨麻疹",
+   "接触性皮炎"
+  ],
+  "id": "mild_0097"
+ },
+ {
+  "severity": "mild",
+  "style": "erroneous",
+  "description": "最近老是觉得浑身没劲儿，想睡觉，可能是前阵子感冒还没好利索",
+  "gold_department": "呼吸内科",
+  "gold_diseases": [
+   "上呼吸道感染恢复期",
+   "疲劳综合征"
+  ],
+  "id": "mild_0098"
+ },
+ {
+  "severity": "mild",
+  "style": "erroneous",
+  "description": "耳朵里有点嗡嗡响，听东西像隔了一层膜，不疼，就是有点闷得慌",
+  "gold_department": "耳鼻喉科",
+  "gold_diseases": [
+   "分泌性中耳炎",
+   "突发性耳聋（轻度）"
+  ],
+  "id": "mild_0099"
+ },
+ {
+  "severity": "risky",
+  "style": "formal",
+  "description": "医生您好，我近三天出现持续性胸骨后压榨性疼痛，活动后加重，休息可稍缓解，伴轻度气促，无放射痛。",
+  "gold_department": "心内科",
+  "gold_diseases": [
+   "心绞痛",
+   "急性冠脉综合征"
+  ],
+  "id": "risky_0100"
+ },
+ {
+  "severity": "risky",
+  "style": "formal",
+  "description": "我发热已持续五天，最高体温39.2℃，伴畏寒、乏力及轻微咳嗽，口服退热药后反复，无明显咳痰。",
+  "gold_department": "感染科",
+  "gold_diseases": [
+   "发热待查",
+   "呼吸道感染"
+  ],
+  "id": "risky_0101"
+ },
+ {
+  "severity": "risky",
+  "style": "formal",
+  "description": "近两日出现右下腹持续性隐痛，阵发性加重，伴恶心及食欲减退，无腹泻，按压时疼痛明显。",
+  "gold_department": "消化内科",
+  "gold_diseases": [
+   "急性阑尾炎",
+   "肠系膜淋巴结炎"
+  ],
+  "id": "risky_0102"
+ },
+ {
+  "severity": "risky",
+  "style": "formal",
+  "description": "我反复发作性头晕伴恶心呕吐两天，改变体位时加重，无耳鸣及听力下降，无肢体无力。",
+  "gold_department": "神经内科",
+  "gold_diseases": [
+   "眩晕综合征",
+   "后循环缺血"
+  ],
+  "id": "risky_0103"
+ },
+ {
+  "severity": "risky",
+  "style": "formal",
+  "description": "排尿时尿道灼痛三天，伴尿频、尿急及下腹坠胀感，无发热及腰痛。",
+  "gold_department": "泌尿科",
+  "gold_diseases": [
+   "急性膀胱炎",
+   "尿路感染"
+  ],
+  "id": "risky_0104"
+ },
+ {
+  "severity": "risky",
+  "style": "formal",
+  "description": "近一周出现咽痛伴发热，体温38.5℃左右，吞咽时疼痛加重，双侧扁桃体肿大并有脓性分泌物。",
+  "gold_department": "耳鼻喉科",
+  "gold_diseases": [
+   "急性化脓性扁桃体炎",
+   "急性咽炎"
+  ],
+  "id": "risky_0105"
+ },
+ {
+  "severity": "risky",
+  "style": "formal",
+  "description": "我咳嗽伴黄痰已十天，晨起及夜间加重，偶有胸闷，无咯血及呼吸困难，吸烟史十年。",
+  "gold_department": "呼吸内科",
+  "gold_diseases": [
+   "急性支气管炎",
+   "肺炎"
+  ],
+  "id": "risky_0106"
+ },
+ {
+  "severity": "risky",
+  "style": "formal",
+  "description": "近一个月出现多饮、多尿及体重下降约4公斤，伴乏力及视物模糊，无明显多食。",
+  "gold_department": "内分泌科",
+  "gold_diseases": [
+   "糖尿病",
+   "血糖代谢异常"
+  ],
+  "id": "risky_0107"
+ },
+ {
+  "severity": "risky",
+  "style": "formal",
+  "description": "我双膝关节疼痛肿胀两周，晨起僵硬约半小时，活动后稍缓解，无发热及皮疹。",
+  "gold_department": "风湿免疫科",
+  "gold_diseases": [
+   "类风湿关节炎",
+   "骨关节炎"
+  ],
+  "id": "risky_0108"
+ },
+ {
+  "severity": "risky",
+  "style": "formal",
+  "description": "近三日出现便血，为鲜红色，附于粪便表面，伴肛门坠胀及排便疼痛，无发热及腹痛。",
+  "gold_department": "肛肠科",
+  "gold_diseases": [
+   "痔疮出血",
+   "肛裂"
+  ],
+  "id": "risky_0109"
+ },
+ {
+  "severity": "risky",
+  "style": "formal",
+  "description": "近三日持续发热，最高体温38.9℃，伴畏寒及全身肌肉酸痛，口服退热药后体温可短暂下降但反复升高。",
+  "gold_department": "感染科",
+  "gold_diseases": [
+   "流行性感冒",
+   "病毒性感染"
+  ],
+  "id": "risky_0110"
+ },
+ {
+  "severity": "risky",
+  "style": "formal",
+  "description": "反复发作性胸骨后压榨样疼痛两周，每次持续约5分钟，劳累后诱发，休息后可缓解。",
+  "gold_department": "心内科",
+  "gold_diseases": [
+   "心绞痛",
+   "冠状动脉粥样硬化性心脏病"
+  ],
+  "id": "risky_0111"
+ },
+ {
+  "severity": "risky",
+  "style": "formal",
+  "description": "上腹持续性隐痛三天，进食后加重，伴反酸、嗳气及轻度恶心，无明显呕吐及黑便。",
+  "gold_department": "消化内科",
+  "gold_diseases": [
+   "胃炎",
+   "消化性溃疡"
+  ],
+  "id": "risky_0112"
+ },
+ {
+  "severity": "risky",
+  "style": "formal",
+  "description": "发作性眩晕两天，伴恶心呕吐，与体位改变有关，无耳鸣及听力下降。",
+  "gold_department": "神经内科",
+  "gold_diseases": [
+   "眩晕综合征",
+   "椎基底动脉供血不足"
+  ],
+  "id": "risky_0113"
+ },
+ {
+  "severity": "risky",
+  "style": "formal",
+  "description": "尿频、尿急、尿痛两天，伴下腹坠胀感，无发热及腰痛。",
+  "gold_department": "泌尿科",
+  "gold_diseases": [
+   "急性膀胱炎",
+   "尿路感染"
+  ],
+  "id": "risky_0114"
+ },
+ {
+  "severity": "risky",
+  "style": "formal",
+  "description": "咽痛伴发热三天，体温最高38.5℃，吞咽时疼痛明显，无咳嗽及呼吸困难。",
+  "gold_department": "耳鼻喉科",
+  "gold_diseases": [
+   "急性扁桃体炎",
+   "急性咽炎"
+  ],
+  "id": "risky_0115"
+ },
+ {
+  "severity": "risky",
+  "style": "formal",
+  "description": "咳嗽伴黄痰一周，夜间加重，无咯血及胸痛，体温波动于37.5℃左右。",
+  "gold_department": "呼吸内科",
+  "gold_diseases": [
+   "急性支气管炎",
+   "肺炎"
+  ],
+  "id": "risky_0116"
+ },
+ {
+  "severity": "risky",
+  "style": "formal",
+  "description": "多饮、多尿伴乏力两周，每日饮水量明显增加，体重较前下降约3公斤。",
+  "gold_department": "内分泌科",
+  "gold_diseases": [
+   "糖尿病",
+   "血糖代谢异常"
+  ],
+  "id": "risky_0117"
+ },
+ {
+  "severity": "risky",
+  "style": "formal",
+  "description": "双手近端指间关节及腕关节对称性肿痛一个月，晨僵约1小时，活动后减轻。",
+  "gold_department": "风湿免疫科",
+  "gold_diseases": [
+   "类风湿关节炎",
+   "结缔组织病"
+  ],
+  "id": "risky_0118"
+ },
+ {
+  "severity": "risky",
+  "style": "formal",
+  "description": "排便时肛门疼痛伴少量鲜红色出血一周，便后疼痛可持续数小时。",
+  "gold_department": "肛肠科",
+  "gold_diseases": [
+   "肛裂",
+   "痔疮"
+  ],
+  "id": "risky_0119"
+ },
+ {
+  "severity": "risky",
+  "style": "formal",
+  "description": "医生您好，我最近三天持续发热，体温最高达39.2℃，伴有畏寒和轻微咳嗽，自行服用退热药后仍反复发热，想咨询是否需要进一步检查。",
+  "gold_department": "呼吸内科",
+  "gold_diseases": [
+   "社区获得性肺炎",
+   "流行性感冒"
+  ],
+  "id": "risky_0120"
+ },
+ {
+  "severity": "risky",
+  "style": "formal",
+  "description": "近一周反复出现胸骨后压榨性疼痛，每次持续约5分钟，活动后加重，休息后可缓解，偶有出汗，希望明确病因。",
+  "gold_department": "心内科",
+  "gold_diseases": [
+   "心绞痛",
+   "冠状动脉粥样硬化性心脏病"
+  ],
+  "id": "risky_0121"
+ },
+ {
+  "severity": "risky",
+  "style": "formal",
+  "description": "两天前开始出现右下腹持续性疼痛，伴恶心和食欲减退，走路时疼痛加重，无腹泻，想咨询是否需要急诊处理。",
+  "gold_department": "消化内科",
+  "gold_diseases": [
+   "急性阑尾炎",
+   "急性胃肠炎"
+  ],
+  "id": "risky_0122"
+ },
+ {
+  "severity": "risky",
+  "style": "formal",
+  "description": "三天来反复头晕伴恶心呕吐，呕吐为非喷射性，与体位变化有关，无耳鸣及听力下降，希望查明原因。",
+  "gold_department": "神经内科",
+  "gold_diseases": [
+   "眩晕综合征",
+   "后循环缺血"
+  ],
+  "id": "risky_0123"
+ },
+ {
+  "severity": "risky",
+  "style": "formal",
+  "description": "最近一周出现尿频、尿急、尿痛，伴下腹坠胀感，无发热和腰痛，想咨询是否需要抗感染治疗。",
+  "gold_department": "泌尿科",
+  "gold_diseases": [
+   "急性膀胱炎",
+   "尿路感染"
+  ],
+  "id": "risky_0124"
+ },
+ {
+  "severity": "risky",
+  "style": "formal",
+  "description": "近两周多饮、多尿、体重下降约3公斤，伴乏力，空腹血糖未测，希望评估是否存在血糖异常。",
+  "gold_department": "内分泌科",
+  "gold_diseases": [
+   "2型糖尿病",
+   "糖尿病酮症倾向"
+  ],
+  "id": "risky_0125"
+ },
+ {
+  "severity": "risky",
+  "style": "formal",
+  "description": "持续咽痛伴发热五天，吞咽时疼痛明显，声音嘶哑，颈部淋巴结肿大，口服抗生素效果不佳，想咨询是否需要就诊。",
+  "gold_department": "耳鼻喉科",
+  "gold_diseases": [
+   "急性扁桃体炎",
+   "急性咽炎"
+  ],
+  "id": "risky_0126"
+ },
+ {
+  "severity": "risky",
+  "style": "formal",
+  "description": "近一个月反复关节肿痛，以双手小关节和腕关节为主，晨僵持续约1小时，伴乏力，希望明确是否为风湿性疾病。",
+  "gold_department": "风湿免疫科",
+  "gold_diseases": [
+   "类风湿关节炎",
+   "系统性红斑狼疮"
+  ],
+  "id": "risky_0127"
+ },
+ {
+  "severity": "risky",
+  "style": "formal",
+  "description": "近一周出现皮肤大片红斑伴剧烈瘙痒，夜间加重，部分区域有抓痕和渗液，抗过敏药效果欠佳，想咨询治疗方案。",
+  "gold_department": "皮肤科",
+  "gold_diseases": [
+   "急性荨麻疹",
+   "接触性皮炎"
+  ],
+  "id": "risky_0128"
+ },
+ {
+  "severity": "risky",
+  "style": "formal",
+  "description": "绝经后阴道不规则出血两周，量少但持续，无腹痛及发热，既往有子宫肌瘤病史，希望尽快明确病因。",
+  "gold_department": "妇科",
+  "gold_diseases": [
+   "子宫内膜病变",
+   "子宫颈病变"
+  ],
+  "id": "risky_0129"
+ },
+ {
+  "severity": "risky",
+  "style": "formal",
+  "description": "患者近三日出现持续性胸骨后压榨性疼痛，每次发作约持续十分钟，伴轻度气短，休息后可稍缓解，但反复发作。",
+  "gold_department": "心内科",
+  "gold_diseases": [
+   "冠状动脉粥样硬化性心脏病",
+   "不稳定型心绞痛"
+  ],
+  "id": "risky_0130"
+ },
+ {
+  "severity": "risky",
+  "style": "formal",
+  "description": "患者发热五天，体温最高达39.2摄氏度，伴畏寒、乏力及轻度咳嗽，自行服用退热药后体温可暂时下降，但反复升高。",
+  "gold_department": "感染科",
+  "gold_diseases": [
+   "社区获得性肺炎",
+   "流行性感冒"
+  ],
+  "id": "risky_0131"
+ },
+ {
+  "severity": "risky",
+  "style": "formal",
+  "description": "患者近两日出现右下腹持续性隐痛，逐渐加重，伴恶心及食欲减退，行走时疼痛明显。",
+  "gold_department": "消化内科",
+  "gold_diseases": [
+   "急性阑尾炎",
+   "肠系膜淋巴结炎"
+  ],
+  "id": "risky_0132"
+ },
+ {
+  "severity": "risky",
+  "style": "formal",
+  "description": "患者突发眩晕伴恶心呕吐两小时，呕吐为非喷射性，闭眼休息后稍缓解，无明显肢体无力及言语障碍。",
+  "gold_department": "神经内科",
+  "gold_diseases": [
+   "前庭神经炎",
+   "眩晕综合征"
+  ],
+  "id": "risky_0133"
+ },
+ {
+  "severity": "risky",
+  "style": "formal",
+  "description": "患者排尿时疼痛明显，伴尿频、尿急及下腹坠胀感，尿液颜色偏深，已持续三天。",
+  "gold_department": "泌尿科",
+  "gold_diseases": [
+   "急性膀胱炎",
+   "尿路感染"
+  ],
+  "id": "risky_0134"
+ },
+ {
+  "severity": "risky",
+  "style": "formal",
+  "description": "患者咽痛伴发热三天，吞咽时疼痛加重，伴双侧颈部淋巴结肿大及轻度声音嘶哑。",
+  "gold_department": "耳鼻喉科",
+  "gold_diseases": [
+   "急性化脓性扁桃体炎",
+   "急性咽炎"
+  ],
+  "id": "risky_0135"
+ },
+ {
+  "severity": "risky",
+  "style": "formal",
+  "description": "患者近一周出现多饮、多尿及体重下降，伴明显乏力，空腹血糖自测为11.8毫摩尔每升。",
+  "gold_department": "内分泌科",
+  "gold_diseases": [
+   "2型糖尿病",
+   "糖尿病酮症"
+  ],
+  "id": "risky_0136"
+ },
+ {
+  "severity": "risky",
+  "style": "formal",
+  "description": "患者腰部扭伤后出现持续性腰痛，活动受限，翻身及起坐时疼痛加重，无明显下肢麻木。",
+  "gold_department": "骨外科",
+  "gold_diseases": [
+   "急性腰扭伤",
+   "腰椎间盘突出症"
+  ],
+  "id": "risky_0137"
+ },
+ {
+  "severity": "risky",
+  "style": "formal",
+  "description": "患者双眼发红、畏光、流泪伴异物感两天，晨起分泌物增多，视力无明显下降。",
+  "gold_department": "眼科",
+  "gold_diseases": [
+   "急性结膜炎",
+   "角膜炎"
+  ],
+  "id": "risky_0138"
+ },
+ {
+  "severity": "risky",
+  "style": "formal",
+  "description": "患者阴道分泌物增多伴异味及外阴瘙痒五天，偶有下腹隐痛，无发热。",
+  "gold_department": "妇科",
+  "gold_diseases": [
+   "细菌性阴道病",
+   "盆腔炎性疾病"
+  ],
+  "id": "risky_0139"
+ },
+ {
+  "severity": "risky",
+  "style": "formal",
+  "description": "近三日反复出现胸骨后压榨样疼痛，每次持续约十分钟，伴左肩放射痛，活动后加重。",
+  "gold_department": "心内科",
+  "gold_diseases": [
+   "心绞痛",
+   "冠状动脉粥样硬化性心脏病"
+  ],
+  "id": "risky_0140"
+ },
+ {
+  "severity": "risky",
+  "style": "formal",
+  "description": "持续发热五天，体温最高39.2摄氏度，伴畏寒、乏力及轻度咳嗽，口服退热药后反复。",
+  "gold_department": "感染科",
+  "gold_diseases": [
+   "呼吸道感染",
+   "肺炎"
+  ],
+  "id": "risky_0141"
+ },
+ {
+  "severity": "risky",
+  "style": "formal",
+  "description": "上腹持续隐痛两天，进食后加重，伴恶心及一次呕吐，无腹泻及黑便。",
+  "gold_department": "消化内科",
+  "gold_diseases": [
+   "急性胃炎",
+   "消化性溃疡"
+  ],
+  "id": "risky_0142"
+ },
+ {
+  "severity": "risky",
+  "style": "formal",
+  "description": "突发眩晕伴恶心呕吐两小时，行走不稳，无肢体无力及言语不清。",
+  "gold_department": "神经内科",
+  "gold_diseases": [
+   "眩晕综合征",
+   "后循环缺血"
+  ],
+  "id": "risky_0143"
+ },
+ {
+  "severity": "risky",
+  "style": "formal",
+  "description": "排尿时尿道灼痛三天，伴尿频、尿急，无发热及腰痛。",
+  "gold_department": "泌尿科",
+  "gold_diseases": [
+   "尿路感染",
+   "膀胱炎"
+  ],
+  "id": "risky_0144"
+ },
+ {
+  "severity": "risky",
+  "style": "formal",
+  "description": "咽痛伴发热三天，吞咽时疼痛明显，无呼吸困难及张口受限。",
+  "gold_department": "耳鼻喉科",
+  "gold_diseases": [
+   "急性咽炎",
+   "急性扁桃体炎"
+  ],
+  "id": "risky_0145"
+ },
+ {
+  "severity": "risky",
+  "style": "formal",
+  "description": "右下腹持续性疼痛一天，阵发性加重，伴恶心，无腹泻及尿路刺激症状。",
+  "gold_department": "消化内科",
+  "gold_diseases": [
+   "急性阑尾炎",
+   "肠系膜淋巴结炎"
+  ],
+  "id": "risky_0146"
+ },
+ {
+  "severity": "risky",
+  "style": "formal",
+  "description": "右眼红痛伴视物模糊两天，无外伤史，伴畏光及流泪。",
+  "gold_department": "眼科",
+  "gold_diseases": [
+   "角膜炎",
+   "急性结膜炎"
+  ],
+  "id": "risky_0147"
+ },
+ {
+  "severity": "risky",
+  "style": "formal",
+  "description": "双手近端指间关节对称性肿痛两周，晨僵约一小时，活动后稍缓解。",
+  "gold_department": "风湿免疫科",
+  "gold_diseases": [
+   "类风湿关节炎",
+   "未分化关节炎"
+  ],
+  "id": "risky_0148"
+ },
+ {
+  "severity": "risky",
+  "style": "formal",
+  "description": "月经量明显增多伴血块三个月，经期延长至十天，伴头晕及乏力。",
+  "gold_department": "妇科",
+  "gold_diseases": [
+   "异常子宫出血",
+   "子宫肌瘤"
+  ],
+  "id": "risky_0149"
+ },
+ {
+  "severity": "risky",
+  "style": "formal",
+  "description": "近三天持续发热，体温最高达39.2℃，伴畏寒和全身肌肉酸痛，口服退热药后体温可暂时下降但反复升高。",
+  "gold_department": "感染科",
+  "gold_diseases": [
+   "发热待查",
+   "流行性感冒",
+   "细菌感染"
+  ],
+  "id": "risky_0150"
+ },
+ {
+  "severity": "risky",
+  "style": "formal",
+  "description": "活动后出现胸骨后压榨性疼痛，每次持续约5分钟，休息后可缓解，近一周发作频率增加。",
+  "gold_department": "心内科",
+  "gold_diseases": [
+   "心绞痛",
+   "冠状动脉粥样硬化性心脏病"
+  ],
+  "id": "risky_0151"
+ },
+ {
+  "severity": "risky",
+  "style": "formal",
+  "description": "右下腹持续性疼痛约12小时，伴恶心及一次呕吐，行走时疼痛加重，无明显腹泻。",
+  "gold_department": "消化内科",
+  "gold_diseases": [
+   "急性阑尾炎",
+   "急性胃肠炎"
+  ],
+  "id": "risky_0152"
+ },
+ {
+  "severity": "risky",
+  "style": "formal",
+  "description": "突发眩晕伴恶心呕吐2小时，改变头位时加重，无肢体无力及言语不清。",
+  "gold_department": "神经内科",
+  "gold_diseases": [
+   "眩晕综合征",
+   "后循环缺血",
+   "前庭神经炎"
+  ],
+  "id": "risky_0153"
+ },
+ {
+  "severity": "risky",
+  "style": "formal",
+  "description": "排尿时尿道灼痛三天，伴尿频、尿急，无发热及腰痛，饮水量正常。",
+  "gold_department": "泌尿科",
+  "gold_diseases": [
+   "急性膀胱炎",
+   "尿路感染"
+  ],
+  "id": "risky_0154"
+ },
+ {
+  "severity": "risky",
+  "style": "formal",
+  "description": "咽痛伴发热两天，体温38.5℃，吞咽时疼痛明显，无咳嗽及呼吸困难。",
+  "gold_department": "耳鼻喉科",
+  "gold_diseases": [
+   "急性扁桃体炎",
+   "急性咽炎"
+  ],
+  "id": "risky_0155"
+ },
+ {
+  "severity": "risky",
+  "style": "formal",
+  "description": "咳嗽伴黄痰一周，近两日出现活动后气短，无咯血及胸痛，体温37.8℃。",
+  "gold_department": "呼吸内科",
+  "gold_diseases": [
+   "急性支气管炎",
+   "肺炎"
+  ],
+  "id": "risky_0156"
+ },
+ {
+  "severity": "risky",
+  "style": "formal",
+  "description": "上腹隐痛伴反酸、烧心两周，进食后加重，偶有夜间痛醒，无黑便及呕吐。",
+  "gold_department": "消化内科",
+  "gold_diseases": [
+   "胃食管反流病",
+   "消化性溃疡",
+   "慢性胃炎"
+  ],
+  "id": "risky_0157"
+ },
+ {
+  "severity": "risky",
+  "style": "formal",
+  "description": "多饮、多尿伴体重下降一个月，近三天出现恶心、乏力，空腹血糖未监测。",
+  "gold_department": "内分泌科",
+  "gold_diseases": [
+   "糖尿病",
+   "糖尿病酮症"
+  ],
+  "id": "risky_0158"
+ },
+ {
+  "severity": "risky",
+  "style": "formal",
+  "description": "双侧膝关节疼痛伴晨僵约30分钟，持续六周，活动后减轻，无关节红肿及发热。",
+  "gold_department": "风湿免疫科",
+  "gold_diseases": [
+   "类风湿关节炎",
+   "骨关节炎"
+  ],
+  "id": "risky_0159"
+ },
+ {
+  "severity": "risky",
+  "style": "formal",
+  "description": "近三天出现持续性胸骨后压榨性疼痛，每次持续约十分钟，伴出汗，休息后可稍缓解。",
+  "gold_department": "心内科",
+  "gold_diseases": [
+   "心绞痛",
+   "急性冠脉综合征"
+  ],
+  "id": "risky_0160"
+ },
+ {
+  "severity": "risky",
+  "style": "formal",
+  "description": "持续发热五天，体温最高达三十九摄氏度，伴畏寒、乏力及轻微咳嗽，口服退热药后反复。",
+  "gold_department": "感染科",
+  "gold_diseases": [
+   "呼吸道感染",
+   "肺炎"
+  ],
+  "id": "risky_0161"
+ },
+ {
+  "severity": "risky",
+  "style": "formal",
+  "description": "右下腹持续性隐痛两天，按压时疼痛加重，伴恶心，无呕吐及腹泻。",
+  "gold_department": "消化内科",
+  "gold_diseases": [
+   "急性阑尾炎",
+   "肠系膜淋巴结炎"
+  ],
+  "id": "risky_0162"
+ },
+ {
+  "severity": "risky",
+  "style": "formal",
+  "description": "突发眩晕伴恶心呕吐两小时，视物旋转，闭眼后稍减轻，无肢体无力及言语障碍。",
+  "gold_department": "神经内科",
+  "gold_diseases": [
+   "眩晕综合征",
+   "后循环缺血"
+  ],
+  "id": "risky_0163"
+ },
+ {
+  "severity": "risky",
+  "style": "formal",
+  "description": "排尿时尿道灼痛三天，伴尿频、尿急，无发热及腰痛。",
+  "gold_department": "泌尿科",
+  "gold_diseases": [
+   "急性膀胱炎",
+   "尿路感染"
+  ],
+  "id": "risky_0164"
+ },
+ {
+  "severity": "risky",
+  "style": "formal",
+  "description": "咽痛伴吞咽困难四天，发热三十八点五摄氏度，双侧扁桃体可见脓性分泌物。",
+  "gold_department": "耳鼻喉科",
+  "gold_diseases": [
+   "急性化脓性扁桃体炎",
+   "咽炎"
+  ],
+  "id": "risky_0165"
+ },
+ {
+  "severity": "risky",
+  "style": "formal",
+  "description": "阵发性干咳伴胸闷一周，夜间及活动后加重，无发热及咯血。",
+  "gold_department": "呼吸内科",
+  "gold_diseases": [
+   "支气管炎",
+   "咳嗽变异性哮喘"
+  ],
+  "id": "risky_0166"
+ },
+ {
+  "severity": "risky",
+  "style": "formal",
+  "description": "上腹隐痛伴反酸、嗳气两周，进食后加重，无黑便及呕吐。",
+  "gold_department": "消化内科",
+  "gold_diseases": [
+   "慢性胃炎",
+   "消化性溃疡"
+  ],
+  "id": "risky_0167"
+ },
+ {
+  "severity": "risky",
+  "style": "formal",
+  "description": "右眼红痛伴视物模糊两天，畏光流泪，无外伤史。",
+  "gold_department": "眼科",
+  "gold_diseases": [
+   "角膜炎",
+   "虹膜睫状体炎"
+  ],
+  "id": "risky_0168"
+ },
+ {
+  "severity": "risky",
+  "style": "formal",
+  "description": "多饮多尿伴体重下降一个月，空腹血糖明显升高，伴乏力及视物模糊。",
+  "gold_department": "内分泌科",
+  "gold_diseases": [
+   "糖尿病",
+   "糖尿病酮症"
+  ],
+  "id": "risky_0169"
+ },
+ {
+  "severity": "risky",
+  "style": "formal",
+  "description": "医生您好，我最近三天反复发热，体温最高达38.7摄氏度，伴畏寒、乏力，无明显咳嗽咳痰，口服退热药后体温可短暂下降但反复升高。",
+  "gold_department": "感染科",
+  "gold_diseases": [
+   "发热待查",
+   "病毒性感染",
+   "细菌性感染"
+  ],
+  "id": "risky_0170"
+ },
+ {
+  "severity": "risky",
+  "style": "formal",
+  "description": "近一周出现活动后胸骨后压榨性疼痛，每次持续约5分钟，休息后可缓解，今日发作较前频繁，伴有出汗和轻度气短。",
+  "gold_department": "心内科",
+  "gold_diseases": [
+   "心绞痛",
+   "冠状动脉粥样硬化性心脏病",
+   "急性冠脉综合征"
+  ],
+  "id": "risky_0171"
+ },
+ {
+  "severity": "risky",
+  "style": "formal",
+  "description": "两天来出现右下腹持续性隐痛，阵发性加重，伴恶心、食欲减退，无腹泻，走路时疼痛明显。",
+  "gold_department": "消化内科",
+  "gold_diseases": [
+   "急性阑尾炎",
+   "肠系膜淋巴结炎",
+   "急性胃肠炎"
+  ],
+  "id": "risky_0172"
+ },
+ {
+  "severity": "risky",
+  "style": "formal",
+  "description": "最近三天反复头晕、恶心并呕吐两次，伴视物旋转感，起床和转头时加重，无肢体无力及言语不清。",
+  "gold_department": "神经内科",
+  "gold_diseases": [
+   "眩晕综合征",
+   "后循环缺血",
+   "前庭神经炎"
+  ],
+  "id": "risky_0173"
+ },
+ {
+  "severity": "risky",
+  "style": "formal",
+  "description": "排尿时尿道灼痛三天，伴尿频、尿急，每次尿量少，下腹部坠胀不适，无发热及腰痛。",
+  "gold_department": "泌尿科",
+  "gold_diseases": [
+   "急性尿路感染",
+   "膀胱炎",
+   "尿道炎"
+  ],
+  "id": "risky_0174"
+ },
+ {
+  "severity": "risky",
+  "style": "natural",
+  "description": "这两天一直发烧，退了又烧，浑身没劲，吃药也不见好，想去医院看看怎么回事。",
+  "gold_department": "感染科",
+  "gold_diseases": [
+   "流行性感冒",
+   "病毒性感染"
+  ],
+  "id": "risky_0175"
+ },
+ {
+  "severity": "risky",
+  "style": "natural",
+  "description": "胸口一阵一阵地疼，有时候喘不上气，尤其爬楼梯的时候特别明显。",
+  "gold_department": "心内科",
+  "gold_diseases": [
+   "冠心病",
+   "心绞痛"
+  ],
+  "id": "risky_0176"
+ },
+ {
+  "severity": "risky",
+  "style": "natural",
+  "description": "肚子右下方一直隐隐作痛，按下去更疼，还有点想吐，吃不下饭。",
+  "gold_department": "消化内科",
+  "gold_diseases": [
+   "急性阑尾炎",
+   "肠炎"
+  ],
+  "id": "risky_0177"
+ },
+ {
+  "severity": "risky",
+  "style": "natural",
+  "description": "这两天老是头晕，站起来眼前发黑，还吐了两回，走路都不太稳。",
+  "gold_department": "神经内科",
+  "gold_diseases": [
+   "眩晕症",
+   "脑供血不足"
+  ],
+  "id": "risky_0178"
+ },
+ {
+  "severity": "risky",
+  "style": "natural",
+  "description": "上厕所的时候特别疼，还老想尿，尿完又觉得没尿干净，有点烧。",
+  "gold_department": "泌尿科",
+  "gold_diseases": [
+   "尿路感染",
+   "膀胱炎"
+  ],
+  "id": "risky_0179"
+ },
+ {
+  "severity": "risky",
+  "style": "natural",
+  "description": "咳嗽快两周了，痰里带点血丝，晚上咳得睡不着，胸口也闷。",
+  "gold_department": "呼吸内科",
+  "gold_diseases": [
+   "肺炎",
+   "支气管炎"
+  ],
+  "id": "risky_0180"
+ },
+ {
+  "severity": "risky",
+  "style": "natural",
+  "description": "嗓子疼得咽口水都费劲，还发烧，脖子两边摸着有点肿。",
+  "gold_department": "耳鼻喉科",
+  "gold_diseases": [
+   "急性扁桃体炎",
+   "咽炎"
+  ],
+  "id": "risky_0181"
+ },
+ {
+  "severity": "risky",
+  "style": "natural",
+  "description": "最近老觉得口渴，喝多少水都不够，晚上还老起夜上厕所，人也瘦了。",
+  "gold_department": "内分泌科",
+  "gold_diseases": [
+   "糖尿病",
+   "甲状腺功能亢进"
+  ],
+  "id": "risky_0182"
+ },
+ {
+  "severity": "risky",
+  "style": "natural",
+  "description": "腰疼得直不起来，腿还有点麻，弯腰捡东西的时候疼得更厉害。",
+  "gold_department": "骨外科",
+  "gold_diseases": [
+   "腰椎间盘突出",
+   "腰肌劳损"
+  ],
+  "id": "risky_0183"
+ },
+ {
+  "severity": "risky",
+  "style": "natural",
+  "description": "关节又红又肿，早上起来手指僵硬得握不住拳，活动一会儿才好点。",
+  "gold_department": "风湿免疫科",
+  "gold_diseases": [
+   "类风湿关节炎",
+   "痛风"
+  ],
+  "id": "risky_0184"
+ },
+ {
+  "severity": "risky",
+  "style": "natural",
+  "description": "我这几天一直发烧，吃了退烧药退了又烧起来，还老觉得浑身没劲。",
+  "gold_department": "感染科",
+  "gold_diseases": [
+   "发热待查",
+   "流感",
+   "呼吸道感染"
+  ],
+  "id": "risky_0185"
+ },
+ {
+  "severity": "risky",
+  "style": "natural",
+  "description": "胸口这阵子老是闷闷的疼，走快一点就更明显，歇会儿能好点。",
+  "gold_department": "心内科",
+  "gold_diseases": [
+   "心绞痛",
+   "冠心病",
+   "心肌缺血"
+  ],
+  "id": "risky_0186"
+ },
+ {
+  "severity": "risky",
+  "style": "natural",
+  "description": "肚子疼了两天了，一开始是胃那块，现在右下腹按着特别疼。",
+  "gold_department": "消化内科",
+  "gold_diseases": [
+   "急性阑尾炎",
+   "急性胃肠炎",
+   "腹痛待查"
+  ],
+  "id": "risky_0187"
+ },
+ {
+  "severity": "risky",
+  "style": "natural",
+  "description": "这两天头特别晕，还吐了两回，站起来就感觉天旋地转的。",
+  "gold_department": "神经内科",
+  "gold_diseases": [
+   "眩晕综合征",
+   "椎基底动脉供血不足",
+   "前庭神经炎"
+  ],
+  "id": "risky_0188"
+ },
+ {
+  "severity": "risky",
+  "style": "natural",
+  "description": "上厕所小便的时候特别疼，还老想尿，尿完感觉没尿干净。",
+  "gold_department": "泌尿科",
+  "gold_diseases": [
+   "尿路感染",
+   "膀胱炎",
+   "尿道炎"
+  ],
+  "id": "risky_0189"
+ },
+ {
+  "severity": "risky",
+  "style": "natural",
+  "description": "嗓子疼得咽口水都费劲，还有点发烧，脖子两边摸着也疼。",
+  "gold_department": "耳鼻喉科",
+  "gold_diseases": [
+   "急性扁桃体炎",
+   "急性咽炎",
+   "颈部淋巴结炎"
+  ],
+  "id": "risky_0190"
+ },
+ {
+  "severity": "risky",
+  "style": "natural",
+  "description": "咳嗽快两周了，晚上咳得厉害，还有点黄痰，胸口也不舒服。",
+  "gold_department": "呼吸内科",
+  "gold_diseases": [
+   "支气管炎",
+   "肺炎",
+   "呼吸道感染"
+  ],
+  "id": "risky_0191"
+ },
+ {
+  "severity": "risky",
+  "style": "natural",
+  "description": "最近总觉得心慌，手也有点抖，吃得挺多但人反而瘦了。",
+  "gold_department": "内分泌科",
+  "gold_diseases": [
+   "甲状腺功能亢进",
+   "心律失常",
+   "代谢性疾病"
+  ],
+  "id": "risky_0192"
+ },
+ {
+  "severity": "risky",
+  "style": "natural",
+  "description": "腰疼得直不起来，腿还发麻，走路时间长了就更严重。",
+  "gold_department": "骨外科",
+  "gold_diseases": [
+   "腰椎间盘突出",
+   "腰肌劳损",
+   "坐骨神经痛"
+  ],
+  "id": "risky_0193"
+ },
+ {
+  "severity": "risky",
+  "style": "natural",
+  "description": "下面痒得难受，白带也变多了还有味儿，同房的时候有点疼。",
+  "gold_department": "妇科",
+  "gold_diseases": [
+   "阴道炎",
+   "宫颈炎",
+   "盆腔炎"
+  ],
+  "id": "risky_0194"
+ },
+ {
+  "severity": "risky",
+  "style": "natural",
+  "description": "这两天胸口总是一阵一阵地疼，喘气还有点费劲，是不是得赶紧看看啊？",
+  "gold_department": "心内科",
+  "gold_diseases": [
+   "心绞痛",
+   "冠心病"
+  ],
+  "id": "risky_0195"
+ },
+ {
+  "severity": "risky",
+  "style": "natural",
+  "description": "我烧了三天了，退了又烧，浑身没劲，咳嗽也越来越厉害，想去医院看看。",
+  "gold_department": "呼吸内科",
+  "gold_diseases": [
+   "肺炎",
+   "急性支气管炎"
+  ],
+  "id": "risky_0196"
+ },
+ {
+  "severity": "risky",
+  "style": "natural",
+  "description": "肚子疼得厉害，一阵一阵的，还老想吐，吃东西也吃不下，不知道挂什么科。",
+  "gold_department": "消化内科",
+  "gold_diseases": [
+   "急性胃肠炎",
+   "胆囊炎"
+  ],
+  "id": "risky_0197"
+ },
+ {
+  "severity": "risky",
+  "style": "natural",
+  "description": "这两天头晕得厉害，还吐了好几回，走路都有点飘，想找医生看看。",
+  "gold_department": "神经内科",
+  "gold_diseases": [
+   "眩晕综合征",
+   "脑供血不足"
+  ],
+  "id": "risky_0198"
+ },
+ {
+  "severity": "risky",
+  "style": "natural",
+  "description": "我最近老是口渴，喝水多，尿也多，人还瘦了不少，想查查是不是血糖的事。",
+  "gold_department": "内分泌科",
+  "gold_diseases": [
+   "糖尿病",
+   "甲状腺功能亢进"
+  ],
+  "id": "risky_0199"
+ },
+ {
+  "severity": "risky",
+  "style": "natural",
+  "description": "嗓子疼了好几天，咽口水都疼，还有点发烧，感觉越来越严重了。",
+  "gold_department": "耳鼻喉科",
+  "gold_diseases": [
+   "急性咽炎",
+   "扁桃体炎"
+  ],
+  "id": "risky_0200"
+ },
+ {
+  "severity": "risky",
+  "style": "natural",
+  "description": "小便的时候又疼又烧，还老想上厕所，尿得也不多，挺难受的。",
+  "gold_department": "泌尿科",
+  "gold_diseases": [
+   "尿路感染",
+   "膀胱炎"
+  ],
+  "id": "risky_0201"
+ },
+ {
+  "severity": "risky",
+  "style": "natural",
+  "description": "腰疼好一阵了，弯下去都费劲，腿还有点麻，想看看是不是腰椎的问题。",
+  "gold_department": "骨外科",
+  "gold_diseases": [
+   "腰椎间盘突出",
+   "腰肌劳损"
+  ],
+  "id": "risky_0202"
+ },
+ {
+  "severity": "risky",
+  "style": "natural",
+  "description": "身上起了好多红疹子，特别痒，抹了药也不见好，想找皮肤科看看。",
+  "gold_department": "皮肤科",
+  "gold_diseases": [
+   "荨麻疹",
+   "湿疹"
+  ],
+  "id": "risky_0203"
+ },
+ {
+  "severity": "risky",
+  "style": "natural",
+  "description": "最近白带特别多，还有味儿，小肚子也隐隐地疼，想去妇科查一下。",
+  "gold_department": "妇科",
+  "gold_diseases": [
+   "阴道炎",
+   "盆腔炎"
+  ],
+  "id": "risky_0204"
+ },
+ {
+  "severity": "risky",
+  "style": "natural",
+  "description": "这两天胸口总是一阵一阵地闷疼，喘气费劲，走两步就得歇会儿。",
+  "gold_department": "心内科",
+  "gold_diseases": [
+   "冠心病",
+   "心绞痛"
+  ],
+  "id": "risky_0205"
+ },
+ {
+  "severity": "risky",
+  "style": "natural",
+  "description": "发烧到39度三天了，吃退烧药也不退，还一直咳嗽有黄痰。",
+  "gold_department": "呼吸内科",
+  "gold_diseases": [
+   "肺炎",
+   "急性支气管炎"
+  ],
+  "id": "risky_0206"
+ },
+ {
+  "severity": "risky",
+  "style": "natural",
+  "description": "肚子疼得厉害，一阵一阵的，还吐了两回，吃啥吐啥。",
+  "gold_department": "消化内科",
+  "gold_diseases": [
+   "急性胃肠炎",
+   "胆囊炎"
+  ],
+  "id": "risky_0207"
+ },
+ {
+  "severity": "risky",
+  "style": "natural",
+  "description": "头晕得厉害，天旋地转的，还老想吐，不敢睁眼。",
+  "gold_department": "神经内科",
+  "gold_diseases": [
+   "眩晕综合征",
+   "椎基底动脉供血不足"
+  ],
+  "id": "risky_0208"
+ },
+ {
+  "severity": "risky",
+  "style": "natural",
+  "description": "尿尿的时候特别疼，还老想去厕所，尿完感觉没尿干净。",
+  "gold_department": "泌尿科",
+  "gold_diseases": [
+   "尿路感染",
+   "膀胱炎"
+  ],
+  "id": "risky_0209"
+ },
+ {
+  "severity": "risky",
+  "style": "natural",
+  "description": "嗓子疼得咽口水都费劲，还发烧，张嘴看里面好像有白点。",
+  "gold_department": "耳鼻喉科",
+  "gold_diseases": [
+   "急性化脓性扁桃体炎",
+   "急性咽炎"
+  ],
+  "id": "risky_0210"
+ },
+ {
+  "severity": "risky",
+  "style": "natural",
+  "description": "眼睛又红又疼，怕光，一直流眼泪，看东西还有点模糊。",
+  "gold_department": "眼科",
+  "gold_diseases": [
+   "急性结膜炎",
+   "角膜炎"
+  ],
+  "id": "risky_0211"
+ },
+ {
+  "severity": "risky",
+  "style": "natural",
+  "description": "腰疼得直不起来，弯一下都费劲，腿还发麻。",
+  "gold_department": "骨外科",
+  "gold_diseases": [
+   "腰椎间盘突出症",
+   "腰肌劳损"
+  ],
+  "id": "risky_0212"
+ },
+ {
+  "severity": "risky",
+  "style": "natural",
+  "description": "下面痒得难受，白带还多，颜色发黄有味儿。",
+  "gold_department": "妇科",
+  "gold_diseases": [
+   "阴道炎",
+   "宫颈炎"
+  ],
+  "id": "risky_0213"
+ },
+ {
+  "severity": "risky",
+  "style": "natural",
+  "description": "孩子烧到38度5，一直哭闹，还吐了，精神头儿不好。",
+  "gold_department": "儿科",
+  "gold_diseases": [
+   "小儿急性上呼吸道感染",
+   "小儿胃肠炎"
+  ],
+  "id": "risky_0214"
+ },
+ {
+  "severity": "risky",
+  "style": "natural",
+  "description": "我这两天胸口一直闷闷的，像有东西压着，走快一点就更明显，歇会儿能好点，不知道是不是心脏出问题了。",
+  "gold_department": "心内科",
+  "gold_diseases": [
+   "冠心病",
+   "心绞痛"
+  ],
+  "id": "risky_0215"
+ },
+ {
+  "severity": "risky",
+  "style": "natural",
+  "description": "烧了三天了，退了又烧，最高三十九度多，还一直咳嗽有黄痰，吃点退烧药也不太管用。",
+  "gold_department": "呼吸内科",
+  "gold_diseases": [
+   "肺炎",
+   "急性支气管炎"
+  ],
+  "id": "risky_0216"
+ },
+ {
+  "severity": "risky",
+  "style": "natural",
+  "description": "肚子疼了两天了，一开始是胃那块，后来整个肚子都疼，按下去更疼，还犯恶心没胃口。",
+  "gold_department": "消化内科",
+  "gold_diseases": [
+   "急性胃炎",
+   "胆囊炎"
+  ],
+  "id": "risky_0217"
+ },
+ {
+  "severity": "risky",
+  "style": "natural",
+  "description": "这两天头一直晕，站起来眼前发黑，还吐了两回，脖子也僵僵的，家里人让我赶紧来看看。",
+  "gold_department": "神经内科",
+  "gold_diseases": [
+   "眩晕症",
+   "颅内感染"
+  ],
+  "id": "risky_0218"
+ },
+ {
+  "severity": "risky",
+  "style": "natural",
+  "description": "最近老是口渴，喝多少水都不解渴，尿也特别多，人还瘦了好几斤，是不是血糖有问题啊。",
+  "gold_department": "内分泌科",
+  "gold_diseases": [
+   "糖尿病",
+   "糖尿病酮症"
+  ],
+  "id": "risky_0219"
+ },
+ {
+  "severity": "risky",
+  "style": "natural",
+  "description": "小便的时候特别疼，像火烧一样，还老想上厕所，一晚上跑好几趟，腰也有点酸。",
+  "gold_department": "泌尿科",
+  "gold_diseases": [
+   "尿路感染",
+   "急性膀胱炎"
+  ],
+  "id": "risky_0220"
+ },
+ {
+  "severity": "risky",
+  "style": "natural",
+  "description": "嗓子疼了快一星期了，咽口水都疼，还发着低烧，耳朵也跟着疼，吃了消炎药也没见好。",
+  "gold_department": "耳鼻喉科",
+  "gold_diseases": [
+   "急性扁桃体炎",
+   "急性咽炎"
+  ],
+  "id": "risky_0221"
+ },
+ {
+  "severity": "risky",
+  "style": "natural",
+  "description": "我这膝盖又肿又疼，走路都费劲，早上起来还僵得动不了，得活动半天才缓过来，最近手指关节也开始疼了。",
+  "gold_department": "风湿免疫科",
+  "gold_diseases": [
+   "类风湿关节炎",
+   "痛风性关节炎"
+  ],
+  "id": "risky_0222"
+ },
+ {
+  "severity": "risky",
+  "style": "natural",
+  "description": "下面痒得厉害，白带也多了还有味，这两天小肚子还坠着疼，坐都坐不住。",
+  "gold_department": "妇科",
+  "gold_diseases": [
+   "阴道炎",
+   "盆腔炎"
+  ],
+  "id": "risky_0223"
+ },
+ {
+  "severity": "risky",
+  "style": "natural",
+  "description": "孩子昨天晚上开始发烧，一直喊头疼，还吐了两次，脖子发硬不让人碰，精神也不太好。",
+  "gold_department": "儿科",
+  "gold_diseases": [
+   "病毒性脑炎",
+   "化脓性脑膜炎"
+  ],
+  "id": "risky_0224"
+ },
+ {
+  "severity": "risky",
+  "style": "natural",
+  "description": "这两天胸口一阵一阵闷得慌，走几步路就喘不上气，歇会儿能好点，但总觉得不对劲。",
+  "gold_department": "心内科",
+  "gold_diseases": [
+   "冠心病",
+   "心绞痛"
+  ],
+  "id": "risky_0225"
+ },
+ {
+  "severity": "risky",
+  "style": "natural",
+  "description": "发烧三天了，吃了退烧药退下去又烧起来，嗓子疼得咽口水都费劲。",
+  "gold_department": "呼吸内科",
+  "gold_diseases": [
+   "急性扁桃体炎",
+   "上呼吸道感染"
+  ],
+  "id": "risky_0226"
+ },
+ {
+  "severity": "risky",
+  "style": "natural",
+  "description": "肚子疼了两天了，一开始是胃那块儿，现在右下边按着特别疼，还有点想吐。",
+  "gold_department": "消化内科",
+  "gold_diseases": [
+   "急性阑尾炎",
+   "急性胃肠炎"
+  ],
+  "id": "risky_0227"
+ },
+ {
+  "severity": "risky",
+  "style": "natural",
+  "description": "头晕得厉害，还老想吐，转个头都晕，昨天吐了一回，今天走路都发飘。",
+  "gold_department": "神经内科",
+  "gold_diseases": [
+   "眩晕综合征",
+   "前庭神经炎"
+  ],
+  "id": "risky_0228"
+ },
+ {
+  "severity": "risky",
+  "style": "natural",
+  "description": "小便的时候又疼又烧，老想上厕所，刚去完没一会儿又想去，下面还胀得难受。",
+  "gold_department": "泌尿科",
+  "gold_diseases": [
+   "尿路感染",
+   "膀胱炎"
+  ],
+  "id": "risky_0229"
+ },
+ {
+  "severity": "risky",
+  "style": "natural",
+  "description": "这几天老觉得心慌，手也有点抖，吃得多还瘦了好几斤，晚上睡觉出汗。",
+  "gold_department": "内分泌科",
+  "gold_diseases": [
+   "甲状腺功能亢进",
+   "甲状腺毒症"
+  ],
+  "id": "risky_0230"
+ },
+ {
+  "severity": "risky",
+  "style": "natural",
+  "description": "右边耳朵嗡嗡响，听东西像隔了一层，昨天还流了点水出来，有点疼。",
+  "gold_department": "耳鼻喉科",
+  "gold_diseases": [
+   "中耳炎",
+   "突发性耳聋"
+  ],
+  "id": "risky_0231"
+ },
+ {
+  "severity": "risky",
+  "style": "natural",
+  "description": "腰疼得直不起来，弯下去更疼，腿还有点麻，坐着站不起来得缓一会儿。",
+  "gold_department": "骨外科",
+  "gold_diseases": [
+   "腰椎间盘突出",
+   "腰肌劳损"
+  ],
+  "id": "risky_0232"
+ },
+ {
+  "severity": "risky",
+  "style": "natural",
+  "description": "下面痒得不行，白带也多了还有味儿，小便的时候有点刺痛，坐都坐不住。",
+  "gold_department": "妇科",
+  "gold_diseases": [
+   "阴道炎",
+   "盆腔炎"
+  ],
+  "id": "risky_0233"
+ },
+ {
+  "severity": "risky",
+  "style": "natural",
+  "description": "拉肚子拉了四五天了，一天跑七八趟厕所，人都拉虚了，肚子一阵一阵绞着疼。",
+  "gold_department": "消化内科",
+  "gold_diseases": [
+   "急性肠炎",
+   "感染性腹泻"
+  ],
+  "id": "risky_0234"
+ },
+ {
+  "severity": "risky",
+  "style": "natural",
+  "description": "我这两天胸口一阵一阵地闷疼，走快一点就更明显，歇会儿能好点，不知道是不是心脏的问题。",
+  "gold_department": "心内科",
+  "gold_diseases": [
+   "冠心病",
+   "心绞痛"
+  ],
+  "id": "risky_0235"
+ },
+ {
+  "severity": "risky",
+  "style": "natural",
+  "description": "我发烧三天了，一直在38度5上下，吃了退烧药退下去又烧起来，还有点咳嗽没痰。",
+  "gold_department": "呼吸内科",
+  "gold_diseases": [
+   "肺炎",
+   "上呼吸道感染"
+  ],
+  "id": "risky_0236"
+ },
+ {
+  "severity": "risky",
+  "style": "natural",
+  "description": "我这几天肚子一阵一阵地疼，主要在肚脐周围，还拉肚子，一天跑好几趟厕所。",
+  "gold_department": "消化内科",
+  "gold_diseases": [
+   "急性胃肠炎",
+   "肠炎"
+  ],
+  "id": "risky_0237"
+ },
+ {
+  "severity": "risky",
+  "style": "natural",
+  "description": "我这两天头晕得厉害，还老想吐，站起来的时候眼前发黑，躺下会好一点。",
+  "gold_department": "神经内科",
+  "gold_diseases": [
+   "眩晕症",
+   "脑供血不足"
+  ],
+  "id": "risky_0238"
+ },
+ {
+  "severity": "risky",
+  "style": "natural",
+  "description": "我最近老是口渴，喝多少水都不解渴，晚上起来上厕所好几趟，人也瘦了点。",
+  "gold_department": "内分泌科",
+  "gold_diseases": [
+   "糖尿病",
+   "血糖异常"
+  ],
+  "id": "risky_0239"
+ },
+ {
+  "severity": "risky",
+  "style": "natural",
+  "description": "我小便的时候特别疼，像火烧一样，还老觉得尿不干净，一会儿又想去。",
+  "gold_department": "泌尿科",
+  "gold_diseases": [
+   "尿路感染",
+   "膀胱炎"
+  ],
+  "id": "risky_0240"
+ },
+ {
+  "severity": "risky",
+  "style": "natural",
+  "description": "我嗓子疼得咽口水都费劲，还有点发烧，照镜子看嗓子里面红红的。",
+  "gold_department": "耳鼻喉科",
+  "gold_diseases": [
+   "急性咽炎",
+   "扁桃体炎"
+  ],
+  "id": "risky_0241"
+ },
+ {
+  "severity": "risky",
+  "style": "natural",
+  "description": "我腰这块儿疼了好几天了，弯下去直不起来，腿还有点发麻。",
+  "gold_department": "骨外科",
+  "gold_diseases": [
+   "腰椎间盘突出",
+   "腰肌劳损"
+  ],
+  "id": "risky_0242"
+ },
+ {
+  "severity": "risky",
+  "style": "natural",
+  "description": "我来月经以后一直滴滴答答不干净，都十来天了，肚子还隐隐地坠疼。",
+  "gold_department": "妇科",
+  "gold_diseases": [
+   "异常子宫出血",
+   "盆腔炎"
+  ],
+  "id": "risky_0243"
+ },
+ {
+  "severity": "risky",
+  "style": "natural",
+  "description": "我孩子发烧两天了，一直39度左右，精神不太好，也不太吃东西。",
+  "gold_department": "儿科",
+  "gold_diseases": [
+   "小儿高热",
+   "上呼吸道感染"
+  ],
+  "id": "risky_0244"
+ },
+ {
+  "severity": "risky",
+  "style": "natural",
+  "description": "这几天老是发烧，退了又烧，胸口还闷闷的，喘气有点费劲。",
+  "gold_department": "呼吸内科",
+  "gold_diseases": [
+   "肺炎",
+   "胸膜炎"
+  ],
+  "id": "risky_0245"
+ },
+ {
+  "severity": "risky",
+  "style": "natural",
+  "description": "肚子一阵一阵地疼，还吐了两回，吃啥吐啥，难受得不行。",
+  "gold_department": "消化内科",
+  "gold_diseases": [
+   "急性胃肠炎",
+   "肠梗阻"
+  ],
+  "id": "risky_0246"
+ },
+ {
+  "severity": "risky",
+  "style": "natural",
+  "description": "尿尿的时候又疼又烧，老想上厕所，可每次就一点点。",
+  "gold_department": "泌尿科",
+  "gold_diseases": [
+   "尿路感染",
+   "膀胱炎"
+  ],
+  "id": "risky_0247"
+ },
+ {
+  "severity": "risky",
+  "style": "natural",
+  "description": "头一直晕乎乎的，还恶心想吐，站起来眼前发黑。",
+  "gold_department": "神经内科",
+  "gold_diseases": [
+   "眩晕症",
+   "脑供血不足"
+  ],
+  "id": "risky_0248"
+ },
+ {
+  "severity": "risky",
+  "style": "natural",
+  "description": "胸口疼了好一阵了，像有东西压着，出冷汗，歇会儿也不见好。",
+  "gold_department": "心内科",
+  "gold_diseases": [
+   "心绞痛",
+   "急性冠脉综合征"
+  ],
+  "id": "risky_0249"
+ },
+ {
+  "severity": "risky",
+  "style": "vague",
+  "description": "最近总感觉胸口这一块说不上来哪儿不对劲，闷闷的，有点压着的感觉，歇会儿能好点但又反复。",
+  "gold_department": "心内科",
+  "gold_diseases": [
+   "心绞痛",
+   "冠状动脉粥样硬化性心脏病"
+  ],
+  "id": "risky_0250"
+ },
+ {
+  "severity": "risky",
+  "style": "vague",
+  "description": "这几天人特别不舒服，浑身不得劲，还有点发热，量了三十八度多，退了又烧起来。",
+  "gold_department": "感染科",
+  "gold_diseases": [
+   "发热待查",
+   "病毒性感染"
+  ],
+  "id": "risky_0251"
+ },
+ {
+  "severity": "risky",
+  "style": "vague",
+  "description": "肚子这一圈说不清楚哪里疼，就是闷闷的难受，一阵一阵的，还有点想吐。",
+  "gold_department": "消化内科",
+  "gold_diseases": [
+   "急性胃肠炎",
+   "腹痛待查"
+  ],
+  "id": "risky_0252"
+ },
+ {
+  "severity": "risky",
+  "style": "vague",
+  "description": "头老是晕晕乎乎的，说不上来怎么个晕法，有时候还想吐，走路也不太稳当。",
+  "gold_department": "神经内科",
+  "gold_diseases": [
+   "眩晕综合征",
+   "椎基底动脉供血不足"
+  ],
+  "id": "risky_0253"
+ },
+ {
+  "severity": "risky",
+  "style": "vague",
+  "description": "上厕所的时候下面特别不舒服，说不上来是疼还是烧灼感，反正就是难受得很。",
+  "gold_department": "泌尿科",
+  "gold_diseases": [
+   "尿路感染",
+   "膀胱炎"
+  ],
+  "id": "risky_0254"
+ },
+ {
+  "severity": "risky",
+  "style": "vague",
+  "description": "嗓子这一块总感觉怪怪的，堵得慌又说不上来具体哪儿不舒服，咽东西也有点费劲。",
+  "gold_department": "耳鼻喉科",
+  "gold_diseases": [
+   "咽炎",
+   "咽喉异物感"
+  ],
+  "id": "risky_0255"
+ },
+ {
+  "severity": "risky",
+  "style": "vague",
+  "description": "就是喘不上来气，说不上来怎么搞的，走两步就憋得慌，坐那儿也不舒坦。",
+  "gold_department": "呼吸内科",
+  "gold_diseases": [
+   "支气管哮喘",
+   "呼吸困难待查"
+  ],
+  "id": "risky_0256"
+ },
+ {
+  "severity": "risky",
+  "style": "vague",
+  "description": "浑身关节都不对劲，说不上来是酸还是疼，早上起来特别僵硬，活动活动能好点。",
+  "gold_department": "风湿免疫科",
+  "gold_diseases": [
+   "类风湿关节炎",
+   "风湿性多肌痛"
+  ],
+  "id": "risky_0257"
+ },
+ {
+  "severity": "risky",
+  "style": "vague",
+  "description": "这段时间人特别没劲，说不上来哪儿出了问题，就是浑身不舒服，还老觉得心慌。",
+  "gold_department": "内分泌科",
+  "gold_diseases": [
+   "甲状腺功能亢进症",
+   "贫血待查"
+  ],
+  "id": "risky_0258"
+ },
+ {
+  "severity": "risky",
+  "style": "vague",
+  "description": "下面老是觉得不舒服，说不上来是痒还是疼，白带也不太正常，整个人都烦躁。",
+  "gold_department": "妇科",
+  "gold_diseases": [
+   "阴道炎",
+   "盆腔炎性疾病"
+  ],
+  "id": "risky_0259"
+ },
+ {
+  "severity": "risky",
+  "style": "vague",
+  "description": "说不上来，就是胸口这块闷闷的，有点不舒服，歇着也不见好。",
+  "gold_department": "心内科",
+  "gold_diseases": [
+   "心绞痛",
+   "冠心病"
+  ],
+  "id": "risky_0260"
+ },
+ {
+  "severity": "risky",
+  "style": "vague",
+  "description": "浑身不得劲，头也晕，还有点想吐，说不太清楚到底哪儿难受。",
+  "gold_department": "神经内科",
+  "gold_diseases": [
+   "眩晕综合征",
+   "脑供血不足"
+  ],
+  "id": "risky_0261"
+ },
+ {
+  "severity": "risky",
+  "style": "vague",
+  "description": "肚子一直不太舒服，隐隐的，说不上来是哪个位置，反正就是难受。",
+  "gold_department": "消化内科",
+  "gold_diseases": [
+   "胃炎",
+   "胆囊炎"
+  ],
+  "id": "risky_0262"
+ },
+ {
+  "severity": "risky",
+  "style": "vague",
+  "description": "这几天身上一直烫烫的，人也没劲，具体怎么不舒服也说不清。",
+  "gold_department": "感染科",
+  "gold_diseases": [
+   "发热待查",
+   "病毒性感染"
+  ],
+  "id": "risky_0263"
+ },
+ {
+  "severity": "risky",
+  "style": "vague",
+  "description": "嗓子到胸口那一带说不上来，好像堵着东西，吞东西也不得劲。",
+  "gold_department": "耳鼻喉科",
+  "gold_diseases": [
+   "咽炎",
+   "咽喉异物感"
+  ],
+  "id": "risky_0264"
+ },
+ {
+  "severity": "risky",
+  "style": "vague",
+  "description": "下面那块不得劲，说不上来是疼还是胀，尿的时候也怪怪的。",
+  "gold_department": "泌尿科",
+  "gold_diseases": [
+   "尿路感染",
+   "膀胱炎"
+  ],
+  "id": "risky_0265"
+ },
+ {
+  "severity": "risky",
+  "style": "vague",
+  "description": "喘气总感觉不太顺，说不上来是鼻子还是胸口的事，就是不得劲。",
+  "gold_department": "呼吸内科",
+  "gold_diseases": [
+   "支气管炎",
+   "哮喘"
+  ],
+  "id": "risky_0266"
+ },
+ {
+  "severity": "risky",
+  "style": "vague",
+  "description": "腰和背说不上来哪里酸，反正整个人不舒服，动一下更难受。",
+  "gold_department": "骨外科",
+  "gold_diseases": [
+   "腰肌劳损",
+   "腰椎间盘突出"
+  ],
+  "id": "risky_0267"
+ },
+ {
+  "severity": "risky",
+  "style": "vague",
+  "description": "小肚子这块不舒服，说不上来是胀还是坠，白带也不太对劲。",
+  "gold_department": "妇科",
+  "gold_diseases": [
+   "盆腔炎",
+   "阴道炎"
+  ],
+  "id": "risky_0268"
+ },
+ {
+  "severity": "risky",
+  "style": "vague",
+  "description": "浑身关节不得劲，说不上来是哪疼，反正就是酸酸的不舒服。",
+  "gold_department": "风湿免疫科",
+  "gold_diseases": [
+   "类风湿关节炎",
+   "风湿性多肌痛"
+  ],
+  "id": "risky_0269"
+ },
+ {
+  "severity": "risky",
+  "style": "vague",
+  "description": "说不上来哪儿难受，就是胸口这块儿闷闷的，有时候喘气不太顺。",
+  "gold_department": "心内科",
+  "gold_diseases": [
+   "冠状动脉粥样硬化性心脏病",
+   "心绞痛"
+  ],
+  "id": "risky_0270"
+ },
+ {
+  "severity": "risky",
+  "style": "vague",
+  "description": "浑身不得劲好几天了，头也晕乎乎的，感觉不太对劲。",
+  "gold_department": "神经内科",
+  "gold_diseases": [
+   "眩晕综合征",
+   "脑供血不足"
+  ],
+  "id": "risky_0271"
+ },
+ {
+  "severity": "risky",
+  "style": "vague",
+  "description": "肚子这块儿不舒服，说不上来具体哪儿疼，反正就是难受。",
+  "gold_department": "消化内科",
+  "gold_diseases": [
+   "急性胃肠炎",
+   "肠痉挛"
+  ],
+  "id": "risky_0272"
+ },
+ {
+  "severity": "risky",
+  "style": "vague",
+  "description": "最近老觉得身上没劲儿，还一阵一阵地发热，整个人不对劲。",
+  "gold_department": "感染科",
+  "gold_diseases": [
+   "呼吸道感染",
+   "病毒性感冒"
+  ],
+  "id": "risky_0273"
+ },
+ {
+  "severity": "risky",
+  "style": "vague",
+  "description": "小便的时候有点说不上来的不舒服，下面总是怪怪的。",
+  "gold_department": "泌尿科",
+  "gold_diseases": [
+   "尿路感染",
+   "膀胱炎"
+  ],
+  "id": "risky_0274"
+ },
+ {
+  "severity": "risky",
+  "style": "vague",
+  "description": "嗓子到胸口这一溜儿都不舒服，吞咽的时候怪怪的，说不太清。",
+  "gold_department": "耳鼻喉科",
+  "gold_diseases": [
+   "急性咽炎",
+   "咽喉反流"
+  ],
+  "id": "risky_0275"
+ },
+ {
+  "severity": "risky",
+  "style": "vague",
+  "description": "头总是昏沉沉的，有时候还犯恶心，整个人不在状态。",
+  "gold_department": "神经内科",
+  "gold_diseases": [
+   "偏头痛",
+   "前庭性眩晕"
+  ],
+  "id": "risky_0276"
+ },
+ {
+  "severity": "risky",
+  "style": "vague",
+  "description": "腰这块儿酸胀酸胀的，说不上来是骨头还是里面不舒服。",
+  "gold_department": "骨外科",
+  "gold_diseases": [
+   "腰肌劳损",
+   "腰椎间盘突出症"
+  ],
+  "id": "risky_0277"
+ },
+ {
+  "severity": "risky",
+  "style": "vague",
+  "description": "下面一直不太舒服，白带也不太正常，就是感觉不对劲。",
+  "gold_department": "妇科",
+  "gold_diseases": [
+   "阴道炎",
+   "盆腔炎"
+  ],
+  "id": "risky_0278"
+ },
+ {
+  "severity": "risky",
+  "style": "vague",
+  "description": "身上有些地方发痒，起了点说不清的东西，越挠越不对劲。",
+  "gold_department": "皮肤科",
+  "gold_diseases": [
+   "荨麻疹",
+   "湿疹"
+  ],
+  "id": "risky_0279"
+ },
+ {
+  "severity": "risky",
+  "style": "vague",
+  "description": "说不上来哪里难受，就是胸口这块儿不太对劲，闷闷的，喘气有点费劲。",
+  "gold_department": "心内科",
+  "gold_diseases": [
+   "冠心病",
+   "心绞痛"
+  ],
+  "id": "risky_0280"
+ },
+ {
+  "severity": "risky",
+  "style": "vague",
+  "description": "浑身不得劲，脑袋晕乎乎的，还有点想吐，说不上具体哪儿出毛病了。",
+  "gold_department": "神经内科",
+  "gold_diseases": [
+   "眩晕综合征",
+   "脑供血不足"
+  ],
+  "id": "risky_0281"
+ },
+ {
+  "severity": "risky",
+  "style": "vague",
+  "description": "肚子这块儿不舒服，说不太清楚是哪个位置，就是一阵一阵地难受。",
+  "gold_department": "消化内科",
+  "gold_diseases": [
+   "急性胃肠炎",
+   "肠痉挛"
+  ],
+  "id": "risky_0282"
+ },
+ {
+  "severity": "risky",
+  "style": "vague",
+  "description": "感觉人一直发热，浑身没力气，也说不上来具体是哪儿不舒服。",
+  "gold_department": "感染科",
+  "gold_diseases": [
+   "细菌感染",
+   "病毒性感冒"
+  ],
+  "id": "risky_0283"
+ },
+ {
+  "severity": "risky",
+  "style": "vague",
+  "description": "小便的时候不太舒服，说不上来是疼还是怎么的，就是怪怪的。",
+  "gold_department": "泌尿科",
+  "gold_diseases": [
+   "尿路感染",
+   "膀胱炎"
+  ],
+  "id": "risky_0284"
+ },
+ {
+  "severity": "risky",
+  "style": "vague",
+  "description": "嗓子这块儿老感觉有东西堵着，说不上来是什么感觉，咽东西有点别扭。",
+  "gold_department": "耳鼻喉科",
+  "gold_diseases": [
+   "咽炎",
+   "扁桃体炎"
+  ],
+  "id": "risky_0285"
+ },
+ {
+  "severity": "risky",
+  "style": "vague",
+  "description": "腰这块儿酸酸涨涨的，说不上来是骨头还是肉疼，就是不舒服。",
+  "gold_department": "骨外科",
+  "gold_diseases": [
+   "腰肌劳损",
+   "腰椎间盘突出"
+  ],
+  "id": "risky_0286"
+ },
+ {
+  "severity": "risky",
+  "style": "vague",
+  "description": "眼睛看东西有点不对劲，说不上来是模糊还是怎么的，反正不太舒服。",
+  "gold_department": "眼科",
+  "gold_diseases": [
+   "视疲劳",
+   "干眼症"
+  ],
+  "id": "risky_0287"
+ },
+ {
+  "severity": "risky",
+  "style": "vague",
+  "description": "下面这块儿不太舒坦，说不上来是痒还是疼，就是感觉不对劲。",
+  "gold_department": "妇科",
+  "gold_diseases": [
+   "阴道炎",
+   "盆腔炎"
+  ],
+  "id": "risky_0288"
+ },
+ {
+  "severity": "risky",
+  "style": "vague",
+  "description": "喘气有点费劲，说不上来是鼻子还是肺的事，就是感觉气不够用。",
+  "gold_department": "呼吸内科",
+  "gold_diseases": [
+   "支气管炎",
+   "哮喘"
+  ],
+  "id": "risky_0289"
+ },
+ {
+  "severity": "risky",
+  "style": "vague",
+  "description": "最近老觉得胸口闷闷的，说不上来哪里不舒服，反正浑身不得劲。",
+  "gold_department": "心内科",
+  "gold_diseases": [
+   "冠心病",
+   "心绞痛"
+  ],
+  "id": "risky_0290"
+ },
+ {
+  "severity": "risky",
+  "style": "vague",
+  "description": "肚子一直不太对劲，说不上来是胀还是疼，就是不舒服。",
+  "gold_department": "消化内科",
+  "gold_diseases": [
+   "胃炎",
+   "消化性溃疡"
+  ],
+  "id": "risky_0291"
+ },
+ {
+  "severity": "risky",
+  "style": "vague",
+  "description": "头老是晕乎乎的，整个人说不上来的不舒服，还有点想吐。",
+  "gold_department": "神经内科",
+  "gold_diseases": [
+   "眩晕综合征",
+   "脑供血不足"
+  ],
+  "id": "risky_0292"
+ },
+ {
+  "severity": "risky",
+  "style": "vague",
+  "description": "这几天一直发热，浑身不得劲，说不上来具体哪里难受。",
+  "gold_department": "感染科",
+  "gold_diseases": [
+   "病毒性感染",
+   "细菌性感染"
+  ],
+  "id": "risky_0293"
+ },
+ {
+  "severity": "risky",
+  "style": "vague",
+  "description": "下面老是不舒服，说不上来是疼还是痒，反正怪怪的。",
+  "gold_department": "泌尿科",
+  "gold_diseases": [
+   "尿路感染",
+   "膀胱炎"
+  ],
+  "id": "risky_0294"
+ },
+ {
+  "severity": "risky",
+  "style": "vague",
+  "description": "嗓子说不上来的难受，咽东西不太得劲，有点堵得慌。",
+  "gold_department": "耳鼻喉科",
+  "gold_diseases": [
+   "咽炎",
+   "扁桃体炎"
+  ],
+  "id": "risky_0295"
+ },
+ {
+  "severity": "risky",
+  "style": "vague",
+  "description": "浑身没劲，关节也说不上来哪里不舒服，就是不得劲。",
+  "gold_department": "风湿免疫科",
+  "gold_diseases": [
+   "类风湿关节炎",
+   "风湿性多肌痛"
+  ],
+  "id": "risky_0296"
+ },
+ {
+  "severity": "risky",
+  "style": "vague",
+  "description": "腰这边说不上来的不舒服，坐着躺着都不太得劲。",
+  "gold_department": "骨外科",
+  "gold_diseases": [
+   "腰椎间盘突出",
+   "腰肌劳损"
+  ],
+  "id": "risky_0297"
+ },
+ {
+  "severity": "risky",
+  "style": "vague",
+  "description": "眼睛老觉得怪怪的，说不上来是模糊还是干，反正不舒服。",
+  "gold_department": "眼科",
+  "gold_diseases": [
+   "干眼症",
+   "视疲劳"
+  ],
+  "id": "risky_0298"
+ },
+ {
+  "severity": "risky",
+  "style": "vague",
+  "description": "小肚子说不上来的难受，白带也不太正常，浑身不得劲。",
+  "gold_department": "妇科",
+  "gold_diseases": [
+   "盆腔炎",
+   "阴道炎"
+  ],
+  "id": "risky_0299"
+ },
+ {
+  "severity": "risky",
+  "style": "vague",
+  "description": "最近总感觉说不上来哪里难受，胸口这块闷闷的，浑身不得劲，想来看看。",
+  "gold_department": "心内科",
+  "gold_diseases": [
+   "冠心病",
+   "心律失常"
+  ],
+  "id": "risky_0300"
+ },
+ {
+  "severity": "risky",
+  "style": "vague",
+  "description": "这几天就是不舒坦，头昏昏沉沉的，也说不上来具体哪儿疼，反正整个人不对劲。",
+  "gold_department": "神经内科",
+  "gold_diseases": [
+   "脑供血不足",
+   "眩晕综合征"
+  ],
+  "id": "risky_0301"
+ },
+ {
+  "severity": "risky",
+  "style": "vague",
+  "description": "肚子这块说不上来怎么回事，就是一直难受，隐隐约约的，浑身没劲。",
+  "gold_department": "消化内科",
+  "gold_diseases": [
+   "慢性胃炎",
+   "消化性溃疡"
+  ],
+  "id": "risky_0302"
+ },
+ {
+  "severity": "risky",
+  "style": "vague",
+  "description": "老觉得身上不舒服，也说不上来哪儿的毛病，反正就是不得劲，有点发热的感觉。",
+  "gold_department": "感染科",
+  "gold_diseases": [
+   "病毒性感染",
+   "不明原因发热"
+  ],
+  "id": "risky_0303"
+ },
+ {
+  "severity": "risky",
+  "style": "vague",
+  "description": "说不上来，就是浑身不得劲，腰这块也不太舒服，尿尿的时候有点怪怪的感觉。",
+  "gold_department": "泌尿科",
+  "gold_diseases": [
+   "尿路感染",
+   "肾盂肾炎"
+  ],
+  "id": "risky_0304"
+ },
+ {
+  "severity": "risky",
+  "style": "vague",
+  "description": "这几天总感觉不舒服，也说不上来是哪儿，就是有点喘不上气，身上没力气。",
+  "gold_department": "呼吸内科",
+  "gold_diseases": [
+   "肺炎",
+   "支气管炎"
+  ],
+  "id": "risky_0305"
+ },
+ {
+  "severity": "risky",
+  "style": "vague",
+  "description": "就是不舒服，说不上来，关节这块隐隐的，浑身不得劲，也不知道该看哪个科。",
+  "gold_department": "风湿免疫科",
+  "gold_diseases": [
+   "类风湿关节炎",
+   "系统性红斑狼疮"
+  ],
+  "id": "risky_0306"
+ },
+ {
+  "severity": "risky",
+  "style": "vague",
+  "description": "最近整个人不对劲，说不上来哪儿的问题，就是心慌慌的，浑身没劲，腿也软。",
+  "gold_department": "内分泌科",
+  "gold_diseases": [
+   "甲状腺功能亢进",
+   "低血糖症"
+  ],
+  "id": "risky_0307"
+ },
+ {
+  "severity": "risky",
+  "style": "vague",
+  "description": "说不上来，就是下边不舒服，有点怪怪的感觉，浑身也不得劲，想查查。",
+  "gold_department": "妇科",
+  "gold_diseases": [
+   "盆腔炎",
+   "阴道炎"
+  ],
+  "id": "risky_0308"
+ },
+ {
+  "severity": "risky",
+  "style": "vague",
+  "description": "小孩子这几天不太对劲，说不上来哪里不舒服，就是没精神，身上有点烫。",
+  "gold_department": "儿科",
+  "gold_diseases": [
+   "小儿上呼吸道感染",
+   "小儿肺炎"
+  ],
+  "id": "risky_0309"
+ },
+ {
+  "severity": "risky",
+  "style": "vague",
+  "description": "说不上来哪里难受，就是胸口这块儿闷闷的，喘气不太顺，已经好几天了。",
+  "gold_department": "心内科",
+  "gold_diseases": [
+   "冠心病",
+   "心绞痛",
+   "心律失常"
+  ],
+  "id": "risky_0310"
+ },
+ {
+  "severity": "risky",
+  "style": "vague",
+  "description": "浑身不得劲，头也晕乎乎的，还老想吐，说不清是哪儿出了问题。",
+  "gold_department": "神经内科",
+  "gold_diseases": [
+   "眩晕综合征",
+   "脑供血不足",
+   "高血压"
+  ],
+  "id": "risky_0311"
+ },
+ {
+  "severity": "risky",
+  "style": "vague",
+  "description": "肚子这块儿不舒服，说不上来具体哪儿疼，反正就是一阵一阵的难受。",
+  "gold_department": "消化内科",
+  "gold_diseases": [
+   "胃炎",
+   "肠炎",
+   "胆囊炎"
+  ],
+  "id": "risky_0312"
+ },
+ {
+  "severity": "risky",
+  "style": "vague",
+  "description": "这几天老觉得身上发烫，但又说不清是不是发烧，人也没什么力气。",
+  "gold_department": "感染科",
+  "gold_diseases": [
+   "上呼吸道感染",
+   "病毒感染",
+   "发热待查"
+  ],
+  "id": "risky_0313"
+ },
+ {
+  "severity": "risky",
+  "style": "vague",
+  "description": "尿尿的时候不太舒服，说不上来是疼还是什么，反正跟平时不一样。",
+  "gold_department": "泌尿科",
+  "gold_diseases": [
+   "尿路感染",
+   "膀胱炎",
+   "尿道炎"
+  ],
+  "id": "risky_0314"
+ },
+ {
+  "severity": "risky",
+  "style": "vague",
+  "description": "嗓子这块儿总觉得有东西堵着，说不上来什么感觉，咽东西也不太顺。",
+  "gold_department": "耳鼻喉科",
+  "gold_diseases": [
+   "咽炎",
+   "扁桃体炎",
+   "咽喉异物感"
+  ],
+  "id": "risky_0315"
+ },
+ {
+  "severity": "risky",
+  "style": "vague",
+  "description": "浑身不得劲，关节也酸酸的，说不上来是哪里疼，就是整个人不舒服。",
+  "gold_department": "风湿免疫科",
+  "gold_diseases": [
+   "风湿性关节炎",
+   "系统性红斑狼疮",
+   "痛风"
+  ],
+  "id": "risky_0316"
+ },
+ {
+  "severity": "risky",
+  "style": "vague",
+  "description": "下面不太舒服，说不上来是痒还是疼，反正就是不得劲，好几天了。",
+  "gold_department": "妇科",
+  "gold_diseases": [
+   "阴道炎",
+   "盆腔炎",
+   "宫颈炎"
+  ],
+  "id": "risky_0317"
+ },
+ {
+  "severity": "risky",
+  "style": "vague",
+  "description": "孩子这几天说不上来哪里不舒服，就是没精神，也不好好吃东西。",
+  "gold_department": "儿科",
+  "gold_diseases": [
+   "小儿上呼吸道感染",
+   "小儿消化不良",
+   "小儿发热"
+  ],
+  "id": "risky_0318"
+ },
+ {
+  "severity": "risky",
+  "style": "vague",
+  "description": "眼睛这块儿说不清什么毛病，就是模模糊糊的，看东西不太得劲。",
+  "gold_department": "眼科",
+  "gold_diseases": [
+   "结膜炎",
+   "干眼症",
+   "视力下降"
+  ],
+  "id": "risky_0319"
+ },
+ {
+  "severity": "risky",
+  "style": "vague",
+  "description": "说不上来哪里难受，就是胸口这块闷闷的，有点喘不上气，浑身不得劲，已经好几天了。",
+  "gold_department": "心内科",
+  "gold_diseases": [
+   "冠心病",
+   "心绞痛",
+   "心律失常"
+  ],
+  "id": "risky_0320"
+ },
+ {
+  "severity": "risky",
+  "style": "vague",
+  "description": "肚子不舒服，说不上来是哪个位置，反正就是胀胀的疼，还老想吐，吃不下东西。",
+  "gold_department": "消化内科",
+  "gold_diseases": [
+   "急性胃炎",
+   "胆囊炎",
+   "肠梗阻"
+  ],
+  "id": "risky_0321"
+ },
+ {
+  "severity": "risky",
+  "style": "vague",
+  "description": "头昏昏沉沉的，整个人不舒服，说不上来具体怎么了，有时候还犯恶心，走路有点飘。",
+  "gold_department": "神经内科",
+  "gold_diseases": [
+   "眩晕症",
+   "脑供血不足",
+   "前庭神经炎"
+  ],
+  "id": "risky_0322"
+ },
+ {
+  "severity": "risky",
+  "style": "vague",
+  "description": "下面那块不舒服，说不上来是疼还是痒，反正就是难受，上厕所的时候更明显。",
+  "gold_department": "泌尿科",
+  "gold_diseases": [
+   "尿路感染",
+   "膀胱炎",
+   "前列腺炎"
+  ],
+  "id": "risky_0323"
+ },
+ {
+  "severity": "risky",
+  "style": "vague",
+  "description": "嗓子这块不舒服，说不上来什么感觉，有点堵得慌，咽东西的时候怪怪的，好几天了。",
+  "gold_department": "耳鼻喉科",
+  "gold_diseases": [
+   "咽喉炎",
+   "扁桃体炎",
+   "会厌炎"
+  ],
+  "id": "risky_0324"
+ },
+ {
+  "severity": "risky",
+  "style": "erroneous",
+  "description": "我这几天心荒得厉害，还老冒冷汗，胸口闷得不行。",
+  "gold_department": "心内科",
+  "gold_diseases": [
+   "心律失常",
+   "冠心病"
+  ],
+  "id": "risky_0325"
+ },
+ {
+  "severity": "risky",
+  "style": "erroneous",
+  "description": "咳嗖一直没好，还发骚，咳出来的痰带黄，喘气也费劲。",
+  "gold_department": "呼吸内科",
+  "gold_diseases": [
+   "肺炎",
+   "急性支气管炎"
+  ],
+  "id": "risky_0326"
+ },
+ {
+  "severity": "risky",
+  "style": "erroneous",
+  "description": "肚自疼了两天，还拉希，吃啥吐啥，人都软了。",
+  "gold_department": "消化内科",
+  "gold_diseases": [
+   "急性胃肠炎",
+   "食物中毒"
+  ],
+  "id": "risky_0327"
+ },
+ {
+  "severity": "risky",
+  "style": "erroneous",
+  "description": "头晕得看东西打转转，还恶芯，站都站不稳。",
+  "gold_department": "神经内科",
+  "gold_diseases": [
+   "眩晕综合征",
+   "后循环缺血"
+  ],
+  "id": "risky_0328"
+ },
+ {
+  "severity": "risky",
+  "style": "erroneous",
+  "description": "撒尿的时候刺挠得不行，还老想上侧所，小肚子坠得慌。",
+  "gold_department": "泌尿科",
+  "gold_diseases": [
+   "尿路感染",
+   "膀胱炎"
+  ],
+  "id": "risky_0329"
+ },
+ {
+  "severity": "risky",
+  "style": "erroneous",
+  "description": "嗓子疼得咽吐沫都费劲，还发骚，脖子两边肿起来了。",
+  "gold_department": "耳鼻喉科",
+  "gold_diseases": [
+   "急性扁桃体炎",
+   "咽炎"
+  ],
+  "id": "risky_0330"
+ },
+ {
+  "severity": "risky",
+  "style": "erroneous",
+  "description": "手腕子肿了，疼得拧毛巾都拧不动，早上起来僵得厉害。",
+  "gold_department": "风湿免疫科",
+  "gold_diseases": [
+   "类风湿关节炎",
+   "关节炎"
+  ],
+  "id": "risky_0331"
+ },
+ {
+  "severity": "risky",
+  "style": "erroneous",
+  "description": "这阵子老心慌，还特别能喝水、老跑侧所，人却瘦了。",
+  "gold_department": "内分泌科",
+  "gold_diseases": [
+   "糖尿病",
+   "甲状腺功能亢进"
+  ],
+  "id": "risky_0332"
+ },
+ {
+  "severity": "risky",
+  "style": "erroneous",
+  "description": "腰上起了一溜小水泡，火辣辣地疼，衣服蹭一下都受不了。",
+  "gold_department": "皮肤科",
+  "gold_diseases": [
+   "带状疱疹",
+   "单纯疱疹"
+  ],
+  "id": "risky_0333"
+ },
+ {
+  "severity": "risky",
+  "style": "erroneous",
+  "description": "肚子疼还拉血，拉的时候肛门像刀割一样，实在受不了了。",
+  "gold_department": "肛肠科",
+  "gold_diseases": [
+   "肛裂",
+   "痔疮"
+  ],
+  "id": "risky_0334"
+ },
+ {
+  "severity": "risky",
+  "style": "erroneous",
+  "description": "这几天老是咳嗖，还发着烧，胸口也闷得慌，喘气有点费劲。",
+  "gold_department": "呼吸内科",
+  "gold_diseases": [
+   "肺炎",
+   "支气管炎"
+  ],
+  "id": "risky_0335"
+ },
+ {
+  "severity": "risky",
+  "style": "erroneous",
+  "description": "心荒得厉害，一阵一阵的，还冒虚汗，左肩膀也跟着疼。",
+  "gold_department": "心内科",
+  "gold_diseases": [
+   "心绞痛",
+   "心律失常"
+  ],
+  "id": "risky_0336"
+ },
+ {
+  "severity": "risky",
+  "style": "erroneous",
+  "description": "肚子疼了好几天，还拉希，一吃东就吐，人也没力气。",
+  "gold_department": "消化内科",
+  "gold_diseases": [
+   "急性胃肠炎",
+   "胆囊炎"
+  ],
+  "id": "risky_0337"
+ },
+ {
+  "severity": "risky",
+  "style": "erroneous",
+  "description": "头婚得厉害，看东西转，吐了两回，站都站不稳。",
+  "gold_department": "神经内科",
+  "gold_diseases": [
+   "眩晕综合征",
+   "脑供血不足"
+  ],
+  "id": "risky_0338"
+ },
+ {
+  "severity": "risky",
+  "style": "erroneous",
+  "description": "尿尿的时候刺疼，老想上侧所，小肚子也胀得难受。",
+  "gold_department": "泌尿科",
+  "gold_diseases": [
+   "尿路感染",
+   "膀胱炎"
+  ],
+  "id": "risky_0339"
+ },
+ {
+  "severity": "risky",
+  "style": "erroneous",
+  "description": "噪子疼得咽不下东西，还发着高烧，脖子两边都肿了。",
+  "gold_department": "耳鼻喉科",
+  "gold_diseases": [
+   "急性扁桃体炎",
+   "咽炎"
+  ],
+  "id": "risky_0340"
+ },
+ {
+  "severity": "risky",
+  "style": "erroneous",
+  "description": "腰疼得直不起来，弯一下就更疼，腿还麻嗖嗖的。",
+  "gold_department": "骨外科",
+  "gold_diseases": [
+   "腰椎间盘突出",
+   "腰肌劳损"
+  ],
+  "id": "risky_0341"
+ },
+ {
+  "severity": "risky",
+  "style": "erroneous",
+  "description": "月今不规律，一来就疼得打滚，血还特别多。",
+  "gold_department": "妇科",
+  "gold_diseases": [
+   "痛经",
+   "子宫肌瘤"
+  ],
+  "id": "risky_0342"
+ },
+ {
+  "severity": "risky",
+  "style": "erroneous",
+  "description": "孩子烧到三十九度多，抽了几吓，叫也叫不醒。",
+  "gold_department": "儿科",
+  "gold_diseases": [
+   "热性惊厥",
+   "小儿肺炎"
+  ],
+  "id": "risky_0343"
+ },
+ {
+  "severity": "risky",
+  "style": "erroneous",
+  "description": "眼睛红得睁不开，又疼又怕光，眼屎多得糊住眼。",
+  "gold_department": "眼科",
+  "gold_diseases": [
+   "结膜炎",
+   "角膜炎"
+  ],
+  "id": "risky_0344"
+ },
+ {
+  "severity": "risky",
+  "style": "erroneous",
+  "description": "医生我胸口通得慌，像有块石偷压着，还老出喊，是不是心慌的病啊？",
+  "gold_department": "心内科",
+  "gold_diseases": [
+   "冠心病",
+   "心绞痛"
+  ],
+  "id": "risky_0345"
+ },
+ {
+  "severity": "risky",
+  "style": "erroneous",
+  "description": "我咳嗖好几天了，还发少，嗓子疼得咽东西都费劲，是不是肺严了？",
+  "gold_department": "呼吸内科",
+  "gold_diseases": [
+   "肺炎",
+   "急性支气管炎"
+  ],
+  "id": "risky_0346"
+ },
+ {
+  "severity": "risky",
+  "style": "erroneous",
+  "description": "肚子胀得列害，拉希两天了，还恶心图，吃啥吐啥，是不是肠胃感燃？",
+  "gold_department": "消化内科",
+  "gold_diseases": [
+   "急性胃肠炎",
+   "食物中毒"
+  ],
+  "id": "risky_0347"
+ },
+ {
+  "severity": "risky",
+  "style": "erroneous",
+  "description": "我这几天头混得厉害，还晕车似的想吐，手脚有点发嘛，是不是脑更了？",
+  "gold_department": "神经内科",
+  "gold_diseases": [
+   "短暂性脑缺血发作",
+   "眩晕症"
+  ],
+  "id": "risky_0348"
+ },
+ {
+  "severity": "risky",
+  "style": "erroneous",
+  "description": "我尿尿的时候疼得不行，还老想上测所，尿里好像有血，是不是尿到感染了？",
+  "gold_department": "泌尿科",
+  "gold_diseases": [
+   "尿路感染",
+   "膀胱炎"
+  ],
+  "id": "risky_0349"
+ },
+ {
+  "severity": "risky",
+  "style": "erroneous",
+  "description": "我耳朵里翁翁响，听东西像隔了层摸，还往外流农，是不是中耳严了？",
+  "gold_department": "耳鼻喉科",
+  "gold_diseases": [
+   "中耳炎",
+   "外耳道炎"
+  ],
+  "id": "risky_0350"
+ },
+ {
+  "severity": "risky",
+  "style": "erroneous",
+  "description": "身上起了好多红诊子，痒得睡不着，越挠越多，是不是过民了？",
+  "gold_department": "皮肤科",
+  "gold_diseases": [
+   "荨麻疹",
+   "过敏性皮炎"
+  ],
+  "id": "risky_0351"
+ },
+ {
+  "severity": "risky",
+  "style": "erroneous",
+  "description": "腰疼得直不起来，腿也麻，像过电一样，是不是腰肩盘突出了？",
+  "gold_department": "骨外科",
+  "gold_diseases": [
+   "腰椎间盘突出症",
+   "坐骨神经痛"
+  ],
+  "id": "risky_0352"
+ },
+ {
+  "severity": "risky",
+  "style": "erroneous",
+  "description": "我月经来了半个多月还没干静，量还特别多，头晕眼花的，是不是子工出血？",
+  "gold_department": "妇科",
+  "gold_diseases": [
+   "异常子宫出血",
+   "子宫肌瘤"
+  ],
+  "id": "risky_0353"
+ },
+ {
+  "severity": "risky",
+  "style": "erroneous",
+  "description": "孩子发少烧到39度，还抽了一回，眼睛往上翻，是不是热惊撅啊？",
+  "gold_department": "儿科",
+  "gold_diseases": [
+   "热性惊厥",
+   "小儿急性感染"
+  ],
+  "id": "risky_0354"
+ },
+ {
+  "severity": "risky",
+  "style": "erroneous",
+  "description": "大夫我胸口焖得慌，喘气有点费劲，还心荒，是不是心脏出毛病了？",
+  "gold_department": "心内科",
+  "gold_diseases": [
+   "冠心病",
+   "心律失常"
+  ],
+  "id": "risky_0355"
+ },
+ {
+  "severity": "risky",
+  "style": "erroneous",
+  "description": "我咳嗖好几天了，一直发少，喉咙也疼，感觉有痰咳不干净。",
+  "gold_department": "呼吸内科",
+  "gold_diseases": [
+   "急性支气管炎",
+   "肺炎"
+  ],
+  "id": "risky_0356"
+ },
+ {
+  "severity": "risky",
+  "style": "erroneous",
+  "description": "肚子疼得厉害，还拉希，一天跑好几趟厕所，浑身没劲。",
+  "gold_department": "消化内科",
+  "gold_diseases": [
+   "急性胃肠炎",
+   "肠道感染"
+  ],
+  "id": "risky_0357"
+ },
+ {
+  "severity": "risky",
+  "style": "erroneous",
+  "description": "头晕的厉害，还吐了，天旋地转的，站都站不隐。",
+  "gold_department": "神经内科",
+  "gold_diseases": [
+   "眩晕综合征",
+   "前庭神经炎"
+  ],
+  "id": "risky_0358"
+ },
+ {
+  "severity": "risky",
+  "style": "erroneous",
+  "description": "最近老口渴，尿也频，还瘦了好几斤，是不是糖尿饼啊？",
+  "gold_department": "内分泌科",
+  "gold_diseases": [
+   "糖尿病",
+   "甲状腺功能亢进症"
+  ],
+  "id": "risky_0359"
+ },
+ {
+  "severity": "risky",
+  "style": "erroneous",
+  "description": "尿尿的时候刺疼，还老想上错所，尿完又感觉没尿净。",
+  "gold_department": "泌尿科",
+  "gold_diseases": [
+   "尿路感染",
+   "膀胱炎"
+  ],
+  "id": "risky_0360"
+ },
+ {
+  "severity": "risky",
+  "style": "erroneous",
+  "description": "耳朵里嗡嗡响，听东西也不清处，还闷闷的有点疼。",
+  "gold_department": "耳鼻喉科",
+  "gold_diseases": [
+   "中耳炎",
+   "突发性耳聋"
+  ],
+  "id": "risky_0361"
+ },
+ {
+  "severity": "risky",
+  "style": "erroneous",
+  "description": "身上起了好多红诊子，痒得受不了，越挠越多。",
+  "gold_department": "皮肤科",
+  "gold_diseases": [
+   "荨麻疹",
+   "过敏性皮炎"
+  ],
+  "id": "risky_0362"
+ },
+ {
+  "severity": "risky",
+  "style": "erroneous",
+  "description": "我腰疼得弯不下去，腿也麻，走路都一瘸一拐的。",
+  "gold_department": "骨外科",
+  "gold_diseases": [
+   "腰椎间盘突出症",
+   "腰肌劳损"
+  ],
+  "id": "risky_0363"
+ },
+ {
+  "severity": "risky",
+  "style": "erroneous",
+  "description": "底下痒得厉害，白带也多还有味儿，小肚子坠得慌。",
+  "gold_department": "妇科",
+  "gold_diseases": [
+   "阴道炎",
+   "盆腔炎"
+  ],
+  "id": "risky_0364"
+ },
+ {
+  "severity": "risky",
+  "style": "erroneous",
+  "description": "大夫，我这两天老是心荒、胸口闷得慌，喘气也不顺溜。",
+  "gold_department": "心内科",
+  "gold_diseases": [
+   "心律失常",
+   "冠心病"
+  ],
+  "id": "risky_0365"
+ },
+ {
+  "severity": "risky",
+  "style": "erroneous",
+  "description": "我咳嗖快一礼拜了，还一直发浇，痰也多。",
+  "gold_department": "呼吸内科",
+  "gold_diseases": [
+   "肺炎",
+   "急性支气管炎"
+  ],
+  "id": "risky_0366"
+ },
+ {
+  "severity": "risky",
+  "style": "erroneous",
+  "description": "肚子疼得厉害，还拉希，一天跑好几趟厕所。",
+  "gold_department": "消化内科",
+  "gold_diseases": [
+   "急性胃肠炎",
+   "肠道感染"
+  ],
+  "id": "risky_0367"
+ },
+ {
+  "severity": "risky",
+  "style": "erroneous",
+  "description": "脑袋晕得不行，还老想吐，看东西也有点转。",
+  "gold_department": "神经内科",
+  "gold_diseases": [
+   "眩晕综合征",
+   "脑供血不足"
+  ],
+  "id": "risky_0368"
+ },
+ {
+  "severity": "risky",
+  "style": "erroneous",
+  "description": "尿尿的时候又疼又烧，还老想上侧所，腰也酸。",
+  "gold_department": "泌尿科",
+  "gold_diseases": [
+   "尿路感染",
+   "肾盂肾炎"
+  ],
+  "id": "risky_0369"
+ },
+ {
+  "severity": "risky",
+  "style": "erroneous",
+  "description": "喉龙疼得咽不下东西，还发浇，脖子上也肿了个包。",
+  "gold_department": "耳鼻喉科",
+  "gold_diseases": [
+   "急性扁桃体炎",
+   "咽旁脓肿"
+  ],
+  "id": "risky_0370"
+ },
+ {
+  "severity": "risky",
+  "style": "erroneous",
+  "description": "眼睛又红又疼，怕光还老流眼水，看东西也模糊。",
+  "gold_department": "眼科",
+  "gold_diseases": [
+   "角膜炎",
+   "急性结膜炎"
+  ],
+  "id": "risky_0371"
+ },
+ {
+  "severity": "risky",
+  "style": "erroneous",
+  "description": "腰背疼得直不起来，腿也麻，走两步就得歇。",
+  "gold_department": "骨外科",
+  "gold_diseases": [
+   "腰椎间盘突出",
+   "坐骨神经痛"
+  ],
+  "id": "risky_0372"
+ },
+ {
+  "severity": "risky",
+  "style": "erroneous",
+  "description": "下面痒得不行，白带也变多还有味儿，小肚子坠着疼。",
+  "gold_department": "妇科",
+  "gold_diseases": [
+   "盆腔炎",
+   "阴道炎"
+  ],
+  "id": "risky_0373"
+ },
+ {
+  "severity": "risky",
+  "style": "erroneous",
+  "description": "孩子发浇三天了，咳嗖还喘，精神头也不太好。",
+  "gold_department": "儿科",
+  "gold_diseases": [
+   "小儿肺炎",
+   "急性支气管炎"
+  ],
+  "id": "risky_0374"
+ },
+ {
+  "severity": "risky",
+  "style": "erroneous",
+  "description": "嗓子发炎咳嗖得厉害，胸口还老是闷得荒，晚上睡不好觉。",
+  "gold_department": "呼吸内科",
+  "gold_diseases": [
+   "急性支气管炎",
+   "肺炎"
+  ],
+  "id": "risky_0375"
+ },
+ {
+  "severity": "risky",
+  "style": "erroneous",
+  "description": "胃疼拉希三天了，还老是恶心想吐。",
+  "gold_department": "消化内科",
+  "gold_diseases": [
+   "急性胃肠炎",
+   "细菌性痢疾"
+  ],
+  "id": "risky_0376"
+ },
+ {
+  "severity": "risky",
+  "style": "erroneous",
+  "description": "心荒得厉害，胸口一阵一阵地疼，喘不上气。",
+  "gold_department": "心内科",
+  "gold_diseases": [
+   "心绞痛",
+   "心律失常"
+  ],
+  "id": "risky_0377"
+ },
+ {
+  "severity": "risky",
+  "style": "erroneous",
+  "description": "小变的时候疼得厉害，尿还发红，腰也酸得不行。",
+  "gold_department": "泌尿科",
+  "gold_diseases": [
+   "尿路感染",
+   "肾盂肾炎"
+  ],
+  "id": "risky_0378"
+ },
+ {
+  "severity": "risky",
+  "style": "erroneous",
+  "description": "头混得厉害，看东西直转，还吐了两回。",
+  "gold_department": "神经内科",
+  "gold_diseases": [
+   "眩晕综合征",
+   "脑供血不足"
+  ],
+  "id": "risky_0379"
+ },
+ {
+  "severity": "risky",
+  "style": "erroneous",
+  "description": "发烧好几天了，嗓子通得咽不下东西，浑身没劲。",
+  "gold_department": "耳鼻喉科",
+  "gold_diseases": [
+   "急性扁桃体炎",
+   "急性咽炎"
+  ],
+  "id": "risky_0380"
+ },
+ {
+  "severity": "risky",
+  "style": "erroneous",
+  "description": "肚子右下方疼得厉害，按一下更疼，还有点发烧。",
+  "gold_department": "消化内科",
+  "gold_diseases": [
+   "急性阑尾炎",
+   "肠系膜淋巴结炎"
+  ],
+  "id": "risky_0381"
+ },
+ {
+  "severity": "risky",
+  "style": "erroneous",
+  "description": "胸口闷得荒，走路快点就喘，腿也肿了。",
+  "gold_department": "心内科",
+  "gold_diseases": [
+   "心力衰竭",
+   "冠心病"
+  ],
+  "id": "risky_0382"
+ },
+ {
+  "severity": "risky",
+  "style": "erroneous",
+  "description": "眼睛又红又疼，看灯刺眼，还老是流眼泪水。",
+  "gold_department": "眼科",
+  "gold_diseases": [
+   "角膜炎",
+   "急性结膜炎"
+  ],
+  "id": "risky_0383"
+ },
+ {
+  "severity": "risky",
+  "style": "erroneous",
+  "description": "浑身关节又肿又疼，早上起来手硬得弯不了。",
+  "gold_department": "风湿免疫科",
+  "gold_diseases": [
+   "类风湿关节炎",
+   "骨关节炎"
+  ],
+  "id": "risky_0384"
+ },
+ {
+  "severity": "risky",
+  "style": "erroneous",
+  "description": "大夫我咳嗖快两个礼拜了，晚上还发浇，胸口也闷得慌。",
+  "gold_department": "呼吸内科",
+  "gold_diseases": [
+   "肺炎",
+   "肺结核"
+  ],
+  "id": "risky_0385"
+ },
+ {
+  "severity": "risky",
+  "style": "erroneous",
+  "description": "我心荒得厉害，一阵一阵的，还老喘不上起来。",
+  "gold_department": "心内科",
+  "gold_diseases": [
+   "心律失常",
+   "冠心病"
+  ],
+  "id": "risky_0386"
+ },
+ {
+  "severity": "risky",
+  "style": "erroneous",
+  "description": "我拉希好几天了，肚子疼得直不起腰，还吐了两回。",
+  "gold_department": "消化内科",
+  "gold_diseases": [
+   "急性胃肠炎",
+   "细菌性痢疾"
+  ],
+  "id": "risky_0387"
+ },
+ {
+  "severity": "risky",
+  "style": "erroneous",
+  "description": "我头荤得站不住，看东西打转，耳朵里还嗡嗡响。",
+  "gold_department": "神经内科",
+  "gold_diseases": [
+   "眩晕综合征",
+   "脑供血不足"
+  ],
+  "id": "risky_0388"
+ },
+ {
+  "severity": "risky",
+  "style": "erroneous",
+  "description": "我嗓子疼得咽不下东酉，扁头体肿了，还发浇。",
+  "gold_department": "耳鼻喉科",
+  "gold_diseases": [
+   "急性扁桃体炎",
+   "急性咽炎"
+  ],
+  "id": "risky_0389"
+ },
+ {
+  "severity": "risky",
+  "style": "erroneous",
+  "description": "我尿尿的时候刺挠得不行，还老想上侧所，腰也酸。",
+  "gold_department": "泌尿科",
+  "gold_diseases": [
+   "尿路感染",
+   "急性膀胱炎"
+  ],
+  "id": "risky_0390"
+ },
+ {
+  "severity": "risky",
+  "style": "erroneous",
+  "description": "我肚子疼，下面还流写，不是来月经的时候，味儿也大。",
+  "gold_department": "妇科",
+  "gold_diseases": [
+   "盆腔炎",
+   "宫颈炎"
+  ],
+  "id": "risky_0391"
+ },
+ {
+  "severity": "risky",
+  "style": "erroneous",
+  "description": "我孩子发浇三天了，吃了退浇药也不管用，还老哭闹。",
+  "gold_department": "儿科",
+  "gold_diseases": [
+   "小儿肺炎",
+   "幼儿急疹"
+  ],
+  "id": "risky_0392"
+ },
+ {
+  "severity": "risky",
+  "style": "erroneous",
+  "description": "我关节又肿又疼，早上起来硬邦邦的，动都动不聊。",
+  "gold_department": "风湿免疫科",
+  "gold_diseases": [
+   "类风湿关节炎",
+   "痛风性关节炎"
+  ],
+  "id": "risky_0393"
+ },
+ {
+  "severity": "risky",
+  "style": "erroneous",
+  "description": "我屁股眼那儿疼，拉屎带写，还有个肉球掉出来。",
+  "gold_department": "肛肠科",
+  "gold_diseases": [
+   "痔疮",
+   "肛裂"
+  ],
+  "id": "risky_0394"
+ },
+ {
+  "severity": "risky",
+  "style": "erroneous",
+  "description": "医森我这两天一直发浇，还咳嗖，胸口闷得慌，晚上出汗把衣服都弄湿了。",
+  "gold_department": "呼吸内科",
+  "gold_diseases": [
+   "肺炎",
+   "肺结核",
+   "呼吸道感染"
+  ],
+  "id": "risky_0395"
+ },
+ {
+  "severity": "risky",
+  "style": "erroneous",
+  "description": "我肚子右下方疼得厉害，还拉希，一按就疼，走路都直不起腰。",
+  "gold_department": "消化内科",
+  "gold_diseases": [
+   "急性阑尾炎",
+   "急性胃肠炎",
+   "肠炎"
+  ],
+  "id": "risky_0396"
+ },
+ {
+  "severity": "risky",
+  "style": "erroneous",
+  "description": "这几天老心荒、心挑得快，有时候眼前一黑，手还发斗。",
+  "gold_department": "心内科",
+  "gold_diseases": [
+   "心律失常",
+   "冠心病",
+   "心肌缺血"
+  ],
+  "id": "risky_0397"
+ },
+ {
+  "severity": "risky",
+  "style": "erroneous",
+  "description": "我尿尿的时候又疼又烧，还想老去厕所，腰也酸得不行。",
+  "gold_department": "泌尿科",
+  "gold_diseases": [
+   "尿路感染",
+   "膀胱炎",
+   "肾盂肾炎"
+  ],
+  "id": "risky_0398"
+ },
+ {
+  "severity": "risky",
+  "style": "erroneous",
+  "description": "脑袋昏昏沉沉好几天了，还老想吐，耳朵里嗡翁响，站都站不稳。",
+  "gold_department": "神经内科",
+  "gold_diseases": [
+   "眩晕症",
+   "脑供血不足",
+   "前庭神经炎"
+  ],
+  "id": "risky_0399"
+ },
+ {
+  "severity": "severe",
+  "style": "formal",
+  "description": "患者于1小时前突发压榨性胸骨后疼痛，伴大汗、恶心，疼痛向左肩及下颌放射，含服硝酸甘油后未缓解，现感气促、濒死感。",
+  "gold_department": "急诊科",
+  "gold_diseases": [
+   "急性心肌梗死",
+   "不稳定型心绞痛"
+  ],
+  "id": "severe_0400"
+ },
+ {
+  "severity": "severe",
+  "style": "formal",
+  "description": "患者今晨突发右侧肢体无力伴言语含糊，无法独立行走，伴口角歪斜、饮水呛咳，症状持续不缓解。",
+  "gold_department": "急诊科",
+  "gold_diseases": [
+   "急性脑卒中",
+   "脑出血"
+  ],
+  "id": "severe_0401"
+ },
+ {
+  "severity": "severe",
+  "style": "formal",
+  "description": "患者呕血约500毫升，呈鲜红色，伴头晕、心悸、出冷汗，面色苍白，近2小时反复呕血。",
+  "gold_department": "急诊科",
+  "gold_diseases": [
+   "上消化道大出血",
+   "食管胃底静脉曲张破裂出血"
+  ],
+  "id": "severe_0402"
+ },
+ {
+  "severity": "severe",
+  "style": "formal",
+  "description": "患者突发呼吸困难，端坐呼吸，口唇发绀，不能平卧，伴大汗及濒死感，吸氧后症状无明显缓解。",
+  "gold_department": "急诊科",
+  "gold_diseases": [
+   "急性左心衰竭",
+   "急性呼吸窘迫综合征"
+  ],
+  "id": "severe_0403"
+ },
+ {
+  "severity": "severe",
+  "style": "formal",
+  "description": "患者被发现意识不清约30分钟，呼之不应，伴呕吐及大小便失禁，既往有高血压病史，家属急送入院。",
+  "gold_department": "急诊科",
+  "gold_diseases": [
+   "急性脑出血",
+   "高血压脑病"
+  ],
+  "id": "severe_0404"
+ },
+ {
+  "severity": "severe",
+  "style": "formal",
+  "description": "患者突发剧烈撕裂样胸痛，向背部放射，伴面色苍白、血压升高及双侧脉搏不对称，疼痛持续不缓解。",
+  "gold_department": "急诊科",
+  "gold_diseases": [
+   "主动脉夹层",
+   "急性心肌梗死"
+  ],
+  "id": "severe_0405"
+ },
+ {
+  "severity": "severe",
+  "style": "formal",
+  "description": "患者于进食后突发严重呼吸困难，喉鸣，口唇发绀，无法完整说话，既往有食物过敏史。",
+  "gold_department": "急诊科",
+  "gold_diseases": [
+   "过敏性休克",
+   "急性喉头水肿"
+  ],
+  "id": "severe_0406"
+ },
+ {
+  "severity": "severe",
+  "style": "formal",
+  "description": "患者阴道大量出血，浸透卫生巾，伴头晕、乏力、心悸，妊娠试验阳性，下腹坠痛明显。",
+  "gold_department": "妇科",
+  "gold_diseases": [
+   "异位妊娠破裂",
+   "不全流产伴大出血"
+  ],
+  "id": "severe_0407"
+ },
+ {
+  "severity": "severe",
+  "style": "formal",
+  "description": "患者持续高热40摄氏度，伴寒战、意识模糊、呼吸急促及血压下降，皮肤出现花斑，尿量明显减少。",
+  "gold_department": "感染科",
+  "gold_diseases": [
+   "脓毒症休克",
+   "重症感染"
+  ],
+  "id": "severe_0408"
+ },
+ {
+  "severity": "severe",
+  "style": "formal",
+  "description": "患者头部外伤后出现意识障碍进行性加重，伴喷射性呕吐及瞳孔不等大，呼唤反应差。",
+  "gold_department": "急诊科",
+  "gold_diseases": [
+   "急性硬膜下血肿",
+   "颅脑损伤伴颅内压增高"
+  ],
+  "id": "severe_0409"
+ },
+ {
+  "severity": "severe",
+  "style": "formal",
+  "description": "突发压榨性胸痛，持续超过20分钟，伴大汗、濒死感，含服硝酸甘油无效。",
+  "gold_department": "急诊科",
+  "gold_diseases": [
+   "急性心肌梗死",
+   "心绞痛"
+  ],
+  "id": "severe_0410"
+ },
+ {
+  "severity": "severe",
+  "style": "formal",
+  "description": "突发左侧肢体无力伴言语不清、口角歪斜1小时，症状持续不缓解。",
+  "gold_department": "急诊科",
+  "gold_diseases": [
+   "急性脑卒中",
+   "脑出血"
+  ],
+  "id": "severe_0411"
+ },
+ {
+  "severity": "severe",
+  "style": "formal",
+  "description": "呕血约500毫升，伴柏油样便、头晕、心悸、面色苍白。",
+  "gold_department": "消化内科",
+  "gold_diseases": [
+   "上消化道大出血",
+   "消化性溃疡出血"
+  ],
+  "id": "severe_0412"
+ },
+ {
+  "severity": "severe",
+  "style": "formal",
+  "description": "严重呼吸困难，端坐呼吸，口唇发绀，不能平卧，伴大汗。",
+  "gold_department": "急诊科",
+  "gold_diseases": [
+   "急性左心衰竭",
+   "重症哮喘"
+  ],
+  "id": "severe_0413"
+ },
+ {
+  "severity": "severe",
+  "style": "formal",
+  "description": "意识不清2小时，呼之不应，伴大小便失禁，既往有糖尿病史。",
+  "gold_department": "急诊科",
+  "gold_diseases": [
+   "糖尿病酮症酸中毒",
+   "低血糖昏迷"
+  ],
+  "id": "severe_0414"
+ },
+ {
+  "severity": "severe",
+  "style": "formal",
+  "description": "突发撕裂样胸背部剧痛，向腰部放射，伴血压显著升高。",
+  "gold_department": "急诊科",
+  "gold_diseases": [
+   "主动脉夹层",
+   "急性心肌梗死"
+  ],
+  "id": "severe_0415"
+ },
+ {
+  "severity": "severe",
+  "style": "formal",
+  "description": "高热40℃持续3天，伴寒战、呼吸急促、血压下降、意识模糊。",
+  "gold_department": "感染科",
+  "gold_diseases": [
+   "脓毒症",
+   "感染性休克"
+  ],
+  "id": "severe_0416"
+ },
+ {
+  "severity": "severe",
+  "style": "formal",
+  "description": "突发剧烈头痛，伴喷射性呕吐、颈项强直、意识障碍。",
+  "gold_department": "急诊科",
+  "gold_diseases": [
+   "蛛网膜下腔出血",
+   "脑膜炎"
+  ],
+  "id": "severe_0417"
+ },
+ {
+  "severity": "severe",
+  "style": "formal",
+  "description": "阴道大量出血，伴头晕、乏力、血压下降，妊娠试验阳性。",
+  "gold_department": "妇科",
+  "gold_diseases": [
+   "异位妊娠破裂",
+   "产后出血"
+  ],
+  "id": "severe_0418"
+ },
+ {
+  "severity": "severe",
+  "style": "formal",
+  "description": "严重过敏反应，全身大片荨麻疹，伴喉头水肿、呼吸困难、血压下降。",
+  "gold_department": "急诊科",
+  "gold_diseases": [
+   "过敏性休克",
+   "急性喉头水肿"
+  ],
+  "id": "severe_0419"
+ },
+ {
+  "severity": "severe",
+  "style": "formal",
+  "description": "突发压榨性胸骨后疼痛，伴大汗、恶心，持续约二十分钟未缓解，含服硝酸甘油效果不佳。",
+  "gold_department": "急诊科",
+  "gold_diseases": [
+   "急性心肌梗死",
+   "不稳定型心绞痛"
+  ],
+  "id": "severe_0420"
+ },
+ {
+  "severity": "severe",
+  "style": "formal",
+  "description": "突发左侧肢体无力伴言语含糊，口角向右歪斜，症状持续约半小时，既往有高血压病史。",
+  "gold_department": "急诊科",
+  "gold_diseases": [
+   "急性脑卒中",
+   "脑出血"
+  ],
+  "id": "severe_0421"
+ },
+ {
+  "severity": "severe",
+  "style": "formal",
+  "description": "无明显诱因出现呕血约三百毫升，伴头晕、心悸、面色苍白，血压偏低。",
+  "gold_department": "急诊科",
+  "gold_diseases": [
+   "上消化道大出血",
+   "失血性休克"
+  ],
+  "id": "severe_0422"
+ },
+ {
+  "severity": "severe",
+  "style": "formal",
+  "description": "突发呼吸困难，端坐呼吸，口唇发绀，伴大汗，不能平卧，吸氧后症状无明显缓解。",
+  "gold_department": "急诊科",
+  "gold_diseases": [
+   "急性左心衰竭",
+   "重症哮喘"
+  ],
+  "id": "severe_0423"
+ },
+ {
+  "severity": "severe",
+  "style": "formal",
+  "description": "突发意识不清伴呼之不应，四肢抽搐，口吐白沫，持续约三分钟，既往有癫痫病史。",
+  "gold_department": "急诊科",
+  "gold_diseases": [
+   "癫痫持续状态",
+   "急性脑血管意外"
+  ],
+  "id": "severe_0424"
+ },
+ {
+  "severity": "severe",
+  "style": "natural",
+  "description": "我这胸口疼得厉害，像被大石头压着，喘不上气，还一直冒冷汗。",
+  "gold_department": "急诊科",
+  "gold_diseases": [
+   "急性心肌梗死",
+   "心绞痛"
+  ],
+  "id": "severe_0425"
+ },
+ {
+  "severity": "severe",
+  "style": "natural",
+  "description": "我爸突然嘴歪了，右边手脚都抬不起来，说话也说不清楚。",
+  "gold_department": "急诊科",
+  "gold_diseases": [
+   "脑卒中",
+   "脑出血"
+  ],
+  "id": "severe_0426"
+ },
+ {
+  "severity": "severe",
+  "style": "natural",
+  "description": "我肚子疼得要命，拉了好多黑便，站起来就头晕眼黑。",
+  "gold_department": "急诊科",
+  "gold_diseases": [
+   "上消化道大出血",
+   "失血性休克"
+  ],
+  "id": "severe_0427"
+ },
+ {
+  "severity": "severe",
+  "style": "natural",
+  "description": "我喘不上气来，嘴唇都紫了，说话都费劲，越来越重。",
+  "gold_department": "急诊科",
+  "gold_diseases": [
+   "急性呼吸衰竭",
+   "重症哮喘"
+  ],
+  "id": "severe_0428"
+ },
+ {
+  "severity": "severe",
+  "style": "natural",
+  "description": "我老婆突然叫不醒了，怎么喊都没反应，还吐了一地。",
+  "gold_department": "急诊科",
+  "gold_diseases": [
+   "意识障碍",
+   "急性中毒"
+  ],
+  "id": "severe_0429"
+ },
+ {
+  "severity": "severe",
+  "style": "natural",
+  "description": "我头痛得像要炸开一样，脖子也硬，还吐了好几次。",
+  "gold_department": "急诊科",
+  "gold_diseases": [
+   "蛛网膜下腔出血",
+   "脑膜炎"
+  ],
+  "id": "severe_0430"
+ },
+ {
+  "severity": "severe",
+  "style": "natural",
+  "description": "我胸口闷痛，左胳膊也跟着疼，恶心，感觉快不行了。",
+  "gold_department": "急诊科",
+  "gold_diseases": [
+   "急性心肌梗死",
+   "急性冠脉综合征"
+  ],
+  "id": "severe_0431"
+ },
+ {
+  "severity": "severe",
+  "style": "natural",
+  "description": "我摔了一跤后肚子越来越疼，脸色发白，一按肚子就疼得跳起来。",
+  "gold_department": "急诊科",
+  "gold_diseases": [
+   "脾破裂",
+   "腹腔内出血"
+  ],
+  "id": "severe_0432"
+ },
+ {
+  "severity": "severe",
+  "style": "natural",
+  "description": "我嗓子突然肿得厉害，呼吸都困难了，身上还起了大片疹子。",
+  "gold_department": "急诊科",
+  "gold_diseases": [
+   "过敏性休克",
+   "急性喉头水肿"
+  ],
+  "id": "severe_0433"
+ },
+ {
+  "severity": "severe",
+  "style": "natural",
+  "description": "我尿不出来，肚子胀得像个鼓，疼得直不起腰，还发烧。",
+  "gold_department": "急诊科",
+  "gold_diseases": [
+   "急性尿潴留",
+   "尿路梗阻伴感染"
+  ],
+  "id": "severe_0434"
+ },
+ {
+  "severity": "severe",
+  "style": "natural",
+  "description": "大夫，我胸口疼得厉害，像被大石头压着，还一直冒冷汗，喘不上气。",
+  "gold_department": "急诊科",
+  "gold_diseases": [
+   "急性心肌梗死",
+   "心绞痛"
+  ],
+  "id": "severe_0435"
+ },
+ {
+  "severity": "severe",
+  "style": "natural",
+  "description": "我爸突然右边身子动不了，嘴也歪了，说话也说不清楚，赶紧过来看看。",
+  "gold_department": "急诊科",
+  "gold_diseases": [
+   "脑卒中",
+   "脑梗死"
+  ],
+  "id": "severe_0436"
+ },
+ {
+  "severity": "severe",
+  "style": "natural",
+  "description": "我这两天一直吐咖啡色的东西，还拉黑便，浑身没劲儿，快站不住了。",
+  "gold_department": "急诊科",
+  "gold_diseases": [
+   "上消化道出血",
+   "胃溃疡出血"
+  ],
+  "id": "severe_0437"
+ },
+ {
+  "severity": "severe",
+  "style": "natural",
+  "description": "孩子烧到40度，刚才突然抽过去了，眼睛往上翻，叫他也没反应。",
+  "gold_department": "儿科",
+  "gold_diseases": [
+   "热性惊厥",
+   "颅内感染"
+  ],
+  "id": "severe_0438"
+ },
+ {
+  "severity": "severe",
+  "style": "natural",
+  "description": "我突然喘不上气，嘴唇都发紫了，喉咙里像有什么东西堵着。",
+  "gold_department": "急诊科",
+  "gold_diseases": [
+   "急性呼吸衰竭",
+   "气道梗阻"
+  ],
+  "id": "severe_0439"
+ },
+ {
+  "severity": "severe",
+  "style": "natural",
+  "description": "我肚子疼得直不起腰，整个肚子硬邦邦的，一碰就疼得要命。",
+  "gold_department": "急诊科",
+  "gold_diseases": [
+   "急性腹膜炎",
+   "消化道穿孔"
+  ],
+  "id": "severe_0440"
+ },
+ {
+  "severity": "severe",
+  "style": "natural",
+  "description": "我老婆下面突然流了好多血，止都止不住，脸都白了。",
+  "gold_department": "妇科",
+  "gold_diseases": [
+   "产后大出血",
+   "异常子宫出血"
+  ],
+  "id": "severe_0441"
+ },
+ {
+  "severity": "severe",
+  "style": "natural",
+  "description": "我头从来没这么疼过，像要炸开一样，还看不清东西，想吐。",
+  "gold_department": "神经内科",
+  "gold_diseases": [
+   "蛛网膜下腔出血",
+   "高血压脑病"
+  ],
+  "id": "severe_0442"
+ },
+ {
+  "severity": "severe",
+  "style": "natural",
+  "description": "我尿不出来，憋得肚子胀痛，腰也疼得厉害，还发烧打寒战。",
+  "gold_department": "泌尿科",
+  "gold_diseases": [
+   "急性尿潴留",
+   "急性肾盂肾炎"
+  ],
+  "id": "severe_0443"
+ },
+ {
+  "severity": "severe",
+  "style": "natural",
+  "description": "我全身起了大片疹子，喉咙发紧，呼吸越来越费劲，快不行了。",
+  "gold_department": "急诊科",
+  "gold_diseases": [
+   "过敏性休克",
+   "急性荨麻疹伴喉头水肿"
+  ],
+  "id": "severe_0444"
+ },
+ {
+  "severity": "severe",
+  "style": "natural",
+  "description": "医生快救救我，胸口像被大石头压着，喘不上气，疼得满头大汗，已经二十多分钟了。",
+  "gold_department": "急诊科",
+  "gold_diseases": [
+   "急性心肌梗死",
+   "急性冠脉综合征"
+  ],
+  "id": "severe_0445"
+ },
+ {
+  "severity": "severe",
+  "style": "natural",
+  "description": "我爸刚才突然嘴歪了，右边手脚都动不了，说话也说不清楚，赶紧送来了。",
+  "gold_department": "急诊科",
+  "gold_diseases": [
+   "急性脑卒中",
+   "脑梗死"
+  ],
+  "id": "severe_0446"
+ },
+ {
+  "severity": "severe",
+  "style": "natural",
+  "description": "我吐了好多血，一直止不住，头也晕得厉害，人都快站不住了。",
+  "gold_department": "急诊科",
+  "gold_diseases": [
+   "上消化道大出血",
+   "失血性休克"
+  ],
+  "id": "severe_0447"
+ },
+ {
+  "severity": "severe",
+  "style": "natural",
+  "description": "孩子突然喘不上气，嘴唇都紫了，喊他也不太答应，急死我了。",
+  "gold_department": "急诊科",
+  "gold_diseases": [
+   "急性呼吸衰竭",
+   "气道梗阻"
+  ],
+  "id": "severe_0448"
+ },
+ {
+  "severity": "severe",
+  "style": "natural",
+  "description": "我突然头痛得要炸开一样，还一直呕吐，脖子发硬，人越来越迷糊。",
+  "gold_department": "急诊科",
+  "gold_diseases": [
+   "蛛网膜下腔出血",
+   "颅内出血"
+  ],
+  "id": "severe_0449"
+ },
+ {
+  "severity": "severe",
+  "style": "vague",
+  "description": "大夫，我这儿说不上来哪儿难受，就感觉整个人要不行了，胸口闷得慌，浑身不得劲，喘不上气儿。",
+  "gold_department": "急诊科",
+  "gold_diseases": [
+   "急性心肌梗死",
+   "急性冠脉综合征"
+  ],
+  "id": "severe_0450"
+ },
+ {
+  "severity": "severe",
+  "style": "vague",
+  "description": "不知道咋回事，突然就头晕得厉害，天旋地转的，说话也不利索了，半边身子发麻，说不上来哪儿出了问题。",
+  "gold_department": "急诊科",
+  "gold_diseases": [
+   "急性脑卒中",
+   "脑出血"
+  ],
+  "id": "severe_0451"
+ },
+ {
+  "severity": "severe",
+  "style": "vague",
+  "description": "我这人就是不舒服，说不上来具体哪儿疼，反正肚子里面翻江倒海的，疼得直不起腰，浑身冒冷汗。",
+  "gold_department": "急诊科",
+  "gold_diseases": [
+   "急性腹膜炎",
+   "消化道穿孔"
+  ],
+  "id": "severe_0452"
+ },
+ {
+  "severity": "severe",
+  "style": "vague",
+  "description": "哎呦，我浑身不得劲，喘不上气儿，胸口像压了块大石头，也说不上来是哪儿出了毛病，就是感觉快不行了。",
+  "gold_department": "急诊科",
+  "gold_diseases": [
+   "急性心力衰竭",
+   "肺栓塞"
+  ],
+  "id": "severe_0453"
+ },
+ {
+  "severity": "severe",
+  "style": "vague",
+  "description": "说不清咋回事，我突然就出好多血，也不晓得从哪儿来的，眼前一黑一黑的，浑身没劲，站都站不住。",
+  "gold_department": "急诊科",
+  "gold_diseases": [
+   "消化道大出血",
+   "失血性休克"
+  ],
+  "id": "severe_0454"
+ },
+ {
+  "severity": "severe",
+  "style": "vague",
+  "description": "我也说不上来，就觉得脑袋昏昏沉沉的，人迷迷糊糊的，叫我也反应慢半拍，家里人说我脸色不对。",
+  "gold_department": "急诊科",
+  "gold_diseases": [
+   "急性脑卒中",
+   "意识障碍"
+  ],
+  "id": "severe_0455"
+ },
+ {
+  "severity": "severe",
+  "style": "vague",
+  "description": "大夫，我这儿说不上来哪儿不对劲，就是浑身难受得厉害，发高烧烧得人糊里糊涂的，整个人都不好了。",
+  "gold_department": "感染科",
+  "gold_diseases": [
+   "脓毒症",
+   "感染性休克"
+  ],
+  "id": "severe_0456"
+ },
+ {
+  "severity": "severe",
+  "style": "vague",
+  "description": "不知道咋了，我这气儿就是不够用，说不上来哪儿堵着，喘得厉害，嘴唇都发紫了，浑身难受。",
+  "gold_department": "急诊科",
+  "gold_diseases": [
+   "急性呼吸衰竭",
+   "重症哮喘"
+  ],
+  "id": "severe_0457"
+ },
+ {
+  "severity": "severe",
+  "style": "vague",
+  "description": "我整个人说不上来的不对劲，胸口疼得厉害，还往胳膊上窜，浑身冒冷汗，感觉要出大事儿。",
+  "gold_department": "急诊科",
+  "gold_diseases": [
+   "急性心肌梗死",
+   "主动脉夹层"
+  ],
+  "id": "severe_0458"
+ },
+ {
+  "severity": "severe",
+  "style": "vague",
+  "description": "说不上来哪儿的问题，我就是难受得不行，浑身发烫又打冷战，人越来越糊涂，家里人喊我我都听不太清。",
+  "gold_department": "急诊科",
+  "gold_diseases": [
+   "脓毒症",
+   "重症感染"
+  ],
+  "id": "severe_0459"
+ },
+ {
+  "severity": "severe",
+  "style": "vague",
+  "description": "说不上来，就是胸口特别难受，浑身不得劲，感觉快不行了。",
+  "gold_department": "急诊科",
+  "gold_diseases": [
+   "急性心肌梗死",
+   "急性冠脉综合征"
+  ],
+  "id": "severe_0460"
+ },
+ {
+  "severity": "severe",
+  "style": "vague",
+  "description": "不知道怎么了，突然话也说不清，一边身子不舒服，整个人不对劲。",
+  "gold_department": "急诊科",
+  "gold_diseases": [
+   "急性脑卒中",
+   "脑出血"
+  ],
+  "id": "severe_0461"
+ },
+ {
+  "severity": "severe",
+  "style": "vague",
+  "description": "浑身不得劲，喘不上气来，也说不上哪里疼，就是人要不行了。",
+  "gold_department": "急诊科",
+  "gold_diseases": [
+   "急性呼吸衰竭",
+   "重症肺炎"
+  ],
+  "id": "severe_0462"
+ },
+ {
+  "severity": "severe",
+  "style": "vague",
+  "description": "人迷迷糊糊的，叫也不太应，浑身不舒服，不知道咋回事。",
+  "gold_department": "急诊科",
+  "gold_diseases": [
+   "意识障碍",
+   "代谢性脑病"
+  ],
+  "id": "severe_0463"
+ },
+ {
+  "severity": "severe",
+  "style": "vague",
+  "description": "肚子说不上来的难受，浑身发冷不得劲，感觉要晕过去了。",
+  "gold_department": "急诊科",
+  "gold_diseases": [
+   "消化道大出血",
+   "失血性休克"
+  ],
+  "id": "severe_0464"
+ },
+ {
+  "severity": "severe",
+  "style": "vague",
+  "description": "就是不舒服，浑身没劲，心慌得厉害，说不上来哪里出问题了。",
+  "gold_department": "急诊科",
+  "gold_diseases": [
+   "严重心律失常",
+   "心源性休克"
+  ],
+  "id": "severe_0465"
+ },
+ {
+  "severity": "severe",
+  "style": "vague",
+  "description": "整个人不得劲，出冷汗，胸口闷得说不上来，特别难受。",
+  "gold_department": "急诊科",
+  "gold_diseases": [
+   "急性心肌梗死",
+   "主动脉夹层"
+  ],
+  "id": "severe_0466"
+ },
+ {
+  "severity": "severe",
+  "style": "vague",
+  "description": "说不上哪儿出了问题，就是浑身难受，眼前发黑，站都站不住。",
+  "gold_department": "急诊科",
+  "gold_diseases": [
+   "休克",
+   "低血糖昏迷"
+  ],
+  "id": "severe_0467"
+ },
+ {
+  "severity": "severe",
+  "style": "vague",
+  "description": "不舒服得厉害，喉咙像堵住了，喘不过来，浑身不得劲。",
+  "gold_department": "急诊科",
+  "gold_diseases": [
+   "急性喉头水肿",
+   "过敏性休克"
+  ],
+  "id": "severe_0468"
+ },
+ {
+  "severity": "severe",
+  "style": "vague",
+  "description": "浑身说不上来的难受，又吐又拉，人虚得不行，感觉要撑不住了。",
+  "gold_department": "急诊科",
+  "gold_diseases": [
+   "重度脱水",
+   "感染性休克"
+  ],
+  "id": "severe_0469"
+ },
+ {
+  "severity": "severe",
+  "style": "vague",
+  "description": "也说不上来哪儿不对劲，就是胸口这块儿闷得慌，浑身不得劲，喘气费劲，感觉人快不行了。",
+  "gold_department": "急诊科",
+  "gold_diseases": [
+   "急性心肌梗死",
+   "急性冠脉综合征"
+  ],
+  "id": "severe_0470"
+ },
+ {
+  "severity": "severe",
+  "style": "vague",
+  "description": "说不上来，就突然整个人不舒服，一边身子好像不是自己的，说话也说不清，脑袋晕乎乎的。",
+  "gold_department": "急诊科",
+  "gold_diseases": [
+   "急性脑卒中",
+   "脑出血"
+  ],
+  "id": "severe_0471"
+ },
+ {
+  "severity": "severe",
+  "style": "vague",
+  "description": "不知道咋回事，就是浑身不得劲，喘不上气来，嘴唇好像都紫了，人迷迷糊糊的。",
+  "gold_department": "急诊科",
+  "gold_diseases": [
+   "急性呼吸衰竭",
+   "重症哮喘发作"
+  ],
+  "id": "severe_0472"
+ },
+ {
+  "severity": "severe",
+  "style": "vague",
+  "description": "也说不上具体哪儿，就是肚子这块儿难受得厉害，整个人发虚，冒冷汗，站都站不住。",
+  "gold_department": "急诊科",
+  "gold_diseases": [
+   "消化道大出血",
+   "急性腹主动脉瘤破裂"
+  ],
+  "id": "severe_0473"
+ },
+ {
+  "severity": "severe",
+  "style": "vague",
+  "description": "说不上来，就是突然特别不舒服，心慌得厉害，眼前发黑，人软得跟没劲儿似的要倒。",
+  "gold_department": "急诊科",
+  "gold_diseases": [
+   "严重心律失常",
+   "心源性休克"
+  ],
+  "id": "severe_0474"
+ },
+ {
+  "severity": "severe",
+  "style": "erroneous",
+  "description": "大夫快救救我爹，他突然心口绞着疼，还冒冷汗，喘不上气儿，刚才还吐了一地。",
+  "gold_department": "急诊科",
+  "gold_diseases": [
+   "急性心肌梗死",
+   "心绞痛"
+  ],
+  "id": "severe_0475"
+ },
+ {
+  "severity": "severe",
+  "style": "erroneous",
+  "description": "我爷们儿说话突然秃噜嘴，右边胳膊腿儿也不听使唤了，脑袋疼得像要裂开似的。",
+  "gold_department": "急诊科",
+  "gold_diseases": [
+   "脑卒中",
+   "脑出血"
+  ],
+  "id": "severe_0476"
+ },
+ {
+  "severity": "severe",
+  "style": "erroneous",
+  "description": "娃儿发烧抽过去了，眼珠子往上翻，牙关咬得死死的，咋喊都不醒，急死个人了。",
+  "gold_department": "急诊科",
+  "gold_diseases": [
+   "热性惊厥",
+   "癫痫持续状态"
+  ],
+  "id": "severe_0477"
+ },
+ {
+  "severity": "severe",
+  "style": "erroneous",
+  "description": "我这肚子疼得跟刀扎似的，还拉希拉出黑便来了，头晕眼花站不住。",
+  "gold_department": "急诊科",
+  "gold_diseases": [
+   "上消化道大出血",
+   "消化性溃疡出血"
+  ],
+  "id": "severe_0478"
+ },
+ {
+  "severity": "severe",
+  "style": "erroneous",
+  "description": "我喘不上气儿，憋得脸都紫了，嗓子眼儿像堵了个东西，说话都说不成句。",
+  "gold_department": "急诊科",
+  "gold_diseases": [
+   "急性呼吸衰竭",
+   "哮喘持续状态"
+  ],
+  "id": "severe_0479"
+ },
+ {
+  "severity": "severe",
+  "style": "erroneous",
+  "description": "大夫，我媳妇儿下面哗哗淌血止不住，脸白得跟纸似的，人都快没意识了。",
+  "gold_department": "急诊科",
+  "gold_diseases": [
+   "产后出血",
+   "失血性休克"
+  ],
+  "id": "severe_0480"
+ },
+ {
+  "severity": "severe",
+  "style": "erroneous",
+  "description": "我胸口闷得慌，心荒得厉害，左边胳膊麻嗖嗖的，出了一身凉汗。",
+  "gold_department": "急诊科",
+  "gold_diseases": [
+   "急性冠脉综合征",
+   "心肌梗死"
+  ],
+  "id": "severe_0481"
+ },
+ {
+  "severity": "severe",
+  "style": "erroneous",
+  "description": "他抽过去了，全身抽抽，口吐白沫，尿了一裤子，咋叫都不应。",
+  "gold_department": "急诊科",
+  "gold_diseases": [
+   "癫痫大发作",
+   "癫痫持续状态"
+  ],
+  "id": "severe_0482"
+ },
+ {
+  "severity": "severe",
+  "style": "erroneous",
+  "description": "孩子吃花生米呛着了，咳嗖得脸通红，气儿都吸不进去，嘴唇发青。",
+  "gold_department": "急诊科",
+  "gold_diseases": [
+   "气道异物梗阻",
+   "急性窒息"
+  ],
+  "id": "severe_0483"
+ },
+ {
+  "severity": "severe",
+  "style": "erroneous",
+  "description": "我浑身起大包，痒得要命，喉咙眼儿发紧，喘气费劲，脑袋也晕乎乎的。",
+  "gold_department": "急诊科",
+  "gold_diseases": [
+   "过敏性休克",
+   "急性荨麻疹伴喉头水肿"
+  ],
+  "id": "severe_0484"
+ },
+ {
+  "severity": "severe",
+  "style": "erroneous",
+  "description": "胸口突然压榨样疼，冒冷汗，喘不上气，心荒得要命，左胳膊也酸麻。",
+  "gold_department": "急诊科",
+  "gold_diseases": [
+   "急性心肌梗死",
+   "急性冠脉综合征"
+  ],
+  "id": "severe_0485"
+ },
+ {
+  "severity": "severe",
+  "style": "erroneous",
+  "description": "左边身子突然使不上劲，嘴歪，说话大舌头，还抽风了，脑壳疼得厉害。",
+  "gold_department": "急诊科",
+  "gold_diseases": [
+   "急性脑卒中",
+   "脑出血"
+  ],
+  "id": "severe_0486"
+ },
+ {
+  "severity": "severe",
+  "style": "erroneous",
+  "description": "咳嗖咳出好多血，胸口闷得像压了石头，吸气都吸不进，脸都紫了。",
+  "gold_department": "急诊科",
+  "gold_diseases": [
+   "大咯血",
+   "呼吸衰竭"
+  ],
+  "id": "severe_0487"
+ },
+ {
+  "severity": "severe",
+  "style": "erroneous",
+  "description": "拉希拉得全是黑便，吐咖啡色的水，头晕眼花站不住，心跳快得慌。",
+  "gold_department": "急诊科",
+  "gold_diseases": [
+   "上消化道大出血",
+   "失血性休克"
+  ],
+  "id": "severe_0488"
+ },
+ {
+  "severity": "severe",
+  "style": "erroneous",
+  "description": "肚子疼得像刀割，整个肚子硬邦邦的，按都不敢按，还发烧打哆嗦。",
+  "gold_department": "急诊科",
+  "gold_diseases": [
+   "急性弥漫性腹膜炎",
+   "消化道穿孔"
+  ],
+  "id": "severe_0489"
+ },
+ {
+  "severity": "severe",
+  "style": "erroneous",
+  "description": "突然喘不上气，喉咙里像堵了东西，说话都说不成句，嘴皮子发紫。",
+  "gold_department": "急诊科",
+  "gold_diseases": [
+   "急性喉头水肿",
+   "急性呼吸衰竭"
+  ],
+  "id": "severe_0490"
+ },
+ {
+  "severity": "severe",
+  "style": "erroneous",
+  "description": "人叫不醒了，迷迷糊糊说胡话，手脚冰凉，尿也拉不出来，心慌得不行。",
+  "gold_department": "急诊科",
+  "gold_diseases": [
+   "感染性休克",
+   "急性肾功能衰竭"
+  ],
+  "id": "severe_0491"
+ },
+ {
+  "severity": "severe",
+  "style": "erroneous",
+  "description": "突然看东西重影，眼珠子转不动，头疼得想吐，脖子也硬得弯不下。",
+  "gold_department": "急诊科",
+  "gold_diseases": [
+   "蛛网膜下腔出血",
+   "脑疝"
+  ],
+  "id": "severe_0492"
+ },
+ {
+  "severity": "severe",
+  "style": "erroneous",
+  "description": "被车撞了以后肚子胀得厉害，脸色白得像纸，血压掉得吓人，人发冷。",
+  "gold_department": "急诊科",
+  "gold_diseases": [
+   "外伤性腹腔内出血",
+   "失血性休克"
+  ],
+  "id": "severe_0493"
+ },
+ {
+  "severity": "severe",
+  "style": "erroneous",
+  "description": "胸口疼得往后背窜，像撕开一样，两边胳膊血压差好多，人都快晕过去了。",
+  "gold_department": "急诊科",
+  "gold_diseases": [
+   "主动脉夹层",
+   "急性主动脉综合征"
+  ],
+  "id": "severe_0494"
+ },
+ {
+  "severity": "severe",
+  "style": "erroneous",
+  "description": "胸通得厉害，像石头压到起，气都出不赢，冒冷汗",
+  "gold_department": "急诊科",
+  "gold_diseases": [
+   "急性心肌梗死",
+   "心绞痛"
+  ],
+  "id": "severe_0495"
+ },
+ {
+  "severity": "severe",
+  "style": "erroneous",
+  "description": "突然脚耙手软，嘴也歪了，讲话打啰啰，脑壳昏得很",
+  "gold_department": "急诊科",
+  "gold_diseases": [
+   "脑卒中",
+   "脑出血"
+  ],
+  "id": "severe_0496"
+ },
+ {
+  "severity": "severe",
+  "style": "erroneous",
+  "description": "喉咙哽得遭不住，出不到气，脸都憋青了，快救哈命",
+  "gold_department": "急诊科",
+  "gold_diseases": [
+   "急性喉梗阻",
+   "过敏性休克"
+  ],
+  "id": "severe_0497"
+ },
+ {
+  "severity": "severe",
+  "style": "erroneous",
+  "description": "肚子痛得板，还拉了黑粑粑，人软得站都站不稳",
+  "gold_department": "急诊科",
+  "gold_diseases": [
+   "消化道大出血",
+   "胃十二指肠溃疡出血"
+  ],
+  "id": "severe_0498"
+ },
+ {
+  "severity": "severe",
+  "style": "erroneous",
+  "description": "脑壳遭撞了，喊都喊不醒，还吐了一地，搞快送医院",
+  "gold_department": "急诊科",
+  "gold_diseases": [
+   "颅脑损伤",
+   "脑出血"
+  ],
+  "id": "severe_0499"
+ }
+]
