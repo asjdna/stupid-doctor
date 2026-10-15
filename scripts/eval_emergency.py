@@ -75,7 +75,8 @@ def _ask(base: str, text: str, sid: str) -> dict[str, Any]:
         base + "/consult", data=body, headers={"Content-Type": "application/json"}
     )
     with urllib.request.urlopen(req, timeout=300) as r:  # noqa: S310
-        return json.loads(r.read().decode("utf-8"))
+        payload: dict[str, Any] = json.loads(r.read().decode("utf-8"))
+        return payload
 
 
 def main(argv: list[str] | None = None) -> int:
