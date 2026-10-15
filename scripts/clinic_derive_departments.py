@@ -27,7 +27,19 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO / "src"))
 
-DEFAULT_TRIPLES = Path(r"E:\Users\86189\medical-agent\data\raw\OpenCMKG\triples.txt")
+DEFAULT_TRIPLES = REPO / "data" / "raw" / "OpenCMKG" / "triples.txt"
+"""原始三元组的位置（**仓库相对路径，不是某台机器的绝对路径**）。
+
+`data/raw/` 被 `.gitignore` 排除，所以新克隆里这里**是空的**——脚本会打印
+"找不到原始三元组"并退出，那时用 `--triples` 指到你自己的副本即可：
+
+    # 上游 OpenCMKG 的 triples.txt（`head,relation,tail` CSV）
+    # 原型仓库里也有一份：medical-agent/data/raw/OpenCMKG/triples.txt
+    python scripts/clinic_derive_departments.py --triples /path/to/triples.txt
+
+> 早期这里写死了开发机的绝对路径。那对新克隆是**必然失败且看不出原因**，
+> 所以改成仓库相对路径 + 显式报错。
+"""
 DEFAULT_CARDS = REPO / "data" / "clinic" / "cards.json"
 DEFAULT_OUT = REPO / "data" / "clinic" / "department_map.json"
 

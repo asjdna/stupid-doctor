@@ -188,9 +188,10 @@
   `red_line_conflict=true` —— **只进对话，不弹横幅**。横幅的触发权归模型，但危险信号不会消失。
   回归测试：`test_red_line_conflict_is_spoken_in_the_dialogue`、
   `test_red_line_alone_does_not_raise_the_banner`、`test_degraded_emergency_does_not_raise_the_banner`。
-- **R1 未放宽**：提示词仍要求"看到【红线信号】就必须给紧急处理指引"，
-  所以正常情况下红线仍会让模型判出 `emergency`、横幅仍会出现——
-  变的只是**触发链**（模型判断）而不是**红线的作用**。若要把红线也降为纯建议，需要另外拍板。
+- ~~**R1 未放宽**：提示词仍要求"看到【红线信号】就必须给紧急处理指引"~~ ——
+  **这一条已被下一轮推翻**：R1 现已改为"急重症由你判断：看病症 + 严重程度"，
+  关键词表彻底退出判断链。**当时写的"红线仍会让模型判出 emergency"不再成立**，
+  留在原处是为了留下"结论被改过"的痕迹，不是现状。
 - 前端不再自己判断急诊：页面里**没有** `red_line_positive` 与 `"urgent"` 字样，
   只渲染服务端给的 `emergency`（同一类断言也在测试里）。
 

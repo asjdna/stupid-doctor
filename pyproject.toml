@@ -7,7 +7,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "kubedocs"
 version = "0.1.0"
-description = "面向 Kubernetes 官方文档的工业级 RAG 服务：混合检索 + 重排 + 带引用回答 + 评测闸门 + 可观测"
+description = "双域（Kubernetes 文档 / 医疗问诊）RAG + agent 平台：混合检索 + 重排 + 带引用回答 + 工具编排 + 评测闸门 + 可观测"
 license = "MIT"
 license-files = ["LICENSE"]
 requires-python = ">=3.10"

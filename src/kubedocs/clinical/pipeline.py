@@ -1,5 +1,10 @@
 """编排：一轮问诊的完整链路（方案 §7）。
 
+**工具循环路径（有 `tool_loop` 时，当前主路径）**：模型自己决定调哪些工具取证，
+代码只提供工具清单与执行器 —— 见 `clinical/orchestration.py`。
+
+**固定路径（没有 `tool_loop` 时）**：
+
 ```
 intake ─▶ retrieve ─▶ evidence ─▶ reason ─▶ act ─▶ respond
 ```
@@ -8,15 +13,24 @@ intake ─▶ retrieve ─▶ evidence ─▶ reason ─▶ act ─▶ respond
 
 1. **证据不足不得给结论**：关键槽位没填就问，问不出来就"带局限作答"——
    绝不硬凑一个结论（`IntakeState.can_conclude()`）。
+   **但有工具循环时不拦**：追问由模型决定（提示词 R5）——
+   追问闸门抢在模型之前会拦住急症（实测：教科书级卒中 4/4 次被回成一句追问）。
 2. **需要动作时必须显式确认**：挂号走 skill 流程，未确认时 skill 自己会停在 `confirm`，
    编排层**只负责把确认请求转给患者**，不替患者答应。
 
-## 红线与紧急档的关系（按决定 2b）
+## 急诊：判断权在模型，编排层只做"自相矛盾"的检查
 
-编排层**不覆盖**模型给出的 `urgency`。它做三件事：
-把红线信号放进证据、在提示词里强制处理、并把"红线阳性 vs 模型判定"的冲突
-作为契约问题上报（`ClinicalTurn.problems`），同时把 `red_line_positive` 暴露给调用方。
-**前端该不该无视模型直接弹急诊**是一个产品决定，尚未与你确认，所以这里不替你决定。
+编排层**不覆盖**模型给出的 `urgency`。它有工具循环时把判断整体交给模型
+（模型按病症 + 严重程度输出 `red_flags`，见 `prompts/system.md` R1）；
+`RiskGuard` 的关键词命中**不进提示词、不影响 `urgency`**，只用于两件事：
+主判不可用时给一句保守提示，以及"命中而模型未判急重症"时留一条不一致痕迹
+（`ClinicalTurn.problems`）。
+
+契约层守住唯一的硬约束：**判出 `red_flags` 却把 `urgency` 写成非 emergency ⇒ 记违规**
+（`contracts.validate_against`）——判断权可以给模型，"判了急症却给常规建议"这种自相矛盾不行。
+
+> ⚠️ 这与**图路径**（`/chat`、`/patient`）相反：那条路上 `RiskGuard` 是
+> "LLM 不可绕过的强制边"。两条路径故意并存，取舍相反，别混着看。
 """
 
 from __future__ import annotations

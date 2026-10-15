@@ -35,7 +35,7 @@ python -m kubedocs.cli --hf-offline eval --gate   # 评测并卡闸门
 | **clinic 检索轨真正接通** | ✅ 已验证（`DomainPack` 自报语料/归一化/嵌入，`ingest` 走 `pack.build_index()`）：`--domain clinic` 自动用 **jieba 分词 + `bge-small-zh-v1.5`（512 维）**，全量 **31,592 块**已建成，`verify_fts()`/`verify_vec()` 均 ok，中文查询真实命中。**此前 `--domain` 只换索引目录**，语料/归一化/嵌入仍是 k8s 默认值 |
 | 观测：`/metrics` + OTel + `log_level` 生效 | ✅ 已完成（`src/kubedocs/observability.py`）；`otel_enable` 默认关，显式打开才导出 |
 | P2 agent 内核（图 / 工具 / 持久化 / 中断） | ✅ 已完成（`agent/` 13 个模块：LangGraph `StateGraph` + 工具循环 + `InMemorySaver` + `interrupt` 续跑；单测在闸门内） |
-| P5 FastAPI + 对话前端 | ✅ 已完成（`api/app.py` **9 个**端点：`/healthz` `/metrics` `/domains` `/tools` `/search` `/ask` `/chat` `/` `/console`，+ `data/web/index.html` 演示页 + `data/web/console.html` 控制台 + `scripts/smoke_api.py` 冒烟；另有 `api/consult.py` 的 `/consult` 交互式临床问诊 4 个端点） |
+| P5 FastAPI + 对话前端 | ✅ 已完成（`api/app.py` **10 个**端点：`/healthz` `/metrics` `/domains` `/tools` `/search` `/ask` `/chat` `/` `/console` `/patient`，+ `data/web/index.html` 演示页 + `data/web/console.html` 控制台 + `data/web/patient.html` 患者端 + `scripts/smoke_api.py` 冒烟；另有 `api/consult.py` 的 `/consult` 交互式临床问诊 **4 个**端点） |
 | 一键启动（Windows） | ✅ 已验证（`start.cmd`：挑端口 → 起服务 → 轮询到**索引非空** → 开控制台页）。实测：8080 被占时自动跳到 8081；已有可用实例时默认附着（`--force` 强制另起） |
 | `docker compose up` 全栈 | ✅ **已实测**（2026-10-13/14，Docker 29.8）：db + api 起来、健康检查通过、`/healthz` 报 **18822 块**（2026-10-14 重灌后）、`/metrics` 200、`/search` 真实命中（`overlap=13`，两路都参与融合）、`/chat` 的 SSE 红线**确定性转急诊**。过程中发现并修掉 4 个真实缺陷，见下面「Docker 全栈实测」 |
 
@@ -275,7 +275,7 @@ start.cmd
 - 其它开关：`--domain clinic`、`--port 9000`、`--no-browser`、`--online`
   （默认带 `--hf-offline`，因为模型已在本地缓存里；原因见下方"环境约束"）。
 
-两个页面职责不同，不要互相替代：
+四个入口职责不同，不要互相替代：
 
 | 路径 | 是什么 |
 |---|---|
@@ -298,6 +298,13 @@ start.cmd
 响应 JSON 里仍然带着这些结构化字段——后端留档、契约校验、运维排查都要用——但**前端不渲染它们**，
 这条由 `tests/unit/test_consult_api.py::TestPageIsDialogueOnly` 锁住，防止面板被悄悄加回来。
 
+- **科室建议与用药建议不主动交代**（提示词 R7）：主答案只讲"现在该怎么办（含紧急度）→
+  可能方向排序（每项都讲为什么）→ 检查建议 → 何时必须立刻去医院"，结尾用**一句话**引导
+  患者来问科室/用药。理由：一次全倒出来会**淹掉真正紧急的那句**。
+  **急重症不受此约束**——判出 `red_flags` 时科室/去哪必须当场说清，安全信息永远不藏。
+- **追问要答得一致 ⇒ 必须有上文**：会话保留最近 `MAX_HISTORY_TURNS` 轮对话，
+  且**助手那一侧存的是契约 JSON 而不是散文**（存散文时模型会跟着写散文、
+  不再输出 JSON ⇒ 整轮降级，实测踩过）。
 - **急诊横幅只跟模型的判断**：`emergency` = 模型这一轮判出 `urgency=emergency`，
   且该结论**真的出自模型**（`degraded` 非空表示主判没走通、结论来自兜底，不算模型判断）。
   **红线不再是关键词表**——急重症由模型按「病症 + 严重程度」判断，输出到可审计的
@@ -306,15 +313,33 @@ start.cmd
   不进提示词、不影响 `urgency`、不触发横幅，只在**主判不可用**时给一句保守对话提示。
   实测：`「胸骨后压榨样疼痛，向左放射，伴大汗」` 在旧表下**一个词都不命中**，
   现在能正确判为 `critical` 并报急诊。
+  > ⚠️ **两条临床路径的急诊设计是相反的**：图路径（`/chat`、`/patient`）**仍用**
+  > 关键词强制边（LLM 不可绕过）；临床管线（`/consult`）把判断权交给模型。
+  > 取舍相反、故意并存，改急诊相关代码前先确认走的是哪条——见 `domains/clinic/redline.py` 顶部那张表。
 - **工具由模型自己调度**：代码只给工具清单与执行器（`agent.tools.ToolRegistry` 是唯一真相源），
   模型自己决定调哪个、调几次（`clinical/orchestration.py`）。代码只保留轮次上限、
   工具白名单（**副作用工具默认不给模型**）、以及证据编号分配（`K1`…）。
 - **风险不会静默消失**：关键词命中而模型未判急重症时，回传 `keyword_hit_conflict=true`，
   并在对话正文**追加**一句风险提示——**只进对话，不弹横幅**。
-- **多轮采问**：`session_id` 复用同一份 `IntakeState`，最多追问 `MAX_ASK` 次就收敛，不会无限问；
+- **多轮采问**：`session_id` 复用同一份 `IntakeState`；有工具循环时追问由模型决定（R5）；
 - **降级会说**：模型没走通时对话里插一条系统提示，不会把兜底文案伪装成模型结论；
 - **会话在进程内**：重启即丢、多副本不共享（`GET /consult/status` 会直接这么告诉你）；
 - 端点：`GET /consult`（页面）、`POST /consult`（推进一轮）、`POST /consult/reset`、`GET /consult/status`。
+
+### 分诊效果怎么测：直接用原型那套 500 例分层金标
+
+`scripts/eval_prototype_patients.py`（**离线、免费、确定**）跑
+`data/eval/prototype/patients.json`——原型用 LLM 生成的 **500 例带标签病例**
+（`severity` × `style` 分层，带 `gold_department` / `gold_diseases`），
+按严重度与语言风格**分层报**，并单列"重症档有没有给急诊科"。
+
+实测（kubedocs，500 例）：全部 top-1 28.8% / top-3 47.4%；**severe 档 top-1 仅 5.0%、
+含急诊科 14.0%**；**口语表述掉得厉害**（formal 42.4% → vague 16.0%）。
+这两个数就是当前最该改的地方。
+
+⚠️ 两点限定：金标由 LLM 生成、**未经医学人员复核**，衡量的是"对这套分层用例的符合度"；
+它**不与原型自己报的 87%/85%/12% 可比**（原型评的是 `ground()` 自推导标签，分母不同）。
+
 
 ### 把工具暴露给外部客户端（MCP）
 

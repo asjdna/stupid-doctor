@@ -9,10 +9,24 @@
 
     检索后端 ← 复用 app 的 clinic 运行时（同一份 store / embedder，不重复加载模型）
     重点：`RetrievalTriage(department_map=load_department_map())` ← 这条是实测 +14 点的关键
+    **工具编排** ← `ClinicalToolLoop`：**模型自己决定调哪些工具取证**（检索/引用核对…）
     主判   ← `ClinicalReasoner` + `LiteLLMAdapter` + `BudgetedClient`（**与 CLI/eval 共用同一本日预算账**）
-    红线   ← `RiskGuard`（确定性，LLM 不可绕过）
+    急诊   ← **模型按「病症 + 严重程度」判出的 `red_flags`**（`system.md` R1）
     挂号   ← `default_registry(booking_backend=BookingService(MockAppointmentProvider()))`
-    会话   ← 进程内 `IntakeState`（多轮采问的状态属于会话层，不属于流程）
+    会话   ← 进程内 `IntakeState` + 对话上文（多轮采问的状态属于会话层，不属于流程）
+
+## ⚠️ 急诊红线在本路径上**不是** `RiskGuard`（与图路径相反）
+
+本仓库有**两条临床路径，急诊设计是相反的**，改代码前必须先看清走的是哪条：
+
+| 路径 | 入口 | 急重症怎么判 | `RiskGuard` 的作用 |
+|---|---|---|---|
+| **本路径**（临床管线） | `/consult` | **模型**按病症 + 严重程度判，输出 `red_flags` | **已退出判断链**：不进提示词、不影响 `urgency`、不触发横幅；只在主判不可用时给一句保守提示，并在"命中而模型未判"时留一条不一致痕迹 |
+| 图路径（较早） | `/chat`、`/patient` | `RiskGuard` 关键词命中即强制转急诊（`agent/kernel.py` 的强制边） | **仍是确定性强制边，LLM 不可绕过** |
+
+两条路径**故意并存**（老路径可用，新路径要看能不能用起来），但它们的取舍完全相反：
+图路径宁可我多发一次急诊（词表覆盖不到的表述会漏），本路径把判断权交给模型
+（模型漏判时没有确定性兜底）。**做产品决策时不要把它们混为一谈。**
 
 ## 会话状态**在进程内**，这是明确的限制
 

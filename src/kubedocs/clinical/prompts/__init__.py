@@ -44,10 +44,14 @@ def prompt_version() -> str:
 
 
 def build_user_message(question: str, evidence: EvidenceBundle, intake: IntakeState) -> str:
-    """把这一轮的全部动态输入拼成一条 user 消息。
+    """把这一轮的全部动态输入拼成一条 user 消息（**固定路径**用；工具循环不用它）。
 
     顺序是刻意的：**证据 → 已采集 → 患者原话**。
-    证据在前，因为红线信号必须在模型读到患者描述之前就进入视野。
+    证据在前，是因为"这一轮依据是什么"应该先于患者这句话进入视野。
+
+    > 早期这里写的是"红线信号必须在模型读到患者描述之前进入视野"。**已经不对了**：
+    > 关键词命中现在**不进提示词**（见 `clinical/evidence.py` 的 `render`）——
+    > 急重症改由模型按病症 + 严重程度判断（`system.md` R1）。
     """
     return "\n\n".join(
         [
