@@ -140,12 +140,15 @@ def test_followup_round_reuses_session_state(client_factory: Any) -> None:
     second = c.post("/consult", json={"question": "两天了", "session_id": "s1"}).json()
     assert second["action"] == "answer"
     assert second["turns"] == 2
+    # 结构化字段仍然回传（后端留档 / 契约校验），但**前端不渲染它们**
     assert second["departments"][0]["name"] == "呼吸内科"
     assert second["differentials"][0]["likelihood"] == "medium"
     assert second["exams"][0]["name"] == "血常规"
     assert second["medications"][0]["drug_class"] == "镇咳药"
     assert second["evidence"][0]["id"] == "c1"
     assert second["disclaimer"] == DISCLAIMER
+    # 患者只看得到 message（== patient_summary），所以它必须就是那段答复
+    assert second["message"] == "根据您的描述，建议到呼吸内科就诊。"
 
 
 def test_sessions_are_isolated(client_factory: Any) -> None:
@@ -211,30 +214,58 @@ class _Turn:
 
 
 @pytest.mark.parametrize("urgency", ["routine", "urgent"])
-def test_red_line_forces_emergency_regardless_of_model(urgency: str) -> None:
-    """**核心回归**：红线阳性时，模型把 urgency 判成什么都必须报急诊。
+def test_red_line_alone_does_not_raise_the_banner(urgency: str) -> None:
+    """**产品决定（改动请连同本条一起改）**：横幅只跟**模型的判断**，不跟红线。
 
-    红线的价值就在于"确定性、LLM 不可绕过"；若 `emergency` 跟着模型的 urgency 走，
-    模型一旦漏判，前端就不会显示急诊横幅——这正是最不能发生的一种失败。
+    本系统的分工是"大模型主要判断，红线与分诊作为辅助信号"。
+    横幅是给患者看的结论，就该跟着结论的产出者走。
     """
     p = to_payload(_Turn(red_line=True, urgency=urgency), "s")  # type: ignore[arg-type]
-    assert p["emergency"] is True
-    assert p["red_line_positive"] is True
-    assert p["emergency_note"] == EMERGENCY_NOTE
-    assert "120" in p["emergency_note"]
+    assert p["emergency"] is False
+    assert p["emergency_note"] == ""
+    assert p["red_line_positive"] is True  # 信号本身仍然如实回传
 
 
-def test_model_emergency_also_raises_the_flag() -> None:
-    """模型自己判成急诊时也要报（红线没命中不代表不急）。"""
+@pytest.mark.parametrize("urgency", ["routine", "urgent"])
+def test_red_line_conflict_is_spoken_in_the_dialogue(urgency: str) -> None:
+    """**核心回归**：红色阳性但模型没判急诊 ⇒ 不弹横幅，但**危险信号必须出现在对话里**。
+
+    横幅改由模型触发之后，"模型没照 R1 执行"成了一条静默失败路径。
+    这条提示把它堵上：横幅的触发权归模型，但危险信号不会凭空消失。
+    """
+    p = to_payload(_Turn(red_line=True, urgency=urgency), "s")  # type: ignore[arg-type]
+    assert p["red_line_conflict"] is True
+    assert "胸痛" in p["message"]  # 红线命中的词
+    assert "120" in p["message"]  # 可执行的急救指引
+    assert p["message"].startswith("m")  # 原回答仍在，提示是**追加**而不是替换
+
+
+def test_model_emergency_raises_the_banner() -> None:
     p = to_payload(_Turn(red_line=False, urgency="emergency"), "s")  # type: ignore[arg-type]
     assert p["emergency"] is True
     assert p["emergency_note"] == EMERGENCY_NOTE
+    assert p["red_line_conflict"] is False  # 模型判了急诊就不算冲突
+    assert "120" in p["emergency_note"]
+
+
+def test_degraded_emergency_does_not_raise_the_banner() -> None:
+    """**兜底产物不算模型的判断**：主判没走通时结论来自 `reasoning._fallback`，
+    即使它写了 `urgency=emergency`，也不该让横幅冒充"模型判出紧急"。
+    兜底给患者的 120 指引仍然在对话正文里（信息不丢）。
+    """
+    turn = _Turn(red_line=True, urgency="emergency", degraded="模型调用失败：网络断了")
+    p = to_payload(turn, "s")  # type: ignore[arg-type]
+    assert p["emergency"] is False
+    assert p["emergency_note"] == ""
+    assert p["red_line_conflict"] is True  # 仍然要说出危险信号
+    assert p["degraded"] != ""
 
 
 def test_no_emergency_when_neither_signals() -> None:
     p = to_payload(_Turn(red_line=False, urgency="routine"), "s")  # type: ignore[arg-type]
     assert p["emergency"] is False
     assert p["emergency_note"] == ""
+    assert p["red_line_conflict"] is False
     assert p["disclaimer"] == DISCLAIMER
 
 
@@ -252,4 +283,54 @@ def test_status_endpoint_does_not_build_the_pipeline() -> None:
     assert body["pipeline_built"] is False
     assert body["sessions"] == 0
     assert "in-process" in body["session_store"]
+    assert body["disclaimer"] == DISCLAIMER  # 前端开场白从这里取，页面里不写第二份
     assert rt.pipeline.__self__ is rt  # 静默：避免"未使用变量"告警同时确认绑定正确
+
+
+@pytest.fixture(scope="module")
+def page_html() -> str:
+    """`consult.html` 的原始文本（模块级 fixture：类作用域当实例方法已被 pytest 弃用）。"""
+    from kubedocs.config import repo_root
+
+    return (repo_root() / "data" / "web" / "consult.html").read_text(encoding="utf-8")
+
+
+class TestPageIsDialogueOnly:
+    """**产品契约：主页只留对话区**（结构化面板一律移到后台，由模型在正文里讲）。
+
+    这条测试是给未来的人看的：如果哪天有人想把科室表格加回主页，
+    他会先看到这条测试失败，而不是默默把产品形态改回去。
+    """
+
+    @pytest.mark.parametrize("panel_id", ["depts", "diffs", "exams", "meds", "summary", "ev", "raw"])
+    def test_structured_panels_are_gone(self, page_html: str, panel_id: str) -> None:
+        assert f'id="{panel_id}"' not in page_html, f"主页不应再有 {panel_id} 面板"
+
+    @pytest.mark.parametrize("title", ["分诊建议", "可能病症", "建议检查", "用药提示", "小结与依据"])
+    def test_panel_headings_are_gone(self, page_html: str, title: str) -> None:
+        assert title not in page_html, f"主页不应再有「{title}」区块"
+
+    def test_dialogue_essentials_remain(self, page_html: str) -> None:
+        """只留对话 ≠ 功能缺失：输入、发送、重新开始、急诊横幅都要在。"""
+        for need in ('id="stream"', 'id="q"', 'id="send"', 'id="reset"', 'id="emg"'):
+            assert need in page_html, f"对话区缺少 {need}"
+
+    def test_banner_is_hidden_until_the_server_says_so(self, page_html: str) -> None:
+        """横幅默认不显示，只有脚本按服务端的 `emergency` 加上 `.show` 才出现。"""
+        assert "#emg { display:none; }" in page_html
+        assert "#emg.show" in page_html
+        assert "p.emergency" in page_html
+        # 客户端**不得**自己拿红线或 urgent 去判断急诊（那会和服务端两处判断不一致）
+        assert "red_line_positive" not in page_html
+        assert '"urgent"' not in page_html
+
+    def test_client_does_not_render_structured_fields(self, page_html: str) -> None:
+        """科室/病症/检查/用药这些字段由模型写进正文，前端不该再去读它们。"""
+        for field in (
+            'p["departments"]',
+            "p.departments",
+            "p.differentials",
+            "p.exams",
+            "p.medications",
+        ):
+            assert field not in page_html, f"前端不应再渲染 {field}"

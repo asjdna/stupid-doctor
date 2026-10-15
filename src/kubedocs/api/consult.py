@@ -20,12 +20,20 @@
 - 有条数上限（`MAX_SESSIONS`），超出按最久未用淘汰——避免被无限建会话撑爆内存。
 - 真要持久化得换外部存储；`clinical/persistence.py` 目前还是占位实现，**不假装它有**。
 
-## 急诊红线**由服务端强制**，不由模型决定
+## 急诊横幅**只在模型自己判出紧急时**出现（产品决定，与红线解耦）
 
-`red_line_positive` 来自确定性的 `RiskGuard`。只要它为真，响应里的
-`emergency` 就是真、并带上固定的 `emergency_note`（120 / 急诊），
-**不管模型把 urgency 判成什么**。前端只负责把 `emergency` 渲染成醒目横幅——
-文案来自服务端，不在客户端另写一份，避免两处不一致。
+- `emergency` = **模型这一轮的 `urgency == "emergency"`**，且**该判断真的来自模型**
+  （`degraded` 非空表示主判没走通、结论来自兜底，此时不算模型的判断，不弹横幅）。
+- **不再**用 `red_line_positive` 直接触发横幅。理由：本系统的分工是
+  "**大模型主要判断，红线与分诊作为辅助信号**"（见方案 §4），
+  横幅既然是给患者看的结论，就该跟着结论的产出者走，而不是跟着辅助信号走。
+- **但冲突不能被静默放过**：红线阳性而模型判非急诊时（说明模型没照 R1 执行），
+  服务端会往对话正文里**追加一句固定的风险提示**（`RED_LINE_CONFLICT_NOTE`），
+  并在响应里打 `red_line_conflict=true`。
+  **提示只进对话，不弹横幅**——这既守住"横幅由模型决定"，也不让危险信号消失。
+- 主判降级且红线阳性时，兜底产物本身就是 `urgency=emergency`（见 `reasoning._fallback`），
+  但它来自兜底而非模型，所以**不弹横幅**；对话里仍会有兜底给出的 120 指引。
+
 """
 
 from __future__ import annotations
@@ -59,10 +67,21 @@ EMERGENCY_NOTE = (
     "检测到需要立即处理的危险信号（如胸痛、呼吸困难、意识不清、大出血等）。"
     "**请立即拨打 120 或直接前往最近医院急诊科**，不要等待在线建议。"
 )
-"""红线阳性时的固定文案。放在服务端是刻意的：前端只渲染，不另写一份。"""
+"""模型判出 `emergency` 时横幅的固定文案。放在服务端是刻意的：前端只渲染，不另写一份。"""
+
+RED_LINE_CONFLICT_NOTE = (
+    "另外要提醒您：您提到的「{word}」属于需要警惕的信号。"
+    "即使系统判断目前不属于最紧急的情况，也请**尽快就医**；"
+    "如果它加重、或出现持续胸痛、呼吸困难、意识不清，请**立即拨打 120**。"
+)
+"""红线阳性但模型未判急诊时的**对话内**风险提示（不弹横幅）。
+
+为什么要有它：横幅改由模型判断触发之后，"模型没照 R1 执行"就成了一条静默失败路径。
+这条提示把它堵上——横幅的触发权仍然归模型，但危险信号不会凭空消失。
+"""
 
 DISCLAIMER = "本结果由系统根据您描述的症状与知识卡片生成，仅供导诊参考，不能替代医生诊断，也不构成处方。"
-"""每次回答都返回，前端必须显示。"""
+"""随每轮返回；前端把它作为**对话里的开场系统消息**，而不是页面上的独立面板。"""
 
 
 # ===========================================================================
@@ -244,20 +263,34 @@ def _assessment_payload(a: ClinicalAssessment | None) -> dict[str, Any]:
 def to_payload(turn: ClinicalTurn, session_id: str, *, turns: int = 0) -> dict[str, Any]:
     """把一轮产物转成前端契约。
 
-    `emergency` 的判定**不依赖模型**：红线阳性一律为真（见模块文档）。
+    ## 两条规则（都由产品决定，改动请连同测试一起改）
+
+    1. **横幅只跟模型的判断**：`emergency` = 模型这一轮给出 `urgency="emergency"`
+       且**该结论真的出自模型**（`degraded` 为空）。红线阳性不再直接触发横幅。
+    2. **结构化结论不下发到界面**：`departments` / `differentials` / `exams` /
+       `medications` / `patient_summary` 仍然出现在 JSON 里（后端留档、契约校验、
+       运维排查都要用），但**前端只渲染 `message`**——也就是 `patient_summary`。
+       提示词已要求模型把科室、可能方向、检查、用药都写进那段话里（见 `system.md` 三之二）。
     """
     assessment = turn.assessment
-    model_emergency = bool(assessment is not None and assessment.urgency == "emergency")
-    emergency = bool(turn.red_line_positive) or model_emergency
+    degraded = bool(turn.degraded)
+    model_emergency = bool(assessment is not None and assessment.urgency == "emergency" and not degraded)
+    red_line_conflict = bool(turn.red_line_positive) and not model_emergency
+    message = turn.message
+    if red_line_conflict:
+        word = turn.evidence.red_line.word if turn.evidence and turn.evidence.red_line else "该症状"
+        note = RED_LINE_CONFLICT_NOTE.format(word=word)
+        message = f"{message}\n\n{note}" if message else note
     payload: dict[str, Any] = {
         "session_id": session_id,
         "action": turn.action,
-        "message": turn.message,
-        "emergency": emergency,
+        "message": message,
+        "emergency": model_emergency,
+        "emergency_note": EMERGENCY_NOTE if model_emergency else "",
         "red_line_positive": bool(turn.red_line_positive),
-        "emergency_note": EMERGENCY_NOTE if emergency else "",
-        "disclaimer": DISCLAIMER,
+        "red_line_conflict": red_line_conflict,
         "degraded": turn.degraded,
+        "disclaimer": DISCLAIMER,
         "problems": list(turn.problems),
         "prompt_version": turn.prompt_version,
         "turns": turns,
@@ -368,7 +401,13 @@ def build_consult_router(
                 "" if dep_map else "空：data/clinic/department_map.json 缺失 ⇒ 分诊退化为只解析卡片正文"
             ),
             "session_store": "in-process（重启即丢，多副本不共享）",
-            "emergency_flag": "服务端强制：red_line_positive ⇒ emergency=true，不看模型判断",
+            "emergency_flag": (
+                "只由模型的 urgency 决定（且该结论必须出自模型）；"
+                "红线阳性但模型判非急诊时，改在对话正文里追加风险提示，不打横幅"
+            ),
+            "ui_contract": "前端只渲染 message 与急诊横幅；结构化字段仅供后端留档",
+            # 前端开场白从这里取，避免在 HTML 里写第二份免责声明
+            "disclaimer": DISCLAIMER,
         }
 
     return router

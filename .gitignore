@@ -56,3 +56,5 @@ data/clinic/
 # 评测脚本的运行日志（含终端噪声），只保留 --json 结果作为证据
 data/eval/triage/log_*.txt
 _commit_msg.txt
+*_commit_msg.txt
+commit_msg.txt
