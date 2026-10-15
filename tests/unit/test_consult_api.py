@@ -174,15 +174,23 @@ def test_conversation_history_is_threaded_into_the_next_turn(client_factory: Any
     """
     pipe = _FakePipeline()
     c = client_factory(pipe)
-    first = c.post("/consult", json={"question": "我咳嗽", "session_id": "h1"}).json()
-    # 第一轮没有上文
+    c.post("/consult", json={"question": "我咳嗽", "session_id": "h1"})  # 第 1 轮：追问，无 assessment
+    c.post("/consult", json={"question": "两天了", "session_id": "h1"})  # 第 2 轮：给结论
+    # 第 1 轮没有上文
     assert pipe.histories[0] == []
 
-    c.post("/consult", json={"question": "那该挂哪个科", "session_id": "h1"})
-    second_history = pipe.histories[1]
-    assert [m["role"] for m in second_history] == ["user", "assistant"]
-    assert second_history[0]["content"] == "我咳嗽"
-    assert second_history[1]["content"] == first["message"]
+    c.post("/consult", json={"question": "那该挂哪个科", "session_id": "h1"})  # 第 3 轮：追问细节
+    second_history = pipe.histories[2]
+    assert [m["role"] for m in second_history] == ["user", "assistant", "user", "assistant"]
+    # 追问轮（无 assessment）在上文里就是那句追问原文——这是对的
+    assert second_history[1]["content"] == "这种情况持续多久了？"
+    # **有结论的那一轮，助手那一侧必须是契约 JSON，不是散文**：
+    # 存散文时模型会跟着写散文、不再输出 JSON ⇒ 整轮降级
+    # （实测：用户追问"那该挂哪个科？"时 action=error、degraded=模型输出不可解析）。
+    assert second_history[3]["content"].strip().startswith("{")
+    assert "呼吸内科" in second_history[3]["content"]
+    # 散文信息仍在 JSON 里（生产路径里 message == assessment.patient_summary）
+    assert "patient_summary" in second_history[3]["content"]
 
 
 def test_history_is_bounded(client_factory: Any) -> None:

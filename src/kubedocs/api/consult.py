@@ -123,9 +123,22 @@ class _Session:
     `MAX_HISTORY_TURNS` 只是上界——不设上界等于每次调用都把整段对话重新计费。
     """
 
-    def remember(self, question: str, answer: str) -> None:
+    def remember(self, question: str, turn: Any) -> None:
+        """把这一轮记进上文。
+
+        **助手那一侧存的是契约 JSON，不是给患者看的那段散文。** 这条是被实测逼出来的：
+        存散文时，模型看到"我上一轮输出的是散文"，这一轮就接着写散文、
+        **不再输出契约 JSON** ⇒ 解析失败 ⇒ 整轮降级
+        （实测：用户追问"那建议挂哪个科？"时 `action=error`、`degraded=模型输出不可解析`）。
+        存 JSON 两个好处都占：`patient_summary` 本来就在 JSON 里（散文信息不丢），
+        而且每一轮都在提醒模型"你的输出格式是这个"。
+        """
+        payload = ""
+        assessment = getattr(turn, "assessment", None)
+        if assessment is not None and hasattr(assessment, "model_dump_json"):
+            payload = assessment.model_dump_json()
         self.history.append({"role": "user", "content": question})
-        self.history.append({"role": "assistant", "content": answer})
+        self.history.append({"role": "assistant", "content": payload or str(turn.message)})
         keep = MAX_HISTORY_TURNS * 2
         if len(self.history) > keep:
             del self.history[: len(self.history) - keep]
@@ -277,7 +290,7 @@ class ConsultRuntime:
         )
         sess.turns += 1
         # 记住这一轮：下一轮追问（"那该挂哪个科"）要在上文里看到本轮结论
-        sess.remember(question, turn.message)
+        sess.remember(question, turn)
         turn_typed: ClinicalTurn = turn
         return turn_typed
 
