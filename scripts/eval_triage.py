@@ -127,11 +127,21 @@ def main(argv: list[str] | None = None) -> int:
         help="**精排**之后参与投票的候选条数（粗排池大保召回、投票池小保精度）",
     )
     parser.add_argument("--gate", type=float, default=0.0, help="主口径（B）top-3 的下限，超过即退出码 1")
+    parser.add_argument(
+        "--department-map",
+        choices=("off", "high", "medium"),
+        default="off",
+        help="启用语料补全映射表：high=图谱关系/别名，medium=再纳入模糊归并",
+    )
     parser.add_argument("--json", type=Path, default=None)
     parser.add_argument("--verbose", action="store_true", help="逐条打印未命中")
     args = parser.parse_args(argv)
 
-    from kubedocs.clinical.triage import RetrievalTriage
+    from kubedocs.clinical.triage import (
+        DEFAULT_DEPARTMENT_MAP,
+        RetrievalTriage,
+        load_department_map,
+    )
 
     cards = _load_cards()
     # S311：要的是确定性伪随机（固定种子 ⇒ 同一批样本、可比的数字），与密码学无关。
@@ -140,7 +150,22 @@ def main(argv: list[str] | None = None) -> int:
     print(f"带科室标签的卡片 {len(cards)} 张；抽样 {len(sample)} 张（种子 {SEED}）")
 
     backend = _build_backend()
-    engine = RetrievalTriage(known_departments=None, precision_k=args.precision_k)
+    dep_map: dict[str, list[str]] = {}
+    if args.department_map != "off":
+        dep_map = load_department_map(min_confidence=args.department_map)
+        if not dep_map:
+            # **响亮失败**：`data/clinic/` 是 .gitignore 的，换台机器就没有这张表。
+            # 若在这里静默放行，跑出来的其实是 "off" 的数字，却会被当成 "high" 记档——
+            # 那正是"看起来测了、其实没测"的假证据。
+            print(
+                f"[x] --department-map={args.department_map} 但映射表为空"
+                f"（{DEFAULT_DEPARTMENT_MAP} 不存在或该档位无条目）。\n"
+                "    先跑 scripts/clinic_derive_departments.py；"
+                "不想用映射表就显式传 --department-map off。"
+            )
+            return 2
+        print(f"补全映射表：{args.department_map} 档，{len(dep_map):,} 条")
+    engine = RetrievalTriage(known_departments=None, precision_k=args.precision_k, department_map=dep_map)
     """**不约束科室清单**：派生集的期望科室来自卡片数据（42 个），
     与号源系统的科室名未必一致；约束会把正确答案误判成"不在系统里"。"""
 
@@ -161,18 +186,24 @@ def main(argv: list[str] | None = None) -> int:
         if not cases:
             continue
         t0 = time.perf_counter()
+        engine.map_hits = 0
         res = _evaluate(engine, backend, cases, top_k=args.top_k)
         res["seconds"] = round(time.perf_counter() - t0, 1)
+        res["map_hits"] = engine.map_hits
         results[name] = res
 
     print("\n" + "=" * 74)
     print("分诊评测（离线、免费、确定）")
     print("=" * 74)
-    print(f"{'集':<16}{'条数':>6}{'top-1':>9}{'top-3':>9}{'top-3 率':>10}{'耗时':>9}")
+    print(f"{'集':<16}{'条数':>6}{'top-1':>9}{'top-3':>9}{'top-3 率':>10}{'耗时':>9}{'映射命中':>10}")
     print("-" * 74)
     for name, res in results.items():
         rate = res["top3"] / res["n"] if res["n"] else 0.0
-        print(f"{name:<16}{res['n']:>6}{res['top1']:>9}{res['top3']:>9}{rate:>9.1%}{res['seconds']:>8.0f}s")
+        hits = f"{res['map_hits']:,}" if res.get("map_hits") else "-"
+        print(
+            f"{name:<16}{res['n']:>6}{res['top1']:>9}{res['top3']:>9}"
+            f"{rate:>9.1%}{res['seconds']:>8.0f}s{hits:>10}"
+        )
 
     if args.verbose:
         for name, res in results.items():
@@ -187,8 +218,15 @@ def main(argv: list[str] | None = None) -> int:
         f"{len(gold_cases)} 条，不足以支撑结论。**这些都不是「上线准确率」。**"
     )
 
+    if dep_map:
+        print(
+            f"\n补全映射表命中：**{engine.map_hits:,}** 次（映射表 {len(dep_map):,} 条）。"
+            "0 命中说明映射表根本没被用上，此时的数字差异与映射表无关。"
+        )
+
     if args.json:
-        args.json.write_text(json.dumps(results, ensure_ascii=False, indent=2), encoding="utf-8")
+        payload = {"department_map": args.department_map, "map_hits": engine.map_hits, **results}
+        args.json.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
         print(f"已写入 {args.json}")
 
     if args.gate > 0:

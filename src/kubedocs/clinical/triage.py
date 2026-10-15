@@ -34,7 +34,9 @@ v0 只会"看科室名有没有出现在检索文本里"——那是当时**不�
 
 from __future__ import annotations
 
+import json
 import re
+from pathlib import Path
 from typing import Protocol
 
 from kubedocs.clinical.contracts import DepartmentAdvice
@@ -100,6 +102,75 @@ def departments_in_card(text: str) -> list[str]:
     return out
 
 
+DEFAULT_DEPARTMENT_MAP = "data/clinic/department_map.json"
+"""语料补全映射表（`key -> departments`），由 `scripts/clinic_derive_departments.py` 生成。
+
+**为什么需要它**：clinic 语料里 12,863 张卡片的「建议就诊科室」是 `未标注`，
+根因在卡片生成阶段丢掉了关系（这些卡片的 `diseases` 就是 `暂无`）。
+回到原始 `triples.txt`（`head,relation,tail`）能补回 27.6% 的未标注 key：
+
+| 来源 | 条数 | 占未标注 key | 性质 |
+|---|---|---|---|
+| `SameAs` 别名归并 | 3,009 | 17.5% | 权威（图谱自带别名） |
+| 最近邻模糊归并 ≥0.5 | 1,252 | 7.3% | **有错例，需抽检** |
+| 实体→疾病→科室 | 466 | 2.7% | 权威 |
+| 无解（纯口语变体，图谱无记录） | 12,425 | 72.4% | 需外部标注 |
+
+## 补全之后**没有变好**——这一项同样如实留档
+
+`scripts/eval_triage.py --department-map {off,high,medium}`，`--limit 200`（A/B），
+C 为 5 条人工金标；括号里是映射表命中次数（**非零 ⇒ 代码路径确实被触发**，不是空转）：
+
+| 档位 | A top-1 | A top-3 | B top-1 | B top-3 | C top-1 | C top-3 |
+|---|---|---|---|---|---|---|
+| off | **164** | 197 | 153 | 196 | 2 | 4 |
+| high | 162 | 197 | 153 | 196 | 3 | 4 |
+| medium | 160 | **196** | 153 | 196 | **4** | 4 |
+
+⇒ **主口径 B 一动不动，A 的 top-1 反降 4 例（164→160）**。机制是清楚的：
+补全让候选池里的**旁观卡片**也开始投票，在"查询词就是卡片名"的 A 集里
+这只会稀释正确卡片的票。C 上 2→4 看着好，但 **5 条样本里 1 条就值 20%，不构成结论**。
+
+⇒ 由此得到的判断（这比数字本身重要）：**当前瓶颈不是语料的标签覆盖率，而是投票机制本身**。
+在把 C 金标集从 5 条扩到 ≥50 条之前，任何"分诊准确率 xx%"都不可复现、不该写进结论。
+"""
+
+
+def load_department_map(
+    path: str | Path = DEFAULT_DEPARTMENT_MAP,
+    *,
+    min_confidence: str = "high",
+) -> dict[str, list[str]]:
+    """载入补全映射表；失败时返回空表并**不抛异常**（退化为正文解析，分诊仍可用）。
+
+    `min_confidence="high"` 只信任图谱直接关系 / `SameAs` 别名；
+    传 `"medium"` 会额外纳入最近邻模糊归并（Jaccard>=0.5，有错例，**需抽检**）。
+    """
+    p = Path(path)
+    if not p.is_absolute():
+        p = Path(__file__).resolve().parents[3] / p
+    if not p.exists():
+        return {}
+    try:
+        payload = json.loads(p.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    raw = payload.get("map") if isinstance(payload, dict) else None
+    if not isinstance(raw, dict):
+        return {}
+    allow = {"high"} if min_confidence == "high" else {"high", "medium"}
+    out: dict[str, list[str]] = {}
+    for key, rec in raw.items():
+        if not isinstance(rec, dict):
+            continue
+        if rec.get("confidence") not in allow:
+            continue
+        deps = [d for d in (rec.get("departments") or []) if d]
+        if deps:
+            out[key] = deps
+    return out
+
+
 DEFAULT_COARSE_K = 50
 """**粗排**候选池大小。
 
@@ -161,10 +232,26 @@ class RetrievalTriage:
         *,
         known_departments: list[str] | None = None,
         precision_k: int = DEFAULT_PRECISION_K,
+        department_map: dict[str, list[str]] | None = None,
     ) -> None:
         self._service = service
         self._known = list(known_departments or [])
         self.precision_k = max(0, precision_k)
+        self.department_map = dict(department_map or {})
+        self.map_hits = 0
+
+    def _departments_of(self, title: str, body: str) -> list[str]:
+        """优先查补全映射表（卡片正文的「未标注」是源图谱缺关系造成的），再退回正文解析。
+
+        映射表由 `scripts/clinic_derive_departments.py` 生成，条目自带来源与置信度；
+        调用方负责决定信任哪一档（见该脚本 `meta.confidence_note`）。
+        """
+        if title:
+            hit = self.department_map.get(title)
+            if hit:
+                self.map_hits += 1
+                return list(hit)
+        return departments_in_card(body)
 
     # ------------------------------------------------------------------ 内部
     def _names(self) -> list[str]:
@@ -274,7 +361,7 @@ class RetrievalTriage:
         for precise, chunk in refined:
             body = str(getattr(chunk, "body", "") or "")
             title = str(getattr(chunk, "title", "") or "")
-            departments = departments_in_card(body)
+            departments = self._departments_of(title, body)
             if not departments or precise <= 0:
                 continue
             share = precise / len(departments)  # 规则 4：多科室卡片按科室数均分

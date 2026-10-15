@@ -277,6 +277,50 @@ class TestTriageFromCardLabels:
         assert triage_mod.departments_in_card("某病。建议就诊科室：未标注。") == []
         assert triage_mod.departments_in_card("某病。建议就诊科室：其他科室。") == []
 
+    def test_department_map_fills_placeholder_cards(self) -> None:
+        """**核心回归**：卡片正文写着「未标注」时，补全映射表能给出科室。
+
+        语料里 47.1% 的卡片是占位符（源图谱缺关系），映射表由
+        `scripts/clinic_derive_departments.py` 从原始三元组推导。若这条测试挂了，
+        说明分诊又退化成"只信正文"，那批卡片会集体弃权。
+        """
+        engine = triage_mod.RetrievalTriage(
+            known_departments=None, department_map={"耳朵里疼": ["耳鼻喉科"]}
+        )
+        chunk = rag.RetrievedChunk(
+            chunk_id="c1", title="耳朵里疼", body="耳朵里疼。可能相关的疾病：暂无。建议就诊科室：未标注。"
+        )
+        assert engine._departments_of("耳朵里疼", chunk.body) == ["耳鼻喉科"]
+        assert engine.map_hits == 1
+        # 映射表里没有的 title 必须退回正文解析（不能因为查表失败就丢标签）
+        assert engine._departments_of("咳嗽", "咳嗽。建议就诊科室：呼吸内科。") == ["呼吸内科"]
+
+    def test_confidence_tier_controls_which_labels_are_trusted(self, tmp_path: object) -> None:
+        """`min_confidence="high"` 不该放进模糊归并的结果（那一档有错例，需抽检）。"""
+        import json as _json
+        from pathlib import Path as _P
+
+        p = _P(str(tmp_path)) / "m.json"
+        p.write_text(
+            _json.dumps(
+                {
+                    "meta": {},
+                    "map": {
+                        "权威": {"departments": ["心内科"], "source": "alias:心脏病", "confidence": "high"},
+                        "模糊": {"departments": ["产科"], "source": "fuzzy:血流:0.50", "confidence": "medium"},
+                    },
+                },
+                ensure_ascii=False,
+            ),
+            encoding="utf-8",
+        )
+        strict = triage_mod.load_department_map(p, min_confidence="high")
+        loose = triage_mod.load_department_map(p, min_confidence="medium")
+        assert strict == {"权威": ["心内科"]}
+        assert loose == {"权威": ["心内科"], "模糊": ["产科"]}
+        # 文件不存在时**不能抛异常**：分诊要退化成正文解析，而不是整体挂掉
+        assert triage_mod.load_department_map(p.parent / "nope.json") == {}
+
     def test_vote_comes_from_card_labels(self) -> None:
         engine = triage_mod.RetrievalTriage(known_departments=None)
         chunks = [

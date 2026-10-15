@@ -23,6 +23,36 @@
 一轮以"关闭真实缺陷 + 抹平文档与实现的自相矛盾"为目标的改动。每一条都标注了
 **怎么验证**，而不是只写"已修复"。
 
+### Changed — 分诊语料补充：做了，但**没有提升**（负结果留档）
+
+- **查清了 12,863 张「未标注」卡片的根因**：不是解析问题，是 `cards.json` 生成阶段
+  **丢掉了关系**——这些卡片的 `diseases` 字段本身就是「暂无」，所以在卡片内部做传递
+  补全的成功率实测为 **0%**（同 key / 经 diseases / 经 drugs 三条路全 0）。
+  它们是 `耳朵里疼 / 耳朵疼 / 耳朵很疼` 这类**口语变体**，源图谱里没有任何关系。
+  验证：`scripts/clinic_derive_departments.py --report-only`。
+- **回到原始三元组补全**：新增 `scripts/clinic_derive_departments.py`，从
+  `medical-agent/data/raw/OpenCMKG/triples.txt` 推导出
+  `data/clinic/department_map.json`（**带 `source` + `confidence`，可抽检、可回退**）：
+  `SameAs` 别名 3,009 条（权威）+ 实体→疾病→科室 466 条（权威）+ 最近邻模糊 ≥0.5
+  1,252 条（**有错例，需抽检**）= 未标注 key 的 **27.6%**，其余 **72.4% 图谱无记录**。
+- **`RetrievalTriage` 支持查表**：新增 `department_map` 参数与 `load_department_map()`
+  （`min_confidence` 分 `high`/`medium` 两档，文件缺失时退化为正文解析而**不抛异常**）。
+  回归测试：`test_clinical.py::test_department_map_fills_placeholder_cards`、
+  `::test_confidence_tier_controls_which_labels_are_trusted`。
+- **⚠️ 实测结论是负面的，照样写下来**：`eval_triage.py --department-map {off,high,medium}`
+  在 A/B（各 200 条）上 **B 完全不变（153/196），A 的 top-1 反降 4 例（164→160）**。
+  机制：补全让候选池里的**旁观卡片**也开始投票，在"查询词就是卡片名"的 A 集里只会
+  稀释正确卡片的票。C（5 条人工金标）上 top-1 从 2→4，但 **5 条里 1 条值 20%，不算结论**。
+  映射表命中次数非零（A/B/C = 748/552/62 与 1085/750/73），**证明代码路径确实被触发**，
+  不是空转造成的假差异。
+- **因此的决策**：**不追加 LLM 标注开销**（余下 12,425 条约 $0.1–0.3；不是钱的问题，
+  是**花了也无法验证**）。顺序是 **先扩分诊金标到 ≥50 条 → 再谈补语料或换精排**。
+  已写入 `docs/design/0001-医疗辅助诊断产品方案.md` §5.1。
+- **补一道防假证据的闸**：`data/clinic/` 是 `.gitignore` 的，换台机器就没有映射表。
+  `eval_triage.py --department-map {high,medium}` 现在**表为空时响亮失败（exit 2）**，
+  而不是静默退化成 `off` 的数字再被记成 `high` 的结果——那正是"看起来测了、其实没测"。
+  验证：把映射表换成空表跑 `--department-map high`，退出码 2 并打印修复指引。
+
 ### Fixed — 安全与正确性
 
 - **急诊红线现在**每一轮**都判**：此前 `node_redline` 只看首轮的 `question`，而 resume
