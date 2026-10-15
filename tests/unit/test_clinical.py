@@ -11,6 +11,7 @@
 
 from __future__ import annotations
 
+import json
 import re
 
 import pytest
@@ -352,15 +353,30 @@ class TestTriageFromCardLabels:
 
 # --------------------------------------------------------------------- 证据装配
 class TestEvidence:
-    def test_red_line_is_rendered_first_and_marked_must(self) -> None:
+    def test_keyword_hit_is_not_rendered_into_the_prompt(self) -> None:
+        """**核心回归（架构决定）**：关键词命中**不再进模型上下文**。
+
+        旧实现渲染成「【红线信号｜MUST 处理】命中词『胸痛』…必须包含紧急处理指引」，
+        那是**用关键词约束医学判断**：词表覆盖不到的表述会被漏掉，
+        不该报的（"突然看不清"可能只是干眼）会被强制转急诊。
+        现在急重症由模型按病症 + 严重程度判断（`system.md` R1），
+        所以提示词里**一个字都不能提关键词**——否则模型仍被那行字牵着走，
+        "交给模型判断"就是假的。
+
+        命中本身仍然保留（`red_line_positive`），但只用于降级提示与不一致留痕。
+        """
         bundle = ev.build_evidence(
             "我胸痛",
             backend=rag.LocalIndexBackend(_FakeRetriever([_Chunk("T", "B")])),
             guard=_FakeGuard("胸痛"),
         )
         text = bundle.render()
-        assert text.startswith("【红线信号｜MUST 处理】")
+        assert "胸痛" not in text  # 命中词不得出现在上下文里
+        assert "MUST" not in text
+        assert "红线" not in text
+        # 但命中事实本身要留着：降级提示与"模型是否漏判"的留痕都要用它
         assert bundle.red_line_positive is True
+        assert bundle.red_line is not None and bundle.red_line.word == "胸痛"
 
     def test_no_knowledge_explicitly_forbids_advice(self) -> None:
         """检索为空时，上下文里必须**明说**不许给检查/用药建议。"""
@@ -427,7 +443,12 @@ class TestSystemPrompt:
             "检索不到就不给",  # R3
             "不给确定诊断",  # R4
             "不要编造依据编号",  # R6
-            "看到【红线信号】就必须给紧急处理指引",  # R1
+            # R1 改成"由模型按病症 + 严重程度判断"，不再执行关键词表
+            "急重症由你判断",
+            "病症",
+            "严重程度",
+            "red_flags",
+            "拿不准时往重的一侧判",  # 保守偏置必须写在提示词里
             "120",  # 急救动作
             "followup_questions",  # 输出契约
             "证据_ids",  # 依据引用
@@ -437,6 +458,17 @@ class TestSystemPrompt:
         """提示词是产品契约的一部分：硬性条款必须真的写在里面，且被测试锁住。"""
         text = system_prompt()
         assert clause.replace("证据_ids", "evidence_ids") in text
+
+    def test_prompt_does_not_tell_the_model_to_obey_a_keyword_list(self) -> None:
+        """**核心回归**：提示词里不得再出现"照红线信号执行"这类关键词约束。
+
+        留一条测试盯着它：如果哪天有人把关键词闸门加回提示词，
+        "底层约束是大模型"这个决定就被悄悄推翻了。
+        """
+        text = system_prompt()
+        assert "【红线信号" not in text
+        assert "MUST 处理" not in text
+        assert "不是重新评估它" not in text
 
     def test_prompt_demands_json_only(self) -> None:
         assert "只输出 JSON" in system_prompt()
@@ -572,8 +604,12 @@ class TestReasoner:
         assert result.assessment is not None
         assert result.problems and "契约" in result.problems[0]
 
-    def test_red_line_conflict_is_recorded_not_silently_ignored(self) -> None:
-        """按决定 2b 模型有权判定，但**冲突必须留痕**。"""
+    def test_keyword_hit_without_red_flag_is_recorded_not_silently_ignored(self) -> None:
+        """关键词命中而模型没判出急重症时，**必须留痕**（但不推翻模型）。
+
+        判断权在模型手上；程序只负责把这种不一致记下来，
+        好让人事后能查"是不是漏了一个真急症"。
+        """
         bundle = ev.build_evidence(
             "q",
             backend=rag.LocalIndexBackend(_FakeRetriever([_Chunk("T", "B")])),
@@ -582,7 +618,28 @@ class TestReasoner:
         result = ClinicalReasoner(_FakeLLM(_assessment_json(urgency="routine"))).reason(
             "q", bundle, intake_mod.IntakeState()
         )
-        assert any("红线阳性" in p for p in result.problems)
+        assert any("关键词表命中" in p for p in result.problems)
+        # 留痕归留痕，模型的结论**不被改写**
+        assert result.assessment is not None and result.assessment.urgency == "routine"
+
+    def test_red_flags_force_emergency_by_contract(self) -> None:
+        """**核心回归（红线的新落点）**：判出急重症却给常规档 ⇒ 契约判违规。
+
+        关键词表退出后，"不许把急症当小事"这条安全性就靠这里守住：
+        判断权在模型，但**自相矛盾的输出会被程序拦下**并记进 `problems`。
+        """
+        bundle = ev.build_evidence("q", backend=rag.LocalIndexBackend(_FakeRetriever([])))
+        raw = json.dumps(
+            {
+                "urgency": "routine",
+                "red_flags": [{"condition": "急性冠脉综合征", "severity": "critical", "why": "胸痛伴大汗"}],
+                "departments": [{"name": "心内科", "confidence": 0.6}],
+                "patient_summary": "建议尽快就诊。",
+            },
+            ensure_ascii=False,
+        )
+        result = ClinicalReasoner(_FakeLLM(raw)).reason("q", bundle, intake_mod.IntakeState())
+        assert any("却把 urgency 定为 routine" in p for p in result.problems)
 
     def test_red_line_fallback_without_llm_is_emergency(self) -> None:
         """**决策者缺席时，证据本身成为结论**：模型挂了 + 红线阳性 ⇒ 必须给急救指引。"""
@@ -681,10 +738,14 @@ class TestPipeline:
         ).advance("胸口疼")
         assert turn.action == "emergency"
 
-    def test_red_line_positive_is_exposed_even_if_model_disagrees(self) -> None:
+    def test_keyword_hit_is_exposed_but_does_not_decide(self) -> None:
+        """关键词命中要如实暴露（供排查），但**不改写模型的结论**。"""
         turn = self._pipeline(word="胸痛").advance("胸口疼")
         assert turn.red_line_positive is True
-        assert any("红线阳性" in p for p in turn.problems)
+        assert any("关键词表命中" in p for p in turn.problems)
+        # 模型（这个桩）判的是 routine，结论就必须是 routine——不是被关键词改成 emergency
+        assert turn.assessment is not None
+        assert turn.action != "emergency"
 
     def test_booking_requires_confirmation_then_books(self) -> None:
         pipe = self._pipeline()

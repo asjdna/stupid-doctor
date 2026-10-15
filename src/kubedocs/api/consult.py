@@ -20,19 +20,16 @@
 - 有条数上限（`MAX_SESSIONS`），超出按最久未用淘汰——避免被无限建会话撑爆内存。
 - 真要持久化得换外部存储；`clinical/persistence.py` 目前还是占位实现，**不假装它有**。
 
-## 急诊横幅**只在模型自己判出紧急时**出现（产品决定，与红线解耦）
+## 急诊横幅**只在模型自己判出急重症时**出现
 
-- `emergency` = **模型这一轮的 `urgency == "emergency"`**，且**该判断真的来自模型**
-  （`degraded` 非空表示主判没走通、结论来自兜底，此时不算模型的判断，不弹横幅）。
-- **不再**用 `red_line_positive` 直接触发横幅。理由：本系统的分工是
-  "**大模型主要判断，红线与分诊作为辅助信号**"（见方案 §4），
-  横幅既然是给患者看的结论，就该跟着结论的产出者走，而不是跟着辅助信号走。
-- **但冲突不能被静默放过**：红线阳性而模型判非急诊时（说明模型没照 R1 执行），
-  服务端会往对话正文里**追加一句固定的风险提示**（`RED_LINE_CONFLICT_NOTE`），
-  并在响应里打 `red_line_conflict=true`。
-  **提示只进对话，不弹横幅**——这既守住"横幅由模型决定"，也不让危险信号消失。
-- 主判降级且红线阳性时，兜底产物本身就是 `urgency=emergency`（见 `reasoning._fallback`），
-  但它来自兜底而非模型，所以**不弹横幅**；对话里仍会有兜底给出的 120 指引。
+- `emergency` = 模型这一轮的 `urgency == "emergency"`（它由模型判出的 `red_flags` 推出），
+  且**该判断真的出自模型**（`degraded` 非空 ⇒ 结论来自兜底，不算模型判断，不弹横幅）。
+- **关键词红线不参与**：`domains.clinic.redline` 的命中结果既不进提示词、也不影响
+  `urgency`（见 `clinical/evidence.py` 的 `render`）。它只在主判不可用时给一句对话提示。
+- **不一致要留痕，不静默**：关键词表命中而模型没判出急重症时，回传
+  `keyword_hit_conflict=true`，并在对话正文**追加**一句风险提示
+  （`RED_LINE_CONFLICT_NOTE`）。**只进对话、不弹横幅**——
+  判断权归模型，但"系统担心过这件事"不能被抹掉。
 
 """
 
@@ -74,10 +71,11 @@ RED_LINE_CONFLICT_NOTE = (
     "即使系统判断目前不属于最紧急的情况，也请**尽快就医**；"
     "如果它加重、或出现持续胸痛、呼吸困难、意识不清，请**立即拨打 120**。"
 )
-"""红线阳性但模型未判急诊时的**对话内**风险提示（不弹横幅）。
+"""关键词表命中、但模型未判急重症时的**对话内**风险提示（不弹横幅）。
 
-为什么要有它：横幅改由模型判断触发之后，"模型没照 R1 执行"就成了一条静默失败路径。
-这条提示把它堵上——横幅的触发权仍然归模型，但危险信号不会凭空消失。
+为什么还要留着它：判断权已经交给模型，但"关键词表担心过这件事"若被完全抹掉，
+一旦模型漏判就没有任何痕迹。这条提示把它留成**可被复核的一句话**：
+横幅不弹（尊重模型的结论），但系统不会假装自己没担心过。
 """
 
 DISCLAIMER = "本结果由系统根据您描述的症状与知识卡片生成，仅供导诊参考，不能替代医生诊断，也不构成处方。"
@@ -142,6 +140,7 @@ class ConsultRuntime:
             return self._pipeline
 
     def _build(self) -> ClinicalPipeline:
+        from kubedocs.clinical.orchestration import ClinicalToolLoop
         from kubedocs.clinical.rag import LocalIndexBackend
         from kubedocs.clinical.reasoning import BudgetedClient, ClinicalReasoner, LiteLLMAdapter
         from kubedocs.clinical.skills import default_registry
@@ -161,7 +160,22 @@ class ConsultRuntime:
             settings.llm_daily_budget_usd,
             unpriced_usd=settings.llm_unpriced_call_usd,
         )
+        # **把 `search_docs` 注册进 clinic 域**——这一步是工具循环能不能工作的前提。
+        #
+        # 为什么启动时（`app._register_tools`）故意不注册它：那会强制在启动时构造检索器、
+        # 加载嵌入模型（首次几十秒），与"资源惰性构造"冲突。
+        # 而这里**retriever 已经建好了**（上面那行），此时注册不增加任何成本。
+        # 实测教训：漏了这一步，`tool_schemas(domain="clinic")` 在过滤掉副作用工具后是**空的**，
+        # 模型一个工具都没得调，于是退回用自己的通用医学知识作答——
+        # 表面上"有回答"，实际上 R3「检索不到就不给」被架空了。
+        from kubedocs.agent.bootstrap import register_domain_tools
+
+        register_domain_tools("clinic", service=self._booking_backend(), retriever=retriever)
         reasoner = ClinicalReasoner(LiteLLMAdapter(BudgetedClient(LiteLLMClient(settings), budget)))
+        # **工具循环**：模型自己决定调哪些模块取证（架构决定：底层约束为大模型）。
+        # 用同一个 BudgetedClient ⇒ 循环里每一次调用都过同一本日预算账。
+        budgeted = BudgetedClient(LiteLLMClient(settings), budget)
+        tool_loop = ClinicalToolLoop(budgeted, domain="clinic")
         # **这一行是实测 +14 点（top-3 67.6%→81.7%）的来源**：
         # 语料里 47.1% 的卡片科室是「未标注」，靠这张补全表把票补回来。
         # 只信 high 档（图谱直接关系 + SameAs 别名）；含模糊归并的 medium 档实测更差。
@@ -177,6 +191,7 @@ class ConsultRuntime:
             skills=default_registry(booking_backend=self._booking_backend()),
             guard=RiskGuard(),
             triage=RetrievalTriage(department_map=dep_map),
+            tool_loop=tool_loop,
             top_k=10,
         )
 
@@ -263,21 +278,25 @@ def _assessment_payload(a: ClinicalAssessment | None) -> dict[str, Any]:
 def to_payload(turn: ClinicalTurn, session_id: str, *, turns: int = 0) -> dict[str, Any]:
     """把一轮产物转成前端契约。
 
-    ## 两条规则（都由产品决定，改动请连同测试一起改）
+    ## 三条规则（都由产品决定，改动请连同测试一起改）
 
     1. **横幅只跟模型的判断**：`emergency` = 模型这一轮给出 `urgency="emergency"`
-       且**该结论真的出自模型**（`degraded` 为空）。红线阳性不再直接触发横幅。
-    2. **结构化结论不下发到界面**：`departments` / `differentials` / `exams` /
-       `medications` / `patient_summary` 仍然出现在 JSON 里（后端留档、契约校验、
-       运维排查都要用），但**前端只渲染 `message`**——也就是 `patient_summary`。
-       提示词已要求模型把科室、可能方向、检查、用药都写进那段话里（见 `system.md` 三之二）。
+       且**该结论真的出自模型**（`degraded` 为空）。`urgency` 由模型判出的
+       `red_flags` 推出，关键词表不参与。
+    2. **关键词命中只作为不一致留痕**：命中而模型未判急重症时，往对话正文追加一句
+       风险提示，并回传 `keyword_hit_conflict=true`（不弹横幅）。
+    3. **结构化结论不下发到界面**：`departments` / `differentials` / `exams` /
+       `medications` / `patient_summary` / `red_flags` 仍然出现在 JSON 里
+       （后端留档、契约校验、运维排查都要用），但**前端只渲染 `message`**——
+       也就是 `patient_summary`。提示词已要求模型把科室、可能方向、检查、用药、
+       以及急重症都写进那段话里（见 `system.md` 三之二）。
     """
     assessment = turn.assessment
     degraded = bool(turn.degraded)
     model_emergency = bool(assessment is not None and assessment.urgency == "emergency" and not degraded)
-    red_line_conflict = bool(turn.red_line_positive) and not model_emergency
+    keyword_hit_conflict = bool(turn.red_line_positive) and not model_emergency
     message = turn.message
-    if red_line_conflict:
+    if keyword_hit_conflict:
         word = turn.evidence.red_line.word if turn.evidence and turn.evidence.red_line else "该症状"
         note = RED_LINE_CONFLICT_NOTE.format(word=word)
         message = f"{message}\n\n{note}" if message else note
@@ -287,8 +306,21 @@ def to_payload(turn: ClinicalTurn, session_id: str, *, turns: int = 0) -> dict[s
         "message": message,
         "emergency": model_emergency,
         "emergency_note": EMERGENCY_NOTE if model_emergency else "",
-        "red_line_positive": bool(turn.red_line_positive),
-        "red_line_conflict": red_line_conflict,
+        # 模型自己判出的急重症（可审计：病症 + 严重程度 + 依据）
+        "red_flags": [
+            {
+                "condition": f.condition,
+                "severity": f.severity,
+                "why": f.why,
+                "evidence_ids": list(f.evidence_ids),
+            }
+            for f in (assessment.red_flags if assessment else [])
+        ],
+        # 关键词表的命中（**仅供排查**，不参与判断）：用来发现"模型是否漏了一个真急症"
+        "keyword_hit": (turn.evidence.red_line.word if turn.evidence and turn.evidence.red_line else ""),
+        "keyword_hit_conflict": keyword_hit_conflict,
+        # 模型这一轮**自己决定**调用了哪些模块（架构决定的可见落点：工具由模型驱动）
+        "tool_calls": list(turn.tool_calls),
         "degraded": turn.degraded,
         "disclaimer": DISCLAIMER,
         "problems": list(turn.problems),
@@ -402,9 +434,10 @@ def build_consult_router(
             ),
             "session_store": "in-process（重启即丢，多副本不共享）",
             "emergency_flag": (
-                "只由模型的 urgency 决定（且该结论必须出自模型）；"
-                "红线阳性但模型判非急诊时，改在对话正文里追加风险提示，不打横幅"
+                "只由模型判出的 red_flags/urgency 决定（且该结论必须出自模型）；"
+                "关键词表已退出判断链，命中只在对话里留一句不一致提示，不打横幅"
             ),
+            "redline_source": "大模型按「病症 + 严重程度」判断（system.md R1）；关键词表不参与",
             "ui_contract": "前端只渲染 message 与急诊横幅；结构化字段仅供后端留档",
             # 前端开场白从这里取，避免在 HTML 里写第二份免责声明
             "disclaimer": DISCLAIMER,

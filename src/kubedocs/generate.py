@@ -36,7 +36,7 @@ from collections.abc import Iterator, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Protocol
+from typing import Any, Protocol
 
 from kubedocs.config import Settings
 from kubedocs.observability import observe_llm_call
@@ -495,6 +495,33 @@ class LLMUnavailable(RuntimeError):
     """没有可用的模型或密钥。调用方应把它当作"有记录的降级"，而不是崩溃。"""
 
 
+@dataclass
+class ToolCallRequest:
+    """模型要求调用某个工具（OpenAI / LiteLLM function calling 的形状）。"""
+
+    id: str
+    name: str
+    arguments: str
+    """**原始 JSON 字符串**，不在这里解析：解析失败要由调用方当"可预期失败"处理，
+    而不是在这里抛出去把整轮对话打断。"""
+
+
+@dataclass
+class LLMToolTurn:
+    """一次**带工具**的模型回复：可能要调工具，也可能是最终答复。
+
+    `cost_usd` / `cost_priced` 与 `LLMResult` 同义——工具循环里的每一次调用
+    **都要计费**，否则多轮工具调用会变成绕过日预算的口子。
+    """
+
+    content: str = ""
+    tool_calls: list[ToolCallRequest] = field(default_factory=list)
+    prompt_tokens: int = 0
+    completion_tokens: int = 0
+    cost_usd: float = 0.0
+    cost_priced: bool = True
+
+
 class LLMClient(Protocol):
     def complete(self, system: str, user: str) -> LLMResult: ...
 
@@ -617,6 +644,63 @@ class LiteLLMClient:
             cost, priced = 0.0, False
         return LLMResult(
             text=text,
+            prompt_tokens=int(getattr(usage, "prompt_tokens", 0) or 0),
+            completion_tokens=int(getattr(usage, "completion_tokens", 0) or 0),
+            cost_usd=cost,
+            cost_priced=priced,
+        )
+
+    def complete_with_tools(self, messages: list[dict[str, Any]], tools: list[dict[str, Any]]) -> LLMToolTurn:
+        """带 function calling 的一次调用（工具循环用）。
+
+        为什么单开一个方法而不是给 `complete()` 加参数：`complete()` 是**纯文本**契约，
+        被 CLI/eval/问诊三处共用；把 tools 混进去会让那三处都要处理"可能没有文本"的情况。
+        两个方法各自稳定，代价是这里要重复一段计费代码——重复**计费**比重复**契约**危险，
+        所以下面的价格计算与 `complete()` 逐行一致，改动时必须同步。
+        """
+        if not has_api_key(self.model):
+            raise LLMUnavailable(
+                f"未配置 {required_api_key_env(self.model)}（模型 {self.model}），"
+                "无法生成回答；检索结果仍然可用"
+            )
+        litellm = self.litellm
+        kwargs: dict[str, object] = {
+            "model": self.model,
+            "messages": messages,
+            "temperature": self.settings.llm_temperature,
+            "max_tokens": self.settings.llm_max_tokens,
+            "timeout": self.settings.llm_timeout,
+            "num_retries": self.settings.llm_max_retries,
+        }
+        if tools:
+            kwargs["tools"] = tools
+            kwargs["tool_choice"] = "auto"
+        fallbacks = self.settings.llm_fallback_list
+        if fallbacks:
+            kwargs["fallbacks"] = fallbacks
+        resp = litellm.completion(**kwargs)  # type: ignore[attr-defined]
+        message = resp.choices[0].message
+        calls: list[ToolCallRequest] = []
+        for raw_call in getattr(message, "tool_calls", None) or []:
+            fn = getattr(raw_call, "function", None)
+            calls.append(
+                ToolCallRequest(
+                    id=str(getattr(raw_call, "id", "") or ""),
+                    name=str(getattr(fn, "name", "") or ""),
+                    arguments=str(getattr(fn, "arguments", "") or ""),
+                )
+            )
+        usage = getattr(resp, "usage", None)
+        cost, priced = 0.0, True
+        try:
+            raw_cost = litellm.completion_cost(completion_response=resp)  # type: ignore[attr-defined]
+            priced = raw_cost is not None
+            cost = float(raw_cost) if priced else 0.0
+        except Exception:  # noqa: BLE001 - 与 complete() 同一口径，理由见那里
+            cost, priced = 0.0, False
+        return LLMToolTurn(
+            content=str(getattr(message, "content", "") or "").strip(),
+            tool_calls=calls,
             prompt_tokens=int(getattr(usage, "prompt_tokens", 0) or 0),
             completion_tokens=int(getattr(usage, "completion_tokens", 0) or 0),
             cost_usd=cost,

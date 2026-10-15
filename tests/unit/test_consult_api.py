@@ -33,15 +33,18 @@ from kubedocs.clinical.contracts import (
     DifferentialItem,
     ExamAdvice,
     MedicationAdvice,
+    RedFlag,
 )
 from kubedocs.clinical.evidence import EvidenceBundle, EvidenceItem, RedLineSignal
 from kubedocs.clinical.intake import IntakeState
 from kubedocs.clinical.pipeline import ClinicalTurn
 
 
-def _assessment(urgency: str = "routine") -> ClinicalAssessment:
+def _assessment(urgency: str = "routine", *, red_flags: bool = False) -> ClinicalAssessment:
+    flags = [RedFlag(condition="急性冠脉综合征", severity="critical", why="胸痛伴大汗")] if red_flags else []
     return ClinicalAssessment(
         urgency=urgency,  # type: ignore[arg-type]
+        red_flags=flags,
         patient_summary="最近咳嗽，建议呼吸内科就诊。",
         departments=[DepartmentAdvice(name="呼吸内科", confidence=0.8, reason="咳嗽")],
         differentials=[DifferentialItem(condition="急性支气管炎", likelihood="medium")],
@@ -198,44 +201,46 @@ def test_unavailable_index_is_503_with_guidance(client_factory: Any) -> None:
 
 
 class _Turn:
-    """最小 turn，用于直接测 `to_payload` 的红线强制逻辑。"""
+    """最小 turn，用于直接测 `to_payload` 的横幅/一致性逻辑。"""
 
-    def __init__(self, *, red_line: bool, urgency: str, degraded: str = "") -> None:
+    def __init__(self, *, red_line: bool, urgency: str, degraded: str = "", red_flags: bool = False) -> None:
         self.action = "answer"
         self.message = "m"
-        self.assessment = _assessment(urgency)
+        self.assessment = _assessment(urgency, red_flags=red_flags)
         self.evidence = EvidenceBundle(items=[], red_line=RedLineSignal(word="胸痛") if red_line else None)
         self.problems = []
         self.degraded = degraded
         self.prompt_version = "v1"
         self.red_line_positive = red_line
         self.skill = None
+        self.tool_calls: list[dict[str, Any]] = []
         self.intake = IntakeState()
 
 
 @pytest.mark.parametrize("urgency", ["routine", "urgent"])
-def test_red_line_alone_does_not_raise_the_banner(urgency: str) -> None:
-    """**产品决定（改动请连同本条一起改）**：横幅只跟**模型的判断**，不跟红线。
+def test_keyword_hit_alone_does_not_raise_the_banner(urgency: str) -> None:
+    """**架构决定（改动请连同本条一起改）**：横幅只跟**模型判出的急重症**，不跟关键词。
 
-    本系统的分工是"大模型主要判断，红线与分诊作为辅助信号"。
-    横幅是给患者看的结论，就该跟着结论的产出者走。
+    底层约束是大模型：它按"病症 + 严重程度"判断（`system.md` R1），
+    关键词表已退出判断链。
     """
     p = to_payload(_Turn(red_line=True, urgency=urgency), "s")  # type: ignore[arg-type]
     assert p["emergency"] is False
     assert p["emergency_note"] == ""
-    assert p["red_line_positive"] is True  # 信号本身仍然如实回传
+    assert p["keyword_hit"] == "胸痛"  # 命中事实仍如实回传（供排查）
+    assert p["red_flags"] == []
 
 
 @pytest.mark.parametrize("urgency", ["routine", "urgent"])
-def test_red_line_conflict_is_spoken_in_the_dialogue(urgency: str) -> None:
-    """**核心回归**：红色阳性但模型没判急诊 ⇒ 不弹横幅，但**危险信号必须出现在对话里**。
+def test_keyword_conflict_is_spoken_in_the_dialogue(urgency: str) -> None:
+    """**核心回归**：关键词命中但模型没判急重症 ⇒ 不弹横幅，但**风险提示必须出现在对话里**。
 
-    横幅改由模型触发之后，"模型没照 R1 执行"成了一条静默失败路径。
-    这条提示把它堵上：横幅的触发权归模型，但危险信号不会凭空消失。
+    判断权归模型之后，"模型漏判"就成了一条静默失败路径。这条提示把它留成
+    **可被复核的一句话**：横幅不弹（尊重模型的结论），但系统不假装自己没担心过。
     """
     p = to_payload(_Turn(red_line=True, urgency=urgency), "s")  # type: ignore[arg-type]
-    assert p["red_line_conflict"] is True
-    assert "胸痛" in p["message"]  # 红线命中的词
+    assert p["keyword_hit_conflict"] is True
+    assert "胸痛" in p["message"]  # 命中的词
     assert "120" in p["message"]  # 可执行的急救指引
     assert p["message"].startswith("m")  # 原回答仍在，提示是**追加**而不是替换
 
@@ -244,20 +249,31 @@ def test_model_emergency_raises_the_banner() -> None:
     p = to_payload(_Turn(red_line=False, urgency="emergency"), "s")  # type: ignore[arg-type]
     assert p["emergency"] is True
     assert p["emergency_note"] == EMERGENCY_NOTE
-    assert p["red_line_conflict"] is False  # 模型判了急诊就不算冲突
+    assert p["keyword_hit_conflict"] is False  # 模型判了急重症就不算不一致
     assert "120" in p["emergency_note"]
+
+
+def test_model_red_flags_are_exposed_for_audit() -> None:
+    """**红线的新形态**：模型判出的急重症要带"病症 + 严重程度 + 依据"，可审计。"""
+    p = to_payload(_Turn(red_line=False, urgency="emergency", red_flags=True), "s")  # type: ignore[arg-type]
+    assert p["emergency"] is True
+    assert len(p["red_flags"]) == 1
+    flag = p["red_flags"][0]
+    assert flag["condition"] == "急性冠脉综合征"
+    assert flag["severity"] == "critical"
+    assert flag["why"]  # 依据必填——没有依据的判断无法复核
 
 
 def test_degraded_emergency_does_not_raise_the_banner() -> None:
     """**兜底产物不算模型的判断**：主判没走通时结论来自 `reasoning._fallback`，
-    即使它写了 `urgency=emergency`，也不该让横幅冒充"模型判出紧急"。
+    即使它写了 `urgency=emergency`，也不该让横幅冒充"模型判出急重症"。
     兜底给患者的 120 指引仍然在对话正文里（信息不丢）。
     """
     turn = _Turn(red_line=True, urgency="emergency", degraded="模型调用失败：网络断了")
     p = to_payload(turn, "s")  # type: ignore[arg-type]
     assert p["emergency"] is False
     assert p["emergency_note"] == ""
-    assert p["red_line_conflict"] is True  # 仍然要说出危险信号
+    assert p["keyword_hit_conflict"] is True  # 仍然要说出风险
     assert p["degraded"] != ""
 
 
@@ -265,7 +281,7 @@ def test_no_emergency_when_neither_signals() -> None:
     p = to_payload(_Turn(red_line=False, urgency="routine"), "s")  # type: ignore[arg-type]
     assert p["emergency"] is False
     assert p["emergency_note"] == ""
-    assert p["red_line_conflict"] is False
+    assert p["keyword_hit_conflict"] is False
     assert p["disclaimer"] == DISCLAIMER
 
 

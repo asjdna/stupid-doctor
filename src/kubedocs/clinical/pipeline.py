@@ -21,16 +21,17 @@ intake ─▶ retrieve ─▶ evidence ─▶ reason ─▶ act ─▶ respond
 
 from __future__ import annotations
 
+import json
 import logging
 from dataclasses import dataclass, field
-from typing import Literal, Protocol
+from typing import Any, Literal, Protocol
 
 from kubedocs.clinical.contracts import ClinicalAssessment
 from kubedocs.clinical.evidence import EvidenceBundle, Guard, TriageEngine, build_evidence
 from kubedocs.clinical.intake import IntakeState, RuleSlotExtractor, SlotExtractor
 from kubedocs.clinical.persistence import ClinicalStore, NoopPersistence
 from kubedocs.clinical.rag import RetrievalBackend
-from kubedocs.clinical.reasoning import ClinicalReasoner
+from kubedocs.clinical.reasoning import ClinicalReasoner, _extract_json
 from kubedocs.clinical.skills.base import SkillOutcome, SkillRegistry, SkillRequest
 
 logger = logging.getLogger(__name__)
@@ -56,11 +57,27 @@ class ClinicalTurn:
     prompt_version: str = ""
     red_line_positive: bool = False
     skill: SkillOutcome | None = None
+    tool_calls: list[dict[str, Any]] = field(default_factory=list)
+    """模型这一轮**自己决定调用**了哪些工具（名称/成败/结果摘要）。
+
+    单独一个字段而不是塞进 `problems`：`problems` 是**契约问题**（依据缺失、引用不存在…），
+    而工具调用是**正常行为**。混在一起会让"这一轮到底有没有契约违规"读不出来。
+    """
     intake: IntakeState = field(default_factory=IntakeState)
 
 
 class ClinicalPipeline:
-    """把各项能力装到一起。**每个依赖都是注入的**，所以每一段都能被单测替换。"""
+    """把各项能力装到一起。**每个依赖都是注入的**，所以每一段都能被单测替换。
+
+    ## 两条路径，先后有序（架构决定：底层约束是大模型）
+
+    **工具循环路径（有 `tool_loop` 时）**：模型自己决定调用哪些工具取证
+    （检索/分诊/…），代码只提供工具清单与执行器。这是现在的主路径——
+    "底层约束为大模型"要落到实处，就必须把"用哪些模块"也交给它。
+
+    **固定路径（没有 `tool_loop` 时）**：代码先检索、再分诊，然后把证据交给主判。
+    保留它有两个用处：单测可以只测主判；以及工具循环装配失败时还有一条能跑的链。
+    """
 
     def __init__(
         self,
@@ -72,6 +89,7 @@ class ClinicalPipeline:
         triage: TriageEngine | None = None,
         store: ClinicalStore | None = None,
         extractor: SlotExtractor | None = None,
+        tool_loop: Any = None,
         top_k: int = 10,
     ) -> None:
         self._backend = backend
@@ -81,6 +99,7 @@ class ClinicalPipeline:
         self._triage = triage
         self._store = store or NoopPersistence()
         self._extractor = extractor or RuleSlotExtractor()
+        self._tool_loop = tool_loop
         self._top_k = top_k
 
     def advance(
@@ -116,6 +135,11 @@ class ClinicalPipeline:
             triage=self._triage,
         )
 
+        # **工具循环路径**：证据由模型自己取证得来（`build_evidence` 的那份只留作
+        # 红线/分诊的**降级提示**，不进模型上下文——见 evidence.render 的说明）。
+        if self._tool_loop is not None:
+            return self._tool_loop_turn(question, intake, evidence, patient_id)
+
         if want_booking:
             turn = self._booking_turn(evidence, intake, patient_id, booking_params or {}, confirmed)
             if turn is not None:
@@ -148,6 +172,77 @@ class ClinicalPipeline:
             problems=problems,
             degraded=degraded,
             prompt_version=version,
+            red_line_positive=evidence.red_line_positive,
+            intake=intake,
+        )
+
+    def _tool_loop_turn(
+        self,
+        question: str,
+        intake: IntakeState,
+        fallback_evidence: EvidenceBundle,
+        patient_id: str,
+    ) -> ClinicalTurn:
+        """让模型自己取证，再把它的最终答复按契约解析。
+
+        `fallback_evidence` 是**代码预取的那一份**，这里只用它的两个字段：
+        关键词命中（`keyword_hit`，仅用于"模型是否漏了急症"的留痕与降级提示）
+        和分诊结果（降级时当科室兜底）。**它的知识条目不进模型上下文**——
+        否则"模型自己决定要不要检索"就名存实亡了。
+        """
+        from kubedocs.clinical.contracts import ClinicalAssessment, validate_against
+        from kubedocs.clinical.prompts import prompt_version, system_prompt
+
+        loop = self._tool_loop
+        try:
+            result = loop.run(system=system_prompt(), question=question, intake=intake)
+        except Exception as e:  # noqa: BLE001 - 工具循环失败要退回到降级产物，不崩对话
+            logger.warning("工具循环失败，走降级：%s: %s", type(e).__name__, e)
+            degraded_evidence = fallback_evidence.model_copy(
+                update={"degraded": [*fallback_evidence.degraded, f"工具循环失败（{type(e).__name__}）"]}
+            )
+            return ClinicalTurn(
+                action="error",
+                message=self._reasoner._fallback(degraded_evidence, intake).patient_summary,  # noqa: SLF001
+                evidence=degraded_evidence,
+                problems=[f"工具循环失败（{type(e).__name__}）"],
+                degraded=f"工具循环失败（{type(e).__name__}: {e}），已按现有证据给出有限结论",
+                intake=intake,
+                red_line_positive=fallback_evidence.red_line_positive,
+            )
+
+        evidence = result.evidence.model_copy(
+            update={"red_line": fallback_evidence.red_line, "triage": fallback_evidence.triage}
+        )
+        raw = result.final_text
+        try:
+            payload = json.loads(_extract_json(raw))
+            assessment = ClinicalAssessment.model_validate(payload)
+        except Exception as e:  # noqa: BLE001 - 解析失败同样降级，不把裸文本给患者
+            logger.warning("工具循环输出不合契约，走降级：%s: %s", type(e).__name__, e)
+            assessments = self._reasoner._fallback(evidence, intake)  # noqa: SLF001
+            return ClinicalTurn(
+                action="error",
+                message=assessments.patient_summary,
+                assessment=assessments,
+                evidence=evidence,
+                problems=[f"模型输出不符合契约（{type(e).__name__}），已降级"],
+                degraded="模型输出不可解析，已按已有证据给出有限结论",
+                prompt_version=prompt_version(),
+                red_line_positive=evidence.red_line_positive,
+                intake=intake,
+            )
+
+        problems = validate_against(assessment, evidence.ids())
+        action: TurnAction = "emergency" if assessment.urgency == "emergency" else "answer"
+        return ClinicalTurn(
+            action=action,
+            message=assessment.patient_summary,
+            assessment=assessment,
+            evidence=evidence,
+            problems=problems,
+            tool_calls=[{"name": c.name, "ok": c.ok, "summary": c.summary} for c in result.calls],
+            prompt_version=prompt_version(),
             red_line_positive=evidence.red_line_positive,
             intake=intake,
         )

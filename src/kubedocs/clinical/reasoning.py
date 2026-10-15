@@ -8,12 +8,17 @@
 3. **降级**：模型不可用或输出不可解析时，**不许凭空生成**，而是退回到
    "只用证据能支撑的东西"（见 `_fallback`）。
 
-## 降级时的一个例外，必须写明白
+## 降级时的关键词表，必须写明白它**不再是什么**
 
-按决定 2b，紧急档由模型判定。但**模型不可用时没有"模型判定"这回事**——
-此时若红线为阳性，`_fallback` 会直接给 `emergency`。理由：规则是确定的、可复现的，
-在没有模型的情况下把确定的安全信号丢掉，等于让"模型挂了"变成"急症漏判"。
-这不是把红线偷偷改回闸门，而是"决策者缺席时，证据本身成为结论"。
+按"处方权归大模型"这条底层决定，急重症现在由模型按**病症 + 严重程度**判断，
+输出到 `red_flags`（见 `contracts.RedFlag` 与 `prompts/system.md` R1）。
+关键词表（`domains.clinic.redline.RiskGuard`）因此**退出了判断链**：
+它不进提示词、不影响 `urgency`、不触发急诊横幅。
+
+它只剩一个用途：**模型不可用时**给它一句保守的对话提示（见 `_fallback`）。
+理由：那时没有"模型判断"这回事，而在决策者缺席时什么都不说，
+等于让"模型挂了"变成"急症漏判"。注意这只是**提示**——
+`degraded` 非空，前端据此不弹横幅，所以它不会冒充模型结论。
 """
 
 from __future__ import annotations
@@ -74,6 +79,21 @@ class BudgetedClient:
     def complete(self, system: str, user: str) -> object:
         with self._budget.reserve():
             result = self._client.complete(system, user)  # type: ignore[attr-defined]
+        self._budget.record(
+            float(getattr(result, "cost_usd", 0.0) or 0.0),
+            priced=bool(getattr(result, "cost_priced", False)),
+        )
+        return result
+
+    def complete_with_tools(self, messages: list[dict[str, Any]], tools: list[dict[str, Any]]) -> object:
+        """工具循环里的每一次调用**都要过同一本日预算账**。
+
+        为什么不能省：工具循环一次问诊会调模型 1~N 次（N 由模型决定）。
+        如果只有最后那次计费，前面每轮检索取证都是**免费**的——
+        那等于给了一条"模型可以自己决定花多少钱"的路径，与 S-2 那一整轮工作的目的相反。
+        """
+        with self._budget.reserve():
+            result = self._client.complete_with_tools(messages, tools)  # type: ignore[attr-defined]
         self._budget.record(
             float(getattr(result, "cost_usd", 0.0) or 0.0),
             priced=bool(getattr(result, "cost_priced", False)),
@@ -173,13 +193,28 @@ class ClinicalReasoner:
             )
 
         problems = validate_against(assessment, evidence.ids())
-        if evidence.red_line_positive and assessment.urgency != "emergency":
-            # 按决定 2b，模型有权判定；但**与证据冲突必须留痕**，不许静默。
-            problems.append("红线阳性但模型未给 emergency 档（按既定设计由模型决定，此处仅记录冲突）")
+        if evidence.red_line_positive and not assessment.red_flags:
+            # 关键词表命中了，但模型既没判出急重症、也没把它写进 red_flags。
+            # **这只是"记一笔"，不是推翻模型**：判断权在模型手上（见 system.md R1），
+            # 程序只负责把这种不一致留痕，好让人能回头查"是不是漏了一个真急症"。
+            problems.append(
+                f"关键词表命中「{evidence.red_line.word if evidence.red_line else '?'}」，"
+                "但模型未判出任何急重症（按既定设计由模型决定，此处仅记录不一致）"
+            )
         return ReasoningResult(assessment=assessment, raw=raw, problems=problems, prompt_version=version)
 
     def _fallback(self, evidence: EvidenceBundle, intake: IntakeState) -> ClinicalAssessment:
-        """降级产物：只用证据能支撑的内容，**不引入任何模型知识**。"""
+        """降级产物：只用证据能支撑的内容，**不引入任何模型知识**。
+
+        ## 关键词表在这里的唯一用途
+
+        主判不可用时**没有"模型判断"这回事**，所以这里不退化成沉默：
+        若关键词表命中，就给一句保守的"请立即就医"提示（并把命中的词说出来，
+        让用户明白系统在担心什么）。**这不冒充模型判断**——`degraded` 非空，
+        前端据此不弹急诊横幅（见 `api/consult.py`），提示只出现在对话正文里。
+        **没有命中时也不假装没事**：统一提示"没能给出建议，请线下就医"，
+        绝不说"你应该没事"。
+        """
         if evidence.red_line_positive:
             assert evidence.red_line is not None  # 由 red_line_positive 保证
             return ClinicalAssessment(

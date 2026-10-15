@@ -271,7 +271,7 @@
 |---|---|---|
 | FTS5 `MATCH` 表达式注入 | 只抽取词元并逐个双引号短语化，用户输入 `pod -limit` / `"` 不再改变语法、不再 500 | `store/textquery.py` 的 `build_match_expr`（含对应单测） |
 | 引用越界（模型编 `[99]`） | 越界标记被**剥除**并记入诊断；一个引用都没有也会被标记。正则已放宽到 `\d+`——此前 `\d{1,3}` 漏掉 `[1234]`，让它**静默留下** | `generate.py:63` 的 `_MARKER_RE`、`generate.py:199` 的 `validate_citations` |
-| 检索为空却调 LLM | 直接拒答，**不调用模型**（判据是 `if not hits`；单测断言打桩 LLM 一次都没被调用） | `generate.py:653` |
+| 检索为空却调 LLM | 直接拒答，**不调用模型**（判据是 `if not hits`；单测断言打桩 LLM 一次都没被调用） | `generate.py:738` |
 | **急诊红线每一轮都判** | 此前只在**首轮** `question` 上判，续答轮被直接送回 `observe` ⇒ 用户在回答追问时才说出"胸痛"永远不会转急诊。现在 resume 轮也先过红线 | `agent/kernel.py:116` 的 `node_redline`、`kernel.py:243` 的 `_after_ask` |
 | **挂号必须显式确认** | 关键词命中不等于同意占用号源；图路径新增 `confirm` 节点（真 `interrupt` 挂起），未确认绝不进 `book` | `agent/kernel.py:193`、`kernel.py:238`、`agent/state.py:127` 的 `booking_confirmed` |
 | **号源归属来自调用方** | `patient_id` 经 `context=` 注入执行体，**不在工具 schema 里**（模型无法伪造） | `agent/tool_loop.py:489`、`agent/clinic_react.py:226` |
@@ -292,14 +292,14 @@
 
 1. **不要把它直接暴露到公网。** 先补认证（S-1），再考虑任何形式的对外服务。
 2. **密钥必须由环境显式提供**，且只放在 `.env` 或容器环境变量里：
-   - 密钥读取路径是 `os.environ`（`generate.py:501` 的 `required_api_key_env()` /
-     `generate.py:537` 的 `has_api_key()`）；`.env` 由 `config.load_env_file()` 导入
+   - 密钥读取路径是 `os.environ`（`generate.py:529` 的 `required_api_key_env()` /
+     `generate.py:565` 的 `has_api_key()`）；`.env` 由 `config.load_env_file()` 导入
      `os.environ`，**真实环境变量优先、`.env` 不覆盖已有值**
      （`config.py:67` 的 `override=False`）。
    - `.env` 里**留空的键等于未设置**（`config.py:78`）：这防止 `.env.example` 里成片的
      `KEY=` 把"没有密钥"伪装成"有密钥"。
-   - **占位/说明文本不算密钥**（`generate.py:513` 的 `_PLACEHOLDER_MARKERS` +
-     `generate.py:537` 的非 ASCII 判据）。两道判据缺一不可，因为**本机 `.env` 里
+   - **占位/说明文本不算密钥**（`generate.py:541` 的 `_PLACEHOLDER_MARKERS` +
+     `generate.py:565` 的非 ASCII 判据）。两道判据缺一不可，因为**本机 `.env` 里
      真实存在的那段值两道都踩到了**：它是一句中文说明（38 字符 / 78 字节，
      20 个非 ASCII 字符），一个占位符关键词都不含——而 `has_api_key()` 原先只判
      "非空"，于是返回 True，LiteLLM 把这段值放进 HTTP 头时抛

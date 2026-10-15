@@ -65,6 +65,12 @@ class EvidenceBundle(BaseModel):
 
     items: list[EvidenceItem] = Field(default_factory=list)
     red_line: RedLineSignal | None = None
+    """关键词扫描的命中结果（`domains.clinic.redline.RiskGuard`）。
+
+    **它不再进入模型上下文，也不再影响 `urgency`**（见 `render` 的说明）。
+    保留它只为一件事：主判不可用时，用它给出一句保守的对话提示。
+    """
+
     triage: list[DepartmentAdvice] = Field(default_factory=list)
     degraded: list[str] = Field(default_factory=list)
     """检索降级/后端异常。**必须**随证据一起进上下文：让模型知道"这次依据不全"，
@@ -72,25 +78,27 @@ class EvidenceBundle(BaseModel):
 
     @property
     def red_line_positive(self) -> bool:
+        """关键词命中。**只是"表里出现过某个词"，不等于"这是急重症"**。
+
+        调用方不要拿它当医学判断用：急诊结论现在由模型的 `red_flags` 给出。
+        """
         return self.red_line is not None
 
     def ids(self) -> set[str]:
         return {item.id for item in self.items}
 
     def render(self, *, max_items: int = 10) -> str:
-        """渲染成提示词里的一段。编号与 `EvidenceItem.id` 一致，模型引用它们即可。"""
-        lines: list[str] = []
+        """渲染成提示词里的一段。编号与 `EvidenceItem.id` 一致，模型引用它们即可。
 
-        if self.red_line is not None:
-            # 排在最前 + MUST：这是安全关键路径，位置本身就是信息。
-            lines.append(
-                "【红线信号｜MUST 处理】"
-                f"命中词「{self.red_line.word}」"
-                f"（类别 {self.red_line.category or '未标注'}，"
-                f"主体 {self.red_line.experiencer or '未判定'}，"
-                f"时间性 {self.red_line.temporality or '未判定'}）。"
-                "本次回答**必须**包含明确的紧急处理指引。"
-            )
+        ## 红线命中**故意不渲染进提示词**
+
+        旧实现把命中词渲染成【红线信号｜MUST 处理】并要求模型"照它执行"。
+        那是**用关键词约束医学判断**：词表覆盖不到的表述（"胸骨后压榨样疼痛放射至左肩"）
+        会被漏掉，而不该报的（"突然看不清"可能只是干眼）会被强制转急诊。
+        现在判断权整体交给模型（见 `system.md` R1），所以这里**一个字都不提关键词**——
+        否则模型仍会被那行字牵着走，"交给模型判断"就是假的。
+        """
+        lines: list[str] = []
 
         if self.triage:
             ranked = "、".join(f"{d.name}（{d.confidence:.2f}）" for d in self.triage[:3])
