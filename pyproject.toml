@@ -47,9 +47,27 @@ dependencies = [
     "httpx>=0.27",
     "orjson>=3.10",
     "tenacity>=8.5",
+    # 下面三个**被 src/ 直接 import，但此前没有声明**，靠传递依赖凑巧可用。
+    # 这是"开发环境看不见、真装才现形"的一类缺陷，实测撞过两次：
+    #   · `jieba`：clinic 域的中文归一化器（`KUBEDOCS_NORMALIZER=chinese`）必需，
+    #     而**没有任何已声明依赖会带上它** ⇒ 容器里 `ingest --domain clinic` 直接
+    #     `ModuleNotFoundError: No module named 'jieba'`。宿主 venv 装了，所以本机永远看不见。
+    #   · `numpy` / `python-dotenv`：分别是 sentence-transformers 与 litellm 的传递依赖，
+    #     但我们在 `embed.py` / `ingest.py` / `store/base.py` / `config.py` 里**直接**用它们。
+    # 与 `mcp` 那条注释同一个理由：能用但没声明是脆的，上游哪天不带了功能会静默消失。
+    # 复现这道检查：`python scripts/check_deps.py`（已接入 CI）。
+    "jieba>=0.42",
+    "numpy>=1.26",
+    "python-dotenv>=1.0",
 ]
 
 [project.optional-dependencies]
+milvus = [
+    # 可选后端（见 docs/adr/0005）。**故意不放进 dependencies**：它与 pgvector/sqlite-vec
+    # 互斥，装它只会给默认路线增加体积。`MilvusStore` 是惰性导入，不装也能跑默认后端。
+    "pymilvus>=2.4",
+    "milvus-lite>=2.4",
+]
 dev = [
     "pytest>=8.2",
     "pytest-asyncio>=0.23",

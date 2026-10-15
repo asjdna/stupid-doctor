@@ -538,9 +538,17 @@ class PgVectorStore:
             raise StoreError(f"Postgres 索引 schema 版本不符：库里是 {got}，代码要求 {PG_SCHEMA_VERSION}")
         old_dim = int(rows.get("embedding_dim", "0"))
         if old_dim != self.dim:
+            # ⚠️ 这条提示**曾经是错的**，写成"必须重建索引（ingest --rebuild）"。
+            # 实测踩过：`--rebuild` 走 `rebuild_from_scratch()`，而它只 `TRUNCATE` 表；
+            # 表是用 `CREATE TABLE IF NOT EXISTS` 建的，`embedding vector(384)` 的列定义
+            # 不会因为 TRUNCATE 而改变 ⇒ 再跑一次还是同一个错，用户被指到死循环里。
+            # 维度是**列类型**，只能靠丢掉整个 schema（索引是派生物，重建即可）来改。
             raise StoreError(
-                f"索引向量维度不符：库里是 {old_dim}，当前配置 {self.dim}；"
-                "换了嵌入模型必须重建索引（ingest --rebuild）"
+                f"索引向量维度不符：库里是 {old_dim}，当前配置 {self.dim}。\n"
+                f"  维度是 vector 列的**类型**，`ingest --rebuild` 只 TRUNCATE、改不了它。\n"
+                f"  丢掉这个 schema 再重建（索引是派生物，重建即可）：\n"
+                f"    Postgres: DROP SCHEMA IF EXISTS {self.schema} CASCADE;\n"
+                f"    然后重跑 ingest（sqlite 后端删掉 <index-dir>/{self.schema} 即可）"
             )
         old_model = rows.get("embedding_model", "")
         if old_model and self.embedding_model and old_model != self.embedding_model:

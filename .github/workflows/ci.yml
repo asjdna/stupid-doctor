@@ -119,6 +119,15 @@ jobs:
       - name: 文档锚点校验（阻塞）
         run: python scripts/check_doc_refs.py
 
+      # 依赖声明一致性：`src/` 里直接 import 的第三方包必须都写进 pyproject。
+      # 为什么值得一条独立检查：这类缺陷**在本机开发环境永远看不见**——包是通过传递依赖
+      # 凑巧装上的，editable 安装 + 现成 venv 一切正常，`pip install .` 到干净环境才炸。
+      # 2026-10-15 重建容器镜像时连撞两次：`jieba`（clinic 域中文归一化器必需，**没有任何
+      # 已声明依赖会带上它**）与 `system.md`（非 `.py`，默认不进 wheel）。
+      # 后者由 `tests/unit/test_clinical.py::test_prompt_is_declared_as_package_data` 挡。
+      - name: 依赖声明校验（阻塞）
+        run: python scripts/check_deps.py
+
   pipeline:
     name: 全链路自检（全量语料 + 哈希向量，不下载模型）
     runs-on: ubuntu-latest

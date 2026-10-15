@@ -252,11 +252,52 @@ python -m kubedocs.cli ask "怎么限制一个 Pod 的 CPU？" --show-context
 # 5) 索引体检（含 FTS 一致性自检）
 python -m kubedocs.cli stats --verify
 
+
 # 6) 评测：先预检标注集，再评测并卡闸门
 python scripts/check_gold.py
 python -m kubedocs.cli eval --write-baseline      # 首次冻结基线
 python -m kubedocs.cli eval --gate                # 之后每次回归检查
 ```
+
+### 知识依据在哪：语料**不入库**，按需下载/重建
+
+RAG 检索到的**知识卡片就是检查/用药建议的唯一来源**（提示词 R3：检索不到就不给，
+不许用模型的通用医学知识补足）。所以"语料在哪"这件事直接决定系统能说什么。
+
+**语料本身不在仓库里**（体积 + 上游许可，见 [NOTICE.md](NOTICE.md)），克隆下来是空的：
+
+| 语料 | 怎么拿到 | 进哪 |
+|---|---|---|
+| k8s 官方文档（1720 篇 / 16.2 MB） | `python scripts/fetch_corpus.py` | `data/raw/k8s-docs/` |
+| clinic 知识卡片（31,592 张 / 8.4 MB） | `python scripts/clinic_build_cards.py`（从上游 OpenCMKG 三元组派生） | `data/clinic/cards.json` |
+| clinic 科室补全映射表（4,727 条） | `python scripts/clinic_derive_departments.py --triples <triples.txt>` | `data/clinic/department_map.json` |
+
+拿到语料后**建索引**（索引也可随时重建，不入库）：
+
+```bash
+# 本机（sqlite-vec，默认）
+python -m kubedocs.cli --domain clinic ingest        # 首次全量约 1 小时（CPU 编码）
+
+# 容器（pgvector，compose 里 KUBEDOCS_STORE=pgvector）
+docker compose exec api python -m kubedocs.cli --domain clinic ingest
+```
+
+> **容器里的知识依据**：`docker-compose.yml` 把宿主 `./data` 挂进容器 `/app/data`，
+> 所以**卡片文件与索引都在容器可见的同一个数据目录里** —— `data/clinic/cards.json`
+> 是知识卡片本体，Postgres 的 `clinic` schema 是它的向量索引。
+> 两者都不在镜像里，**按需下载/重建**；镜像只带代码与依赖。
+>
+> ⚠️ **换嵌入模型后索引必须重建，而 `--rebuild` 做不到这件事**：`--rebuild` 只
+> `TRUNCATE` 表，而 `_ensure_schema()` 用的是 `CREATE TABLE IF NOT EXISTS`，
+> `embedding vector(384)` 的列定义不会被改。实测：库里是 384 维而 clinic 域要
+> 512 维（`bge-small-zh-v1.5`）时，`ingest --rebuild` 仍报同一个维度错。
+> **正确做法是丢掉那个 schema**（索引是派生物，重建即可）：
+>
+> ```bash
+> docker exec kubedocs-db-1 psql -U kubedocs -d kubedocs \
+>   -c "DROP SCHEMA IF EXISTS clinic CASCADE;"     # 只动 clinic，k8s_docs 不受影响
+> docker compose exec api python -m kubedocs.cli --domain clinic ingest
+> ```
 
 ### 一键启动窗口（Windows）
 

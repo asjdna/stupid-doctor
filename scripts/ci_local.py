@@ -150,6 +150,11 @@ def job_quality(*, hf_offline: bool) -> None:
     _run(_py("-m", "ruff", "format", "--check", "."))
     _run(_py("-m", "mypy", "src", "scripts"))
     _run(_py("scripts/check_doc_refs.py"))
+    # 依赖声明一致性：`src/` 直接 import 的第三方包必须都写进 pyproject。
+    # 实测撞过两次（`jieba` 缺声明 ⇒ 容器 `ingest --domain clinic` 挂；
+    # `system.md` 没进 wheel ⇒ 容器 `/consult` 挂），
+    # 两者都是"本机 editable 开发永远看不见、真装才现形"的类型。
+    _run(_py("scripts/check_deps.py"))
 
 
 def job_pipeline(*, hf_offline: bool) -> None:
