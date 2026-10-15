@@ -1,18 +1,21 @@
-"""在本地按 CI 的口径把 quality / pipeline / gate 三个 job 跑一遍（`ci.yml` 的等价物）。
+"""跑完整套验证：quality（静态检查 + 单元测试）· pipeline（全量语料 + 哈希向量自检）·
+gate（真实模型 + 冻结基线）。
 
-本地 `make check` 只等价于 quality job 的静态检查 + 测试部分；`pipeline`（全量语料 + 哈希
-向量自检）与 `gate`（真实模型 + 冻结基线）在 CI 里都是阻塞的，"`make check` 绿了"不等于"CI 会绿"。
+`make check` 只是 quality 里的静态检查与测试；pipeline 与 gate 是它之外的两道硬闸门。
+"`make check` 绿了"不等于全套通过 —— 要一个可对外引用的结论就跑这个脚本。
 
-与 CI 的差异（如实列出，不假装等价）：
+| job | 覆盖 | 前置 |
+|---|---|---|
+| quality | pytest（含需要真实 Postgres 的用例）· ruff check · ruff format --check · mypy · 文档锚点校验 · 依赖声明校验 | Postgres 可达 |
+| pipeline | 全量语料摄取 + 索引自检 + 冻结标注集自检（哈希向量，不下载模型） | `data/raw/` 语料 |
+| gate | 真实嵌入模型 + 冻结基线的检索闸门 | 真实索引 `data/index/` 与模型缓存 |
 
-| 差异 | 说明 |
-|---|---|
-| 不重新 checkout | 用当前工作树；CI 是干净检出，未跟踪文件不会被 CI 看到 |
-| 不建 Python 环境、不缓存 | 用当前解释器与现成的 `data/index` / HF 缓存 |
-| Postgres 由你提供 | CI 有 service 容器，本地自己起 `docker compose up -d db` |
-| `--hf-offline` | CI 的 runner 有外网；本地默认加上（联网校验会挂死） |
+前置条件说明：
 
-本地连不上 Postgres 时 pgvector 那族用例会 skip，而 skip 不等于跑过，所以脚本判失败。
+- Postgres 自己提供：`docker compose up -d db`，或设 `KUBEDOCS_DATABASE_URL` 指向你的库。
+  连不上时 pgvector 那族用例会 skip，而 skip 不等于跑过，所以脚本直接判失败。
+- `--hf-offline` 默认加上：模型已缓存时离线加载，避免联网校验长时间挂起。
+- 用当前解释器与现成的 `data/index` / HF 缓存，不重建环境；未跟踪文件会参与本次运行。
 
 副作用隔离：`pipeline` job 用 `hashing` 建索引，建到临时目录、跑完即删，绝不覆盖
 `data/index/<domain>` 那份真实索引；`gate` job 只读真实索引，不重建。
@@ -40,7 +43,7 @@ REPO = Path(__file__).resolve().parents[1]
 JOBS = ("quality", "pipeline", "gate")
 
 DEFAULT_DATABASE_URL = "postgresql://kubedocs:kubedocs@127.0.0.1:5432/kubedocs"
-"""quality job 的默认连接串：与 `Settings.database_url` 默认值和 ci.yml 的 env 一致。"""
+"""quality job 的默认连接串：与 `Settings.database_url` 的默认值一致。"""
 
 
 class JobFailed(RuntimeError):
@@ -96,7 +99,7 @@ def _check_environment() -> None:
 
 
 def _postgres_reachable(dsn: str) -> tuple[bool, str]:
-    """判断 quality job 依赖的 Postgres 能不能连上（本地要自己起，CI 有 service 容器）。
+    """判断 quality job 依赖的 Postgres 能不能连上（要自己起：`docker compose up -d db`）。
 
     只管"能不能连"：连得上不等于 pgvector 那族用例真跑了，那由 pytest 的 `-rs` 输出说话。
     """
@@ -113,7 +116,7 @@ def _postgres_reachable(dsn: str) -> tuple[bool, str]:
 
 # --------------------------------------------------------------------------- job
 def job_quality(*, hf_offline: bool) -> None:
-    """静态检查 + 单元测试（对应 ci.yml 的 quality job）。"""
+    """静态检查 + 单元测试。"""
     del hf_offline  # quality job 不加载模型，与离线无关
     _banner("job: quality —— 静态检查 + 单元测试（需要真实 Postgres）")
 
@@ -122,11 +125,9 @@ def job_quality(*, hf_offline: bool) -> None:
     if reachable:
         print(f"  Postgres 可达：{dsn}")
     else:
-        # CI 有 Postgres service，那族用例必须真跑；本地连不上时它们会 skip，
-        # 而 skip 与通过在日志里几乎一样，所以这里直接判失败。
+        # pgvector 那族用例必须真跑；连不上时它们会 skip，而 skip 与通过在日志里几乎一样。
         raise JobFailed(
-            f"Postgres 不可达（{why}）。ci.yml 里 quality job 有 Postgres service，"
-            "那族用例在 CI 里必须真跑，本地连不上就不算跑过。\n"
+            f"Postgres 不可达（{why}）。那族用例连不上库就不算跑过。\n"
             "         起库：docker compose up -d db   （或设 KUBEDOCS_DATABASE_URL 指向你的库）"
         )
 
@@ -136,12 +137,12 @@ def job_quality(*, hf_offline: bool) -> None:
     _run(_py("-m", "mypy", "src", "scripts"))
     _run(_py("scripts/check_doc_refs.py"))
     # 依赖声明一致性：`src/` 直接 import 的第三方包必须都写进 pyproject；缺声明只在
-    # 干净环境（容器 / CI）里才现形，本机 editable 开发看不见。
+    # 干净环境（容器）里才现形，本机 editable 开发看不见。
     _run(_py("scripts/check_deps.py"))
 
 
 def job_pipeline(*, hf_offline: bool) -> None:
-    """全链路自检：全量语料 + 哈希向量（对应 ci.yml 的 pipeline job）。
+    """全链路自检：全量语料 + 哈希向量。
 
     索引建到临时目录：本地那份 `data/index/<domain>` 重建要很久，不能被 hashing 覆盖。
     """
@@ -170,9 +171,9 @@ def job_pipeline(*, hf_offline: bool) -> None:
 
 
 def job_gate(*, hf_offline: bool) -> None:
-    """检索质量闸门（对应 ci.yml 的 gate job）。
+    """检索质量闸门。
 
-    本地已有真实索引，所以只跑"预检 + 闸门"两步。**只读**，不重建索引。
+    真实索引已存在，所以只跑"预检 + 闸门"两步。**只读**，不重建索引。
     """
     _banner("job: gate —— 真实模型 + 冻结基线（指标退化就红）")
     flag = ["--hf-offline"] if hf_offline else []
@@ -192,7 +193,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--no-hf-offline",
         action="store_true",
-        help="不传 --hf-offline（CI 的 runner 有外网，本地默认要传，理由见 README「环境约束」）",
+        help="不传 --hf-offline（模型要联网校验时才用；默认传，理由见 README「环境约束」）",
     )
     parser.add_argument(
         "--keep-temp",
@@ -202,7 +203,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--keep-going",
         action="store_true",
-        help="某个 job 失败后继续跑后面的（CI 里 pipeline/gate 有 needs: [quality]，默认与 CI 一致：不继续）",
+        help="某个 job 失败后继续跑后面的（默认停：pipeline 与 gate 都以 quality 为前提）",
     )
     args = parser.parse_args(argv)
 
@@ -226,10 +227,10 @@ def main(argv: list[str] | None = None) -> int:
             failed[name] = str(exc)
             _banner(f"job {name} 失败")
             print(f"  {exc}", flush=True)
-            # ci.yml 里 pipeline 与 gate 都声明了 `needs: [quality]`，quality 挂掉时它们在
-            # CI 里根本不会启动；默认照此停止，否则本地结论与 CI 对不上。--keep-going 可继续。
+            # pipeline 与 gate 都以 quality 为前提：静态检查或单测就挂了，后面的结论没有意义。
+            # 默认照此停止，--keep-going 可继续跑完。
             if not args.keep_going:
-                print("\n  按 CI 语义（needs: [quality]）停止；继续跑后面用 --keep-going", flush=True)
+                print("\n  quality 是后续 job 的前提，停止；继续跑后面用 --keep-going", flush=True)
                 break
         else:
             finished.append(name)
@@ -241,20 +242,16 @@ def main(argv: list[str] | None = None) -> int:
         elif name in finished:
             print(f"  ✓ {name}", flush=True)
         else:
-            print(f"  – {name}（未运行：前一个 job 失败，CI 里也不会启动）", flush=True)
+            print(f"  – {name}（未运行：前一个 job 失败）", flush=True)
 
     ran = len(finished) + len(failed)
     if failed:
-        print(
-            f"\n已运行的 {ran} 个 job 里有 {len(failed)} 个失败。"
-            "\n注意：这**不等于** GitHub runner 上的结论（差异见本文件顶部那张表）。",
-            flush=True,
-        )
+        print(f"\n已运行的 {ran} 个 job 里有 {len(failed)} 个失败。", flush=True)
         return 1
     print(
         f"\n{ran}/{ran} 个 job 通过。"
-        "\n注意：这**不等于** GitHub runner 上的结论 —— 本脚本不重新 checkout、不建环境、不缓存，"
-        "也不覆盖 CI 的矩阵与 service 容器语义。",
+        "\n注意：结论只对**这次运行的环境**成立 —— 用的是当前工作树、当前解释器、现成的索引与模型缓存，"
+        "不重新检出、不重建环境；换了环境（干净检出、别的机器、别的 Postgres）要重跑。",
         flush=True,
     )
     return 0

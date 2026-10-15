@@ -208,7 +208,7 @@ class TestRouteDegradation:
         assert "clinic" in decision.reason
 
     def test_missing_llm_falls_back_to_default(self) -> None:
-        """没配模型（离线 CI、没密钥）时路由仍要出结果，不能把服务卡死。"""
+        """没配模型（离线、没密钥）时路由仍要出结果，不能把服务卡死。"""
         decision = route("q", llm=None, candidates=_candidates(), default="k8s_docs")
         assert decision.domain == "k8s_docs"
         assert decision.confidence == 0.0

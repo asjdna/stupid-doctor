@@ -61,7 +61,7 @@ def _write(root: Path, rel: str, text: str) -> Path:
 
 
 def _run(script: ModuleType, root: Path, *extra: str) -> int:
-    """走真实的 `main()`（退出码才是这个门禁对 CI 的唯一契约）。"""
+    """走真实的 `main()`（退出码才是这个门禁对外的唯一契约）。"""
     return int(script.main(["--root", str(root), "--verbose", *extra]))
 
 

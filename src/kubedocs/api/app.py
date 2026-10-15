@@ -755,7 +755,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         """检索 + 生成（LiteLLM）。
 
         没有 LLM 密钥**不是 500**：检索结果与引用照常返回，`degraded` 里写明原因。
-        这条路径让没有密钥的环境（CI、离线机器）也能完整走通整条链路。
+        这条路径让没有密钥的环境（离线机器）也能完整走通整条链路。
         """
         _require_domain(body.domain)
         runtime = _runtime(request, body.domain)

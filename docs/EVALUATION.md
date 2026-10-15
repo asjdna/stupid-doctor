@@ -77,9 +77,9 @@ python scripts/eval_medical_cot.py --limit 20        # 问诊质量
 - 每次调用都记入同一本日预算账本（`KUBEDOCS_LLM_DAILY_BUDGET_USD`），账本落在
   `data/index/llm_spend.json`。
 
-## 六、CI 覆盖范围
+## 六、验证覆盖范围
 
-CI 跑三件事，顺序串联，前一步失败则后一步不启动：
+`scripts/ci_local.py` 跑三件事，顺序串联，前一步失败则后一步不启动：
 
 | 作业 | 内容 |
 |---|---|
@@ -87,14 +87,12 @@ CI 跑三件事，顺序串联，前一步失败则后一步不启动：
 | pipeline | 用哈希向量（不下载模型）跑一遍全量摄取 + 索引自检 + 标注集自检 + 评测，验证链路完整 |
 | gate | 用真实嵌入模型与冻结基线比对，指标退化即失败 |
 
-本地等价物：
-
 ```bash
 python scripts/ci_local.py                 # 三个作业全跑
 python scripts/ci_local.py --jobs quality  # 只跑一个
 ```
 
-> `ci_local.py` 要求本机 Postgres 可达（与 CI 的 service 容器对应）；
+> quality 要求本机 Postgres 可达（`docker compose up -d db`，或设 `KUBEDOCS_DATABASE_URL`）；
 > 连不上时它把 pgvector 那一族用例当作失败，而不是静默跳过——"跳过的测试"和
 > "通过的测试"在日志里长得一样，这是必须避免的。
 

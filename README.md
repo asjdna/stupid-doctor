@@ -211,7 +211,8 @@ python -m kubedocs.cli eval --gate           # 之后每次回归检查（指标
 | 急诊识别 | 带严重度标注的用例 | `scripts/eval_emergency.py` |
 | 问诊质量 | 带结构化答案的医案 | `scripts/eval_medical_cot.py` |
 
-分诊与急诊评测依赖本地语料，在有语料的机器上运行；CI 覆盖检索闸门与全量单元测试。
+分诊与急诊评测依赖本地语料，在有语料的机器上运行；检索闸门与全量单元测试由
+`scripts/ci_local.py` 覆盖。
 
 ## 实测数字（本机，i7-13700H / 16 GB / CPU）
 

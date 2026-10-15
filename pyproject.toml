@@ -25,7 +25,7 @@ dependencies = [
     # 这里曾有 `redis>=5.0`：全仓没有任何一行代码用它（`Settings.redis_url` 也没有读者），
     # 属于"声明了没人用的依赖"，已删除——连同 compose 里那个没人连的 redis 服务。
     # 要加缓存/限流时，再连同真实分支一起引回来。
-    # 本地/CI 默认后端（KUBEDOCS_STORE=sqlite-vec）的向量表。
+    # 默认后端（KUBEDOCS_STORE=sqlite-vec）的向量表。
     # 注意：vec0 是**穷举扫描**而非 ANN（实测在本项目 18861×384 上比 numpy 暴力慢约 11 倍），
     # 选它换的是「向量与块行同事务、可增删、不常驻内存」，不是延迟——见 docs/DECISIONS.md。
     "sqlite-vec>=0.1.9",
@@ -55,7 +55,7 @@ dependencies = [
     #   · `numpy` / `python-dotenv`：分别是 sentence-transformers 与 litellm 的传递依赖，
     #     但我们在 `embed.py` / `ingest.py` / `store/base.py` / `config.py` 里**直接**用它们。
     # 与 `mcp` 那条注释同一个理由：能用但没声明是脆的，上游哪天不带了功能会静默消失。
-    # 复现这道检查：`python scripts/check_deps.py`（已接入 CI）。
+    # 复现这道检查：`python scripts/check_deps.py`（`ci_local.py` 的 quality job 会跑它）。
     "jieba>=0.42",
     "numpy>=1.26",
     "python-dotenv>=1.0",
@@ -97,7 +97,7 @@ where = ["src"]
 "kubedocs.clinical.prompts" = ["*.md"]
 
 # ---------------------------------------------------------------------------
-# 工具链：全部**阻塞**，与 CI 一致。风格类规则（导入排序、% 格式化）不在闸门内——
+# 工具链：全部**阻塞**。风格类规则（导入排序、% 格式化）不在闸门内——
 # 闸门只抓能造成真问题的规则。
 # ---------------------------------------------------------------------------
 [tool.ruff]
@@ -120,9 +120,9 @@ ignore = [
 known-first-party = ["kubedocs"]
 
 [tool.ruff.format]
-# 显式锁定 LF。开发机是 Windows（`core.autocrlf=true`）、CI 是 Linux：
-# 不定死行尾，`ruff format --check` 的判定就依赖环境——本地"已格式化"、
-# CI"待重排"（或反之），门禁会变成一个环境函数而不是代码质量的函数。
+# 显式锁定 LF。开发机是 Windows（`core.autocrlf=true`）、部署与容器是 Linux：
+# 不定死行尾，`ruff format --check` 的判定就依赖环境——一台机器说"已格式化"、
+# 另一台说"待重排"，门禁会变成一个环境函数而不是代码质量的函数。
 # 与 `.gitattributes` 的 `* text=auto eol=lf` 同向。
 line-ending = "lf"
 

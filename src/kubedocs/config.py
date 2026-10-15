@@ -26,7 +26,7 @@ def repo_root() -> Path:
     此时根目录落到 site-packages 内部，`data/` 指向一个不存在也写不进去的位置，
     服务仍能启动但 `n_chunks` 是 0、检索全部降级为"索引不可用"。
     容器里用 `KUBEDOCS_REPO_ROOT` 显式指向挂载点（如 `/app`）即可覆盖；
-    本地与 CI 不设它，走源码布局。
+    源码布局下不设它也能正确推断。
     """
     override = os.environ.get("KUBEDOCS_REPO_ROOT", "").strip()
     if override:

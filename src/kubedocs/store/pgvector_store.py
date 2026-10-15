@@ -193,7 +193,7 @@ def probe(dsn: str, *, timeout: float = 3.0) -> tuple[bool, str]:
     """探测数据库是否可用（不做任何建表动作）。
 
     存在的理由：测试与前置检查需要区分"数据库连不上（环境问题，应 skip / 给出提示）"
-    与"代码错了（应失败）"，两者混在一起会让 CI 出现莫名其妙的红或绿。
+    与"代码错了（应失败）"，两者混在一起会让门禁出现莫名其妙的红或绿。
     """
     try:
         import psycopg
@@ -267,7 +267,7 @@ class PgVectorStore:
         `fts_engine` 决定关键字路用哪个引擎（**不是**环境变量，见常量区说明）：
         - `auto`（默认）：库里有 `pg_search` 就用真 BM25，没有就降级到 `ts_rank`，
           并在 meta / verify_fts / WARNING 日志三处标出来；app 走的就是这条。
-        - `pg_search`：要求真 BM25，扩展不可用**直接报错**（CI / 生产闸门用得上）。
+        - `pg_search`：要求真 BM25，扩展不可用**直接报错**（生产闸门用得上）。
         - `ts_rank`：显式要旧引擎（对照旧数字用），同样带降级标记。
         """
         if not _IDENT_RE.match(schema):

@@ -1,4 +1,4 @@
-# 常用入口。`make check` 一条命令跑完所有静态闸门，与 CI 的 quality 作业等价。
+# 常用入口。`make check` 跑完所有静态闸门；整套验证（含全量摄取与检索闸门）用 `make ci-local`。
 #
 # 两条并列的使用路径：
 #   make ingest / search / eval / stats   -> 本机嵌入式索引（默认 sqlite-vec）
@@ -29,17 +29,17 @@ install:  ## 建 venv 并安装（含 dev 依赖）
 	python -m venv --system-site-packages .venv
 	$(PY) -m pip install -e ".[dev]"
 
-check: lint fmt type test refs  ## 所有静态闸门（= ci.yml 的 quality job，不含 pipeline/gate）
+check: lint fmt type test refs  ## 所有静态闸门（不含 pipeline / gate，那两个用 make ci-local）
 	@echo "所有闸门通过"
 
-# 本地按 CI 的口径跑完三个作业；它要求 Postgres 可达，因为那族用例在 CI 里必须真跑。
-ci-local:  ## 本地按 CI 口径跑三个 job（quality + pipeline + gate）
+# 跑完整套验证；它要求 Postgres 可达，因为 pgvector 那族用例必须真跑，skip 不算跑过。
+ci-local:  ## 跑完整套验证（quality + pipeline + gate）
 	$(RUN) scripts/ci_local.py
 
 lint:  ## ruff（阻塞）
 	$(RUN) -m ruff check .
 
-# `ruff check`（规则）与 `ruff format --check`（排版）是两道独立的门，与 CI 一一对应。
+# `ruff check`（规则）与 `ruff format --check`（排版）是两道独立的门。
 fmt:  ## ruff 排版检查（阻塞）
 	$(RUN) -m ruff format --check .
 

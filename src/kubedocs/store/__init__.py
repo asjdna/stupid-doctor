@@ -4,7 +4,7 @@
 
 | 取值 | 实现 | 依赖 | 定位 |
 |---|---|---|---|
-| `sqlite-vec`（默认） | `SqliteVecStore` | `sqlite-vec` 扩展 | 本地/CI：零外部进程、零镜像、零网络 |
+| `sqlite-vec`（默认） | `SqliteVecStore` | `sqlite-vec` 扩展 | 本地：零外部进程、零镜像、零网络 |
 | `sqlite` | `SqliteStore` | 标准库 + numpy | 旧实现，回退与性能对照 |
 | `pgvector` | `PgVectorStore` | Postgres + pgvector + psycopg 连接池 | 生产：多实例写、一库承担全文+向量 |
 | `milvus` | `MilvusStore` | `pymilvus` + `milvus-lite`（本地文件） | 可选：**唯一真正提供 ANN 的嵌入式后端**（HNSW） |

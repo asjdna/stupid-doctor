@@ -22,19 +22,19 @@ python scripts/check_doc_refs.py   # 文档里的 文件:行号 引用必须指�
 python scripts/check_deps.py       # src/ 里 import 的第三方包必须已在 pyproject 声明
 ```
 
-一条命令跑完与 CI 等价的三步：
+一条命令跑完整套验证（静态检查、单元测试、全量摄取自检、检索闸门）：
 
 ```bash
 python scripts/ci_local.py
 ```
 
-`ci_local.py` 需要本机 Postgres 可达（对应 CI 里的 service 容器）。
+`ci_local.py` 需要本机 Postgres 可达（`docker compose up -d db`，或设 `KUBEDOCS_DATABASE_URL`）。
 它把"需要数据库却被跳过"视为失败——**跳过的测试和通过的测试在日志里长得一样**，
 这是必须避免的。
 
 ## 代码风格
 
-- 类型标注：公开函数与类都要有；`mypy` 在 CI 里是阻塞的。
+- 类型标注：公开函数与类都要有；`mypy src scripts` 是阻塞门。
 - 文档字符串：说明**这个模块/函数做什么、怎么用、有什么约束**，面向第一次读代码的人。
   重点写清对外契约、不变量、参数语义与安全约束。
 - 注释解释"为什么"，代码本身说明"是什么"。

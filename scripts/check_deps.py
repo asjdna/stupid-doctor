@@ -1,7 +1,7 @@
 """检查：`src/` 里直接 import 的第三方包是否都写进了 `pyproject.toml`。
 
 缺声明的包在本机 editable 开发时靠传递依赖凑巧可用，`pip install .` 到干净环境
-（容器 / CI）才会 `ModuleNotFoundError`，所以这道检查接在 CI 的 quality job 里。
+（容器）才会 `ModuleNotFoundError`，所以这道检查是 `ci_local.py` 的 quality job 的一步。
 
 判据：
 - 只看 `src/`（`scripts/`、`tests/` 的依赖允许更松：它们是开发期工具）
@@ -142,7 +142,7 @@ def main(argv: list[str] | None = None) -> int:
     for name, pkg, where in missing:
         print(f"    {name:<20} -> 包名应为 {pkg:<20} 用在 {where[:3]}")
     print(
-        "\n为什么必须修：靠传递依赖凑巧可用 = 换到干净环境（容器 / CI）就 ModuleNotFoundError，"
+        "\n为什么必须修：靠传递依赖凑巧可用 = 换到干净环境（容器）就 ModuleNotFoundError，"
         "而本机 editable 开发永远看不见。要么加进 [project] dependencies，"
         "要么明确放进 [project.optional-dependencies] 的某个 extra。"
     )

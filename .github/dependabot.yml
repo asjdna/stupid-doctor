@@ -21,15 +21,3 @@ updates:
     # 这里刻意**不设** `ignore`：合不合由人判断，工具不该替维护者决定。
     # major 升级（尤其 langgraph / litellm，被 agent 内核直接依赖）请当成一次
     # 真实变更来做——跑 `make check`，并跑一次真实模型的评测闸门。
-
-  # ---------- GitHub Actions ----------
-  - package-ecosystem: github-actions
-    directory: "/"
-    schedule:
-      interval: weekly
-      day: monday
-    open-pull-requests-limit: 5
-    commit-message:
-      prefix: "ci"
-    labels:
-      - dependencies
