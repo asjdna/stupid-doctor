@@ -224,7 +224,7 @@ class ClinicalPipeline:
         和分诊结果（降级时当科室兜底）。**它的知识条目不进模型上下文**——
         否则"模型自己决定要不要检索"就名存实亡了。
         """
-        from kubedocs.clinical.contracts import ClinicalAssessment, validate_against
+        from kubedocs.clinical.contracts import ClinicalAssessment, enforce
         from kubedocs.clinical.prompts import prompt_version, system_prompt
 
         loop = self._tool_loop
@@ -267,7 +267,13 @@ class ClinicalPipeline:
                 intake=intake,
             )
 
-        problems = validate_against(assessment, evidence.ids())
+        # **真的执行契约**：没有依据的检查/用药建议在这里被丢掉，
+        # 而不是只记一笔账（见 `contracts.enforce` 的说明）。
+        enforced = enforce(assessment, evidence.ids())
+        assessment = enforced.assessment
+        problems = enforced.problems
+        if enforced.dropped:
+            logger.warning("按 R3 丢弃无依据建议：%s", "、".join(enforced.dropped))
         # 追问轮也走这条路（追问由模型的 `followup_questions` 决定，见 `advance` 的说明）。
         # 但**急重症优先**：判出急症时不给"先追问"的动作，必须先给急救指引。
         if assessment.followup_questions and assessment.urgency != "emergency":

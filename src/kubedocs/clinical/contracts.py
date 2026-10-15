@@ -17,6 +17,7 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass, field
 from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -178,3 +179,82 @@ def validate_against(assessment: ClinicalAssessment, evidence_ids: set[str]) -> 
         problems.append("没有任何科室建议")
 
     return problems
+
+
+@dataclass
+class Enforcement:
+    """契约执行的产物：清洗后的结论 + 问题清单 + 被丢掉的东西。"""
+
+    assessment: ClinicalAssessment
+    problems: list[str] = field(default_factory=list)
+    dropped: list[str] = field(default_factory=list)
+    """被丢掉的条目名（检查/用药）。调用方要把它记进日志——**丢东西不能是静默的**。"""
+
+
+def enforce(assessment: ClinicalAssessment, evidence_ids: set[str]) -> Enforcement:
+    """**真的执行契约**：把没有依据的检查/用药建议**丢掉**，而不是只记一笔账。
+
+    ## 为什么必须真的丢（这是一条被实测逼出来的修正）
+
+    此前 `validate_against()` 只返回问题字符串，调用方把它塞进 `turn.problems` 就完了。
+    后果是：**一条没有任何依据的用药建议照样发给患者**，只有翻响应 JSON 才看得到问题——
+    而患者端已经不渲染 `problems` 了，等于连人都看不见。
+    那让 R3「检索不到就不给」从"硬约束"退化成"事后记账"。
+
+    `validate_against` 的注释其实早写了"调用方可以选择带伤展示……例如缺了一条检查建议的依据，
+    就把那条丢掉继续"——**但从来没有调用方真的这么做**。本函数就是那个调用点。
+
+    ## 丢什么、不丢什么
+
+    - **丢**：`exams` / `medications` 里没有 `evidence_ids`、或引用了不存在 id 的条目。
+      它们正是 R3 要拦的东西，系统**没有资格**给出。
+    - **保留**：`differentials`（是"可能方向"，不承诺具体处置）、`departments`、
+      `red_flags`、`patient_summary`。急重症判断与科室建议不因这条被削弱。
+    - `red_flags` 的 id 引用错了**只记不丢**：急重症判断宁可留着让人看见，
+      也不该因为一个编号写错就消失（漏报急诊比多报危险得多）。
+    """
+    problems: list[str] = []
+    dropped: list[str] = []
+    exams: list[ExamAdvice] = []
+    medications: list[MedicationAdvice] = []
+
+    for item in assessment.exams:
+        if not item.evidence_ids:
+            dropped.append(f"检查「{item.name}」（没有依据）")
+            continue
+        unknown = [e for e in item.evidence_ids if e not in evidence_ids]
+        if unknown:
+            dropped.append(f"检查「{item.name}」（引用了不存在的依据 {unknown}）")
+            continue
+        exams.append(item)
+
+    for med in assessment.medications:
+        if not med.evidence_ids:
+            dropped.append(f"用药「{med.name}」（没有依据）")
+            continue
+        unknown = [e for e in med.evidence_ids if e not in evidence_ids]
+        if unknown:
+            dropped.append(f"用药「{med.name}」（引用了不存在的依据 {unknown}）")
+            continue
+        medications.append(med)
+
+    if dropped:
+        problems.append(
+            "已按 R3 丢弃无依据的检查/用药建议："
+            + "、".join(dropped)
+            + "（检索不到就不给，不用通用医学知识补足）"
+        )
+
+    # 其余检查照旧（急重症/自相矛盾/空结论/科室缺失）——它们**不该**导致丢内容，
+    # 而是让调用方与运维看到"这一轮有问题"。
+    #
+    # 只按**前缀**排除检查/用药那两类，不能用子串匹配：红线的违规消息里也含
+    # "引用了不存在的证据 id"，用子串会把「急重症判断引用错 id」一起滤掉
+    # （实测被自己的测试抓到）。红线的问题必须留下——急重症引错编号也要让人看见。
+    rest = [
+        p for p in validate_against(assessment, evidence_ids) if not p.startswith(("检查建议", "用药建议"))
+    ]
+    problems.extend(rest)
+
+    cleaned = assessment.model_copy(update={"exams": exams, "medications": medications})
+    return Enforcement(assessment=cleaned, problems=problems, dropped=dropped)

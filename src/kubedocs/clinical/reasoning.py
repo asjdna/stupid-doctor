@@ -193,6 +193,12 @@ class ClinicalReasoner:
             )
 
         problems = validate_against(assessment, evidence.ids())
+        from kubedocs.clinical.contracts import enforce
+
+        enforced = enforce(assessment, evidence.ids())
+        assessment, problems = enforced.assessment, enforced.problems
+        if enforced.dropped:
+            logger.warning("按 R3 丢弃无依据建议：%s", "、".join(enforced.dropped))
         if evidence.red_line_positive and not assessment.red_flags:
             # 关键词表命中了，但模型既没判出急重症、也没把它写进 red_flags。
             # **这只是"记一笔"，不是推翻模型**：判断权在模型手上（见 system.md R1），

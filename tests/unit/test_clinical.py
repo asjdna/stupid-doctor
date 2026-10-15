@@ -431,6 +431,81 @@ class TestIntake:
         assert "问不出来（已问满次数，不要再问）" in text
 
 
+class TestContractEnforcement:
+    """**核心回归**：契约违规必须**真的拦掉内容**，不能只记一笔账。
+
+    此前 `validate_against()` 只返回问题字符串，调用方塞进 `turn.problems` 就完了 ——
+    一条没有任何依据的用药建议**照样发给患者**，而患者端只渲染 `message`，
+    连问题清单都看不见。那让 R3「检索不到就不给」退化成事后记账。
+    """
+
+    def test_exam_without_evidence_is_dropped(self) -> None:
+        a = contracts.ClinicalAssessment(
+            urgency="routine",
+            departments=[contracts.DepartmentAdvice(name="呼吸内科", confidence=0.5)],
+            exams=[
+                contracts.ExamAdvice(name="有依据的检查", evidence_ids=["K1"]),
+                contracts.ExamAdvice(name="凭空来的检查"),  # 无依据 ⇒ 该被丢
+            ],
+            patient_summary="建议就诊。",
+        )
+        out = contracts.enforce(a, {"K1"})
+        assert [e.name for e in out.assessment.exams] == ["有依据的检查"]
+        assert any("凭空来的检查" in d for d in out.dropped)
+        assert any("已按 R3 丢弃" in p for p in out.problems)
+
+    def test_medication_with_fake_evidence_id_is_dropped(self) -> None:
+        a = contracts.ClinicalAssessment(
+            urgency="routine",
+            departments=[contracts.DepartmentAdvice(name="呼吸内科", confidence=0.5)],
+            medications=[contracts.MedicationAdvice(name="编的假药", evidence_ids=["K99"])],
+            patient_summary="建议就诊。",
+        )
+        out = contracts.enforce(a, {"K1"})
+        assert out.assessment.medications == []
+        assert any("K99" in d for d in out.dropped)
+
+    def test_emergency_content_is_never_dropped(self) -> None:
+        """**安全优先**：急重症判断与科室建议**不因 R3 被削弱**。
+
+        引用了不存在的 id 时，检查/用药会丢，但 `red_flags`、`departments`、
+        `patient_summary` 必须原样留下 —— 漏报急诊比多报危险得多。
+        """
+        a = contracts.ClinicalAssessment(
+            urgency="emergency",
+            red_flags=[
+                contracts.RedFlag(
+                    condition="急性冠脉综合征",
+                    severity="critical",
+                    why="胸痛伴大汗",
+                    evidence_ids=["不存在的id"],
+                )
+            ],
+            departments=[contracts.DepartmentAdvice(name="急诊科", confidence=0.9)],
+            exams=[contracts.ExamAdvice(name="心电图", evidence_ids=["不存在的id"])],
+            patient_summary="请立刻拨打 120。",
+        )
+        out = contracts.enforce(a, {"K1"})
+        assert out.assessment.red_flags  # 留着
+        assert out.assessment.departments  # 留着
+        assert out.assessment.patient_summary == "请立刻拨打 120。"  # 留着
+        assert out.assessment.exams == []  # 有依据才留
+        assert any("急重症判断" in p for p in out.problems)  # 只记不丢
+
+    def test_clean_assessment_passes_untouched(self) -> None:
+        a = contracts.ClinicalAssessment(
+            urgency="routine",
+            departments=[contracts.DepartmentAdvice(name="呼吸内科", confidence=0.5)],
+            exams=[contracts.ExamAdvice(name="血常规", evidence_ids=["K1"])],
+            medications=[contracts.MedicationAdvice(name="止咳糖浆", evidence_ids=["K2"])],
+            patient_summary="建议就诊。",
+        )
+        out = contracts.enforce(a, {"K1", "K2"})
+        assert out.dropped == []
+        assert out.problems == []
+        assert out.assessment.exams and out.assessment.medications
+
+
 # --------------------------------------------------------------------- 提示词
 class TestSystemPrompt:
     def test_version_is_a_stable_12_hex(self) -> None:
