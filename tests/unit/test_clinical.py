@@ -707,8 +707,37 @@ class TestLiteLLMAdapter:
 
 
 # --------------------------------------------------------------------- 编排
+class _FakeToolLoop:
+    """最小工具循环替身：记录被调用次数，返回固定契约 JSON。"""
+
+    def __init__(self, final_text: str) -> None:
+        self.final_text = final_text
+        self.calls = 0
+        self.questions: list[str] = []
+
+    def run(self, *, system: str, question: str, intake: object) -> object:
+        del system, intake
+        self.calls += 1
+        self.questions.append(question)
+
+        from kubedocs.clinical.evidence import EvidenceBundle
+
+        class _R:
+            final_text = self.final_text
+            calls: list[object] = []
+            evidence = EvidenceBundle(items=[])
+
+        return _R()
+
+
 class TestPipeline:
-    def _pipeline(self, reply: str | Exception = "", *, word: str | None = None) -> ClinicalPipeline:
+    def _pipeline(
+        self,
+        reply: str | Exception = "",
+        *,
+        word: str | None = None,
+        tool_loop: object | None = None,
+    ) -> ClinicalPipeline:
         from kubedocs.clinical.skills import default_registry
 
         return ClinicalPipeline(
@@ -717,7 +746,70 @@ class TestPipeline:
             skills=default_registry(booking_backend=_FakeBooking()),
             guard=_FakeGuard(word),
             triage=triage_mod.RetrievalTriage(_FakeBooking(departments=["心血管内科", "消化内科"])),
+            tool_loop=tool_loop,
         )
+
+    def test_intake_does_not_preempt_the_model_when_tool_loop_is_present(self) -> None:
+        """**核心回归（安全关键）**：追问闸门不得抢在模型判急重症之前。
+
+        实测过的真实缺陷：关键词护栏退场后，无条件先判 `intake.can_conclude()` 让
+        「突发言语不清，右侧肢体无力两小时」（教科书级卒中）**4/4 次**都返回
+        `action=ask` —— 患者拿到的是一句**追问**，而模型根本没机会判断这是急症。
+        追问闸门只会看槽位填满没有，它不会看急症。
+
+        有工具循环时"够不够下结论"必须归模型（提示词 R5）。
+        """
+        loop = _FakeToolLoop(
+            json.dumps(
+                {
+                    "urgency": "emergency",
+                    "red_flags": [
+                        {"condition": "急性脑卒中", "severity": "critical", "why": "突发神经功能缺失"}
+                    ],
+                    "departments": [{"name": "急诊科", "confidence": 0.9}],
+                    "patient_summary": "这是急症，请立刻拨打 120。",
+                },
+                ensure_ascii=False,
+            )
+        )
+        turn = self._pipeline(tool_loop=loop).advance("突发言语不清，右侧肢体无力两小时")
+        assert loop.calls == 1, "模型必须真的被调用过（而不是被追问闸门拦住）"
+        assert turn.action == "emergency"
+        assert turn.assessment is not None and turn.assessment.red_flags
+
+    def test_intake_gate_still_asks_without_tool_loop(self) -> None:
+        """没有工具循环时，原来的追问闸门行为必须原样保留。"""
+        turn = self._pipeline().advance("呃")
+        assert turn.action == "ask"
+
+    def test_followup_questions_become_an_ask_but_emergency_wins(self) -> None:
+        """模型追问 ⇒ `action=ask`；但**急重症优先**，不得给"先追问"的动作。"""
+        ask_loop = _FakeToolLoop(
+            json.dumps(
+                {
+                    "urgency": "routine",
+                    "departments": [{"name": "呼吸内科", "confidence": 0.5}],
+                    "patient_summary": "这种情况持续多久了？",
+                    "followup_questions": ["持续多久了"],
+                },
+                ensure_ascii=False,
+            )
+        )
+        assert self._pipeline(tool_loop=ask_loop).advance("我咳嗽").action == "ask"
+
+        emg_loop = _FakeToolLoop(
+            json.dumps(
+                {
+                    "urgency": "emergency",
+                    "red_flags": [{"condition": "脑卒中", "severity": "critical", "why": "突发偏瘫"}],
+                    "departments": [{"name": "急诊科", "confidence": 0.9}],
+                    "patient_summary": "请立刻拨打 120。",
+                    "followup_questions": ["什么时候开始的"],
+                },
+                ensure_ascii=False,
+            )
+        )
+        assert self._pipeline(tool_loop=emg_loop).advance("半边身子不能动").action == "emergency"
 
     def test_asks_when_critical_slot_is_missing(self) -> None:
         """证据不足不得给结论。"""

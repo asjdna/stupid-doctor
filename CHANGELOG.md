@@ -23,6 +23,35 @@
 一轮以"关闭真实缺陷 + 抹平文档与实现的自相矛盾"为目标的改动。每一条都标注了
 **怎么验证**，而不是只写"已修复"。
 
+### Fixed — 安全关键：追问闸门曾抢在模型判急重症之前（实测 4/4 次误拦）
+
+**这是"红线交给模型"之后暴露出的洞，比模型漏判更严重。**
+
+- **现象**：`「突发言语不清，右侧肢体无力两小时」`（教科书级卒中）连续 **4/4 次**
+  返回 `action=ask` —— 患者拿到的是一句**追问**，而**模型根本没机会判断这是急症**。
+- **成因**：`ClinicalPipeline.advance` 无条件先判 `intake.can_conclude()`，不满足就返回
+  槽位追问。关键词护栏退场后，这道闸门成了"模型之前的最后一道关卡"，
+  而它**只会看槽位填满没有，不会看急症**。
+- **修法**：**有工具循环时不拦**——"够不够下结论"交回模型（提示词 R5 要求信息不足时
+  把追问放进 `followup_questions`、把 `patient_summary` 写成一句自然的追问）。
+  同时新增 `followup_questions` 非空 ⇒ `action=ask`，但**急重症优先**
+  （判出急症时不给"先追问"的动作，必须先给急救指引）。
+- **复验**（真机、真调模型、各 3 次）：教科书级卒中 **0/4 → 3/3**；
+  心梗书面语 3/3；口语胸痛 3/3；普通主诉 0/3（正确地不报急诊）。
+- **回归测试**：`test_intake_does_not_preempt_the_model_when_tool_loop_is_present`、
+  `test_intake_gate_still_asks_without_tool_loop`、
+  `test_followup_questions_become_an_ask_but_emergency_wins`。
+
+### 附：本轮完整验证结果
+
+| 验证线 | 结果 |
+|---|---|
+| 项目自带 CI（`scripts/ci_local.py`，3 个 job） | **3/3 通过，退出码 0** |
+| 单元测试 | 1024 passed |
+| ruff / format / mypy / `check_doc_refs` | 全绿 |
+| 本机服务功能冒烟（8082） | `/consult` 多轮·红线·噪音·重置、`/search`、`/ask`、`/tools`、`/metrics`、`/domains`、`/patient`、`/console` 全部 HTTP 200 且行为正确 |
+| 容器路线（8080） | `/healthz` 正常（18,822 chunks）；**`/consult` 404 —— 镜像早于本功能，未重建**（外部下载受阻，已知项） |
+
 ### Changed — 架构转向：底层约束是**大模型**，红线改由它判断，工具由它调度
 
 **这是本仓库最根本的一次改动**，此前那些"安全性质"的落点大多要重新看一遍。

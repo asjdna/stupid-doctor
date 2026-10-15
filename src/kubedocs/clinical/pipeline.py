@@ -116,7 +116,20 @@ class ClinicalPipeline:
         intake = state if state is not None else IntakeState()
         intake.merge(question, self._extractor)
 
-        if not intake.can_conclude():
+        # **追问闸门只在没有工具循环时才拦**——这条是被实测逼出来的。
+        #
+        # 曾经这里无条件先判 `can_conclude()`。后果实测（重复 4 次都一样）：
+        #   「突发言语不清，右侧肢体无力两小时」（教科书级卒中）
+        #   4/4 次都返回 `action=ask` —— 患者拿到的是一句**追问**，
+        #   而模型**根本没机会判断这是急症**。
+        # 关键词护栏退场之后，追问闸门就成了"模型之前的最后一道关卡"，
+        # 而它不会看急症——它只会看槽位填满没有。
+        #
+        # 有工具循环时，追问交给模型：提示词 R5 要求"信息不足就追问，
+        # 并把追问放进 followup_questions、把 patient_summary 写成一句自然的追问"。
+        # 判断权归模型，那"够不够下结论"也必须归它——否则就是把刚交出去的权力
+        # 从后门拿回来。
+        if self._tool_loop is None and not intake.can_conclude():
             slot = intake.next_question()
             if slot is not None:
                 intake.mark_asked(slot.key)
@@ -234,7 +247,12 @@ class ClinicalPipeline:
             )
 
         problems = validate_against(assessment, evidence.ids())
-        action: TurnAction = "emergency" if assessment.urgency == "emergency" else "answer"
+        # 追问轮也走这条路（追问由模型的 `followup_questions` 决定，见 `advance` 的说明）。
+        # 但**急重症优先**：判出急症时不给"先追问"的动作，必须先给急救指引。
+        if assessment.followup_questions and assessment.urgency != "emergency":
+            action: TurnAction = "ask"
+        else:
+            action = "emergency" if assessment.urgency == "emergency" else "answer"
         return ClinicalTurn(
             action=action,
             message=assessment.patient_summary,
