@@ -430,7 +430,13 @@ class TestApiKeyDetection:
         assert has_api_key("deepseek/deepseek-chat") is False
 
     def test_real_looking_key_still_passes(self, monkeypatch):
-        """黑名单不能误伤真密钥：DeepSeek 的形态是 `sk-` + 32 位随机串。"""
+        """黑名单不能误伤真密钥：DeepSeek 的形态是 `sk-` + 32 位随机串。
+
+        **值在运行时拼装，文件里不留密钥形状的字面量。** 这不是洁癖：
+        原先写成字面量时，GitHub **Push Protection** 把它认成真的 DeepSeek Key，
+        `GH013: Repository rule violations` 直接拒绝整次 push（实测拦过）。
+        拼装出来的字符串仍然满足"`sk-` + 32 位"，所以这条测试的**意图一字未改**。
+        """
         fake = "sk-" + "0123456789abcdef" * 2
         monkeypatch.setenv("DEEPSEEK_API_KEY", fake)
         assert has_api_key("deepseek/deepseek-chat") is True
