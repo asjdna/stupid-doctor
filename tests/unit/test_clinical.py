@@ -549,6 +549,29 @@ class TestSystemPrompt:
     def test_prompt_demands_json_only(self) -> None:
         assert "只输出 JSON" in system_prompt()
 
+    def test_prompt_is_declared_as_package_data(self) -> None:
+        """**核心回归（打包）**：`system.md` 必须声明为 package-data，否则不进 wheel。
+
+        setuptools 默认只带 `.py`，所以 editable 安装（本机开发）一切正常，
+        而 `pip install .` 装出来的包里没有这个文件。**实测**：重建容器镜像后
+        `/consult` 直接报 `FileNotFoundError: 系统提示词缺失：
+        /opt/venv/lib/python3.10/site-packages/kubedocs/clinical/prompts/system.md`。
+        这条断言很朴素（读 pyproject），但它挡的正是"开发环境永远发现不了"的那一类。
+        """
+        from kubedocs.config import repo_root
+
+        pyproject = (repo_root() / "pyproject.toml").read_text(encoding="utf-8")
+        assert "[tool.setuptools.package-data]" in pyproject
+        assert '"kubedocs.clinical.prompts" = ["*.md"]' in pyproject
+
+    def test_prompt_path_lives_next_to_the_module(self) -> None:
+        """提示词必须与 `prompts/__init__.py` 同目录 —— 换位置就会静默读到别人。"""
+        from kubedocs.clinical.prompts import SYSTEM_PROMPT_PATH
+
+        assert SYSTEM_PROMPT_PATH.name == "system.md"
+        assert SYSTEM_PROMPT_PATH.parent.name == "prompts"
+        assert SYSTEM_PROMPT_PATH.is_file()
+
 
 # --------------------------------------------------------------------- Skill 框架
 class TestSkillRegistry:

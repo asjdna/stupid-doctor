@@ -159,10 +159,23 @@ def load_department_map(
 
     `min_confidence="high"` 只信任图谱直接关系 / `SameAs` 别名；
     传 `"medium"` 会额外纳入最近邻模糊归并（Jaccard>=0.5，有错例，**需抽检**）。
+
+    ## 相对路径锚在 `repo_root()`，不是"包位置的上溯三层"
+
+    原实现用 `Path(__file__).resolve().parents[3]`。它在**源码布局**下恰好等于仓库根，
+    但 `pip install .` 之后 `__file__` 在 site-packages，上溯三层变成
+    `/opt/venv/lib/python3.10` ⇒ 去找 `/opt/venv/.../data/clinic/department_map.json`。
+    **实测**：容器里 `/consult/status` 报 `department_map_entries: 0`，
+    而补全表其实已经挂载在 `/app/data/clinic/`（1.4 MB）——表在、路径错，
+    表现为"分诊悄悄退化成只解析卡片正文"（这正是它警告文案描述的那种退化）。
+    改用 `config.repo_root()`：它读 `KUBEDOCS_REPO_ROOT`（compose 里已设为 `/app`），
+    且与 `domains/clinic/pack.py` 的 `clinic_cards_path()` 同一套锚定方式。
     """
     p = Path(path)
     if not p.is_absolute():
-        p = Path(__file__).resolve().parents[3] / p
+        from kubedocs.config import repo_root
+
+        p = repo_root() / p
     if not p.exists():
         return {}
     try:

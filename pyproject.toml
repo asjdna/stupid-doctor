@@ -69,6 +69,15 @@ kubedocs = "kubedocs.cli:main"
 [tool.setuptools.packages.find]
 where = ["src"]
 
+# 系统提示词是**运行时要读的 `.md`**，默认不会进 wheel（setuptools 只带 `.py`），
+# 于是 editable 安装（本机开发）一切正常，而 `pip install .` 装出来的包里没有它 ——
+# **实测**：容器里新镜像的 `/consult` 直接报
+# `FileNotFoundError: 系统提示词缺失：/opt/venv/lib/python3.10/site-packages/kubedocs/clinical/prompts/system.md`。
+# 这是"开发环境看不见、真装才现形"的典型打包缺陷，所以显式声明。
+# `src/` 下只有这一个非 `.py` 运行时文件（`git ls-files src | grep -v '\.py$'` 可核对）。
+[tool.setuptools.package-data]
+"kubedocs.clinical.prompts" = ["*.md"]
+
 # ---------------------------------------------------------------------------
 # 工具链：全部**阻塞**，与 CI 一致。风格类规则（导入排序、% 格式化）不在闸门内——
 # 闸门只抓能造成真问题的规则。
