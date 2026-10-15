@@ -1,0 +1,374 @@
+"""临床问诊的**交互式 HTTP 层**（`/consult`）：把 `ClinicalPipeline` 接到前端。
+
+## 为什么单独一个模块
+
+`ClinicalPipeline` 的每一段依赖都是注入的（这是它可测的原因），但也因此
+**一直没有一个地方真正装配它**——`clinical/__init__.py` 只导出、不构造，
+所以"接上映射表能 +14 点"这类收益线上拿不到（CHANGELOG 里记为 Known gap）。
+本模块就是那个装配点，并且只做装配与协议转换，不含医学逻辑：
+
+    检索后端 ← 复用 app 的 clinic 运行时（同一份 store / embedder，不重复加载模型）
+    重点：`RetrievalTriage(department_map=load_department_map())` ← 这条是实测 +14 点的关键
+    主判   ← `ClinicalReasoner` + `LiteLLMAdapter` + `BudgetedClient`（**与 CLI/eval 共用同一本日预算账**）
+    红线   ← `RiskGuard`（确定性，LLM 不可绕过）
+    挂号   ← `default_registry(booking_backend=BookingService(MockAppointmentProvider()))`
+    会话   ← 进程内 `IntakeState`（多轮采问的状态属于会话层，不属于流程）
+
+## 会话状态**在进程内**，这是明确的限制
+
+- 单进程内存字典，**重启即丢**；多副本部署下同一 `session_id` 会落到不同实例。
+- 有条数上限（`MAX_SESSIONS`），超出按最久未用淘汰——避免被无限建会话撑爆内存。
+- 真要持久化得换外部存储；`clinical/persistence.py` 目前还是占位实现，**不假装它有**。
+
+## 急诊红线**由服务端强制**，不由模型决定
+
+`red_line_positive` 来自确定性的 `RiskGuard`。只要它为真，响应里的
+`emergency` 就是真、并带上固定的 `emergency_note`（120 / 急诊），
+**不管模型把 urgency 判成什么**。前端只负责把 `emergency` 渲染成醒目横幅——
+文案来自服务端，不在客户端另写一份，避免两处不一致。
+"""
+
+from __future__ import annotations
+
+import logging
+import threading
+import time
+from collections import OrderedDict
+from collections.abc import Callable
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Any
+
+from fastapi import APIRouter, HTTPException, Request
+from fastapi.responses import HTMLResponse
+from pydantic import BaseModel, Field
+
+from kubedocs.clinical.contracts import ClinicalAssessment
+from kubedocs.clinical.intake import IntakeState
+from kubedocs.clinical.pipeline import ClinicalPipeline, ClinicalTurn
+
+logger = logging.getLogger(__name__)
+
+CONSULT_HTML = ("data", "web", "consult.html")
+"""交互式问诊页相对仓库根的位置。"""
+
+MAX_SESSIONS = 200
+"""进程内会话上限（超出按最久未用淘汰）。取值只为"别把内存撑爆"，不是容量规划。"""
+
+EMERGENCY_NOTE = (
+    "检测到需要立即处理的危险信号（如胸痛、呼吸困难、意识不清、大出血等）。"
+    "**请立即拨打 120 或直接前往最近医院急诊科**，不要等待在线建议。"
+)
+"""红线阳性时的固定文案。放在服务端是刻意的：前端只渲染，不另写一份。"""
+
+DISCLAIMER = "本结果由系统根据您描述的症状与知识卡片生成，仅供导诊参考，不能替代医生诊断，也不构成处方。"
+"""每次回答都返回，前端必须显示。"""
+
+
+# ===========================================================================
+# 请求 / 响应契约
+# ===========================================================================
+class ConsultRequest(BaseModel):
+    """一轮问诊请求。`session_id` 由前端生成并复用，多轮采问靠它串起来。"""
+
+    question: str = Field(min_length=1, max_length=2000)
+    session_id: str = Field(default="", max_length=128)
+    want_booking: bool = False
+    confirmed: bool = False
+
+
+class ResetRequest(BaseModel):
+    session_id: str = Field(default="", max_length=128)
+
+
+# ===========================================================================
+# 运行期：管线 + 会话
+# ===========================================================================
+@dataclass
+class _Session:
+    intake: IntakeState = field(default_factory=IntakeState)
+    turns: int = 0
+    created_at: float = field(default_factory=time.time)
+    last_used: float = field(default_factory=time.time)
+
+
+class ConsultRuntime:
+    """装配 `ClinicalPipeline` 并持有会话状态。**每个 app 一份**（闭包缓存）。
+
+    `runtime` 参数是一个鸭子类型对象，需要有：
+      - `.settings`（clinic 域的 Settings，用于 LLM/预算配置）
+      - `.retriever()`（可能返回 `None`——索引没建好时）
+    故意不 import `api.app`：那会形成循环导入，也会让本模块无法单测。
+    """
+
+    def __init__(self, runtime: Any, *, pipeline: Any = None) -> None:
+        self._runtime = runtime
+        # 测试接缝：允许直接塞一个现成管线，从而不必加载嵌入器/语料/密钥。
+        # 生产路径不传，走下面的惰性装配。
+        self._pipeline: Any = pipeline
+        self._lock = threading.Lock()
+        self._sessions: OrderedDict[str, _Session] = OrderedDict()
+        self._sessions_lock = threading.Lock()
+
+    # ---------------------------------------------------------------- 装配
+    def pipeline(self) -> Any:
+        """惰性装配一次并缓存（嵌入器与预算文件都贵，不能每请求重来）。
+
+        返回 `Any` 而不是 `ClinicalPipeline`：测试接缝允许塞入任何满足
+        `advance()` 协议的对象，标注成具体类型会逼测试桩去继承真实类。
+        """
+        with self._lock:
+            if self._pipeline is None:
+                self._pipeline = self._build()
+            return self._pipeline
+
+    def _build(self) -> ClinicalPipeline:
+        from kubedocs.clinical.rag import LocalIndexBackend
+        from kubedocs.clinical.reasoning import BudgetedClient, ClinicalReasoner, LiteLLMAdapter
+        from kubedocs.clinical.skills import default_registry
+        from kubedocs.clinical.triage import RetrievalTriage, load_department_map
+        from kubedocs.domains.clinic.redline import RiskGuard
+        from kubedocs.generate import DailyBudget, LiteLLMClient
+
+        settings = self._runtime.settings
+        retriever = self._runtime.retriever()
+        if retriever is None:
+            raise RuntimeError(
+                "clinic 索引不可用（store 未打开或索引未建）⇒ 无法装配问诊管线。"
+                "先跑 `kubedocs ingest` 建索引。"
+            )
+        budget = DailyBudget(
+            settings.llm_spend_path,
+            settings.llm_daily_budget_usd,
+            unpriced_usd=settings.llm_unpriced_call_usd,
+        )
+        reasoner = ClinicalReasoner(LiteLLMAdapter(BudgetedClient(LiteLLMClient(settings), budget)))
+        # **这一行是实测 +14 点（top-3 67.6%→81.7%）的来源**：
+        # 语料里 47.1% 的卡片科室是「未标注」，靠这张补全表把票补回来。
+        # 只信 high 档（图谱直接关系 + SameAs 别名）；含模糊归并的 medium 档实测更差。
+        dep_map = load_department_map(min_confidence="high")
+        if not dep_map:
+            logger.warning(
+                "科室补全映射表为空（data/clinic/department_map.json 缺失）⇒ 分诊退化为只解析卡片正文，"
+                "口语召回会明显下降。跑 scripts/clinic_derive_departments.py 生成。"
+            )
+        return ClinicalPipeline(
+            backend=LocalIndexBackend(retriever),
+            reasoner=reasoner,
+            skills=default_registry(booking_backend=self._booking_backend()),
+            guard=RiskGuard(),
+            triage=RetrievalTriage(department_map=dep_map),
+            top_k=10,
+        )
+
+    def _booking_backend(self) -> Any:
+        from kubedocs.domains.clinic.booking import BookingService
+        from kubedocs.domains.clinic.mock import MockAppointmentProvider
+
+        return BookingService(MockAppointmentProvider())
+
+    # ---------------------------------------------------------------- 会话
+    def _session(self, session_id: str) -> _Session:
+        key = session_id or "anon"
+        with self._sessions_lock:
+            sess = self._sessions.get(key)
+            if sess is None:
+                sess = _Session()
+                self._sessions[key] = sess
+            sess.last_used = time.time()
+            self._sessions.move_to_end(key)
+            while len(self._sessions) > MAX_SESSIONS:
+                evicted, _ = self._sessions.popitem(last=False)
+                logger.info("会话数超上限，淘汰最久未用：%s", evicted)
+            return sess
+
+    def reset(self, session_id: str) -> None:
+        with self._sessions_lock:
+            self._sessions.pop(session_id or "anon", None)
+
+    def session_count(self) -> int:
+        with self._sessions_lock:
+            return len(self._sessions)
+
+    def session_turns(self, session_id: str) -> int:
+        with self._sessions_lock:
+            sess = self._sessions.get(session_id or "anon")
+            return sess.turns if sess else 0
+
+    # ---------------------------------------------------------------- 推进
+    def advance(
+        self,
+        session_id: str,
+        question: str,
+        *,
+        want_booking: bool = False,
+        confirmed: bool = False,
+    ) -> ClinicalTurn:
+        sess = self._session(session_id)
+        pipeline = self.pipeline()
+        turn = pipeline.advance(
+            question,
+            state=sess.intake,
+            want_booking=want_booking,
+            confirmed=confirmed,
+            patient_id="anon",
+        )
+        sess.turns += 1
+        turn_typed: ClinicalTurn = turn
+        return turn_typed
+
+
+# ===========================================================================
+# 协议转换
+# ===========================================================================
+def _assessment_payload(a: ClinicalAssessment | None) -> dict[str, Any]:
+    if a is None:
+        return {}
+    return {
+        "urgency": a.urgency,
+        "patient_summary": a.patient_summary,
+        "departments": [
+            {"name": d.name, "confidence": d.confidence, "reason": d.reason} for d in a.departments
+        ],
+        "differentials": [
+            {"condition": d.condition, "likelihood": d.likelihood, "rationale": d.rationale}
+            for d in a.differentials
+        ],
+        "exams": [{"name": e.name, "why": e.why} for e in a.exams],
+        "medications": [{"name": m.name, "drug_class": m.drug_class, "why": m.why} for m in a.medications],
+        "followup_questions": list(a.followup_questions),
+        "citations": [{"title": c.title, "source_url": c.source_url} for c in a.citations],
+    }
+
+
+def to_payload(turn: ClinicalTurn, session_id: str, *, turns: int = 0) -> dict[str, Any]:
+    """把一轮产物转成前端契约。
+
+    `emergency` 的判定**不依赖模型**：红线阳性一律为真（见模块文档）。
+    """
+    assessment = turn.assessment
+    model_emergency = bool(assessment is not None and assessment.urgency == "emergency")
+    emergency = bool(turn.red_line_positive) or model_emergency
+    payload: dict[str, Any] = {
+        "session_id": session_id,
+        "action": turn.action,
+        "message": turn.message,
+        "emergency": emergency,
+        "red_line_positive": bool(turn.red_line_positive),
+        "emergency_note": EMERGENCY_NOTE if emergency else "",
+        "disclaimer": DISCLAIMER,
+        "degraded": turn.degraded,
+        "problems": list(turn.problems),
+        "prompt_version": turn.prompt_version,
+        "turns": turns,
+        "intake": {
+            "filled": dict(turn.intake.filled),
+            "asked": dict(turn.intake.asked),
+            "unfillable": list(turn.intake.unfillable()),
+        },
+        "skill": (
+            {
+                "ok": turn.skill.ok,
+                "stopped_at": turn.skill.stopped_at,
+                "needs_confirmation": turn.skill.needs_confirmation,
+                "message": turn.skill.message,
+                "steps_done": list(turn.skill.steps_done),
+                "data": dict(turn.skill.data),
+            }
+            if turn.skill is not None
+            else None
+        ),
+    }
+    payload.update(_assessment_payload(assessment))
+    bundle = turn.evidence
+    payload["evidence"] = (
+        [
+            {"id": i.id, "kind": i.kind, "text": i.text[:400], "score": i.score}
+            for i in (bundle.items if bundle else [])
+        ]
+        if bundle
+        else []
+    )
+    payload["red_line_word"] = (
+        bundle.red_line.word if bundle is not None and bundle.red_line is not None else ""
+    )
+    return payload
+
+
+# ===========================================================================
+# 路由
+# ===========================================================================
+def build_consult_router(
+    *,
+    runtime_provider: Callable[[Request], Any],
+    page_path: Path,
+    pipeline: Any = None,
+) -> APIRouter:
+    """构造 `/consult` 路由。
+
+    `runtime_provider` 由 `create_app` 注入（返回 clinic 域的运行时对象），
+    这样本模块既不 import `app`（避免循环导入），又能复用同一份 store/embedder。
+    `pipeline` 是测试接缝：传了就直接用，不装配真管线（见 `ConsultRuntime.__init__`）。
+    """
+    router = APIRouter(tags=["consult"])
+    runtimes: dict[int, ConsultRuntime] = {}
+    runtimes_lock = threading.Lock()
+
+    def _rt(request: Request) -> ConsultRuntime:
+        key = id(request.app)
+        with runtimes_lock:
+            rt = runtimes.get(key)
+            if rt is None:
+                rt = ConsultRuntime(runtime_provider(request), pipeline=pipeline)
+                runtimes[key] = rt
+            return rt
+
+    @router.get("/consult", response_class=HTMLResponse)
+    def consult_page() -> HTMLResponse:
+        if not page_path.is_file():
+            return HTMLResponse(f"<h1>交互式问诊页缺失</h1><p>未找到 {page_path}</p>", status_code=500)
+        return HTMLResponse(page_path.read_text(encoding="utf-8"))
+
+    @router.post("/consult")
+    def consult(request: Request, body: ConsultRequest) -> dict[str, Any]:
+        rt = _rt(request)
+        try:
+            turn = rt.advance(
+                body.session_id,
+                body.question,
+                want_booking=body.want_booking,
+                confirmed=body.confirmed,
+            )
+        except RuntimeError as e:
+            # 索引没建好是**可预期的运维状态**，给出可执行的指引而不是 500 堆栈
+            raise HTTPException(status_code=503, detail=str(e)) from e
+        return to_payload(turn, body.session_id, turns=rt.session_turns(body.session_id))
+
+    @router.post("/consult/reset")
+    def consult_reset(request: Request, body: ResetRequest) -> dict[str, Any]:
+        _rt(request).reset(body.session_id)
+        return {"ok": True, "session_id": body.session_id}
+
+    @router.get("/consult/status")
+    def consult_status(request: Request) -> dict[str, Any]:
+        """运维可见性：会话数、管线是否已装配、补全映射表条数。
+
+        **不触发管线装配**（那会加载嵌入器），所以这个端点便宜、可以随便探。
+        """
+        from kubedocs.clinical.triage import load_department_map
+
+        rt = _rt(request)
+        dep_map = load_department_map(min_confidence="high")
+        return {
+            "sessions": rt.session_count(),
+            "max_sessions": MAX_SESSIONS,
+            "pipeline_built": rt._pipeline is not None,  # noqa: SLF001
+            "department_map_entries": len(dep_map),
+            "department_map_warning": (
+                "" if dep_map else "空：data/clinic/department_map.json 缺失 ⇒ 分诊退化为只解析卡片正文"
+            ),
+            "session_store": "in-process（重启即丢，多副本不共享）",
+            "emergency_flag": "服务端强制：red_line_positive ⇒ emergency=true，不看模型判断",
+        }
+
+    return router

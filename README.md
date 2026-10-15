@@ -35,7 +35,7 @@ python -m kubedocs.cli --hf-offline eval --gate   # 评测并卡闸门
 | **clinic 检索轨真正接通** | ✅ 已验证（`DomainPack` 自报语料/归一化/嵌入，`ingest` 走 `pack.build_index()`）：`--domain clinic` 自动用 **jieba 分词 + `bge-small-zh-v1.5`（512 维）**，全量 **31,592 块**已建成，`verify_fts()`/`verify_vec()` 均 ok，中文查询真实命中。**此前 `--domain` 只换索引目录**，语料/归一化/嵌入仍是 k8s 默认值 |
 | 观测：`/metrics` + OTel + `log_level` 生效 | ✅ 已完成（`src/kubedocs/observability.py`）；`otel_enable` 默认关，显式打开才导出 |
 | P2 agent 内核（图 / 工具 / 持久化 / 中断） | ✅ 已完成（`agent/` 13 个模块：LangGraph `StateGraph` + 工具循环 + `InMemorySaver` + `interrupt` 续跑；单测在闸门内） |
-| P5 FastAPI + 对话前端 | ✅ 已完成（`api/app.py` **9 个**端点：`/healthz` `/metrics` `/domains` `/tools` `/search` `/ask` `/chat` `/` `/console`，+ `data/web/index.html` 演示页 + `data/web/console.html` 控制台 + `scripts/smoke_api.py` 冒烟） |
+| P5 FastAPI + 对话前端 | ✅ 已完成（`api/app.py` **9 个**端点：`/healthz` `/metrics` `/domains` `/tools` `/search` `/ask` `/chat` `/` `/console`，+ `data/web/index.html` 演示页 + `data/web/console.html` 控制台 + `scripts/smoke_api.py` 冒烟；另有 `api/consult.py` 的 `/consult` 交互式临床问诊 4 个端点） |
 | 一键启动（Windows） | ✅ 已验证（`start.cmd`：挑端口 → 起服务 → 轮询到**索引非空** → 开控制台页）。实测：8080 被占时自动跳到 8081；已有可用实例时默认附着（`--force` 强制另起） |
 | `docker compose up` 全栈 | ✅ **已实测**（2026-10-13/14，Docker 29.8）：db + api 起来、健康检查通过、`/healthz` 报 **18822 块**（2026-10-14 重灌后）、`/metrics` 200、`/search` 真实命中（`overlap=13`，两路都参与融合）、`/chat` 的 SSE 红线**确定性转急诊**。过程中发现并修掉 4 个真实缺陷，见下面「Docker 全栈实测」 |
 
@@ -282,6 +282,22 @@ start.cmd
 | `/console` | 控制台：索引体检、`/metrics` 摘要（含非 2xx 单独计数）、每路检索名次、`/ask` 的降级原因、问诊 SSE 轨迹 |
 | `/` | 演示页：检索 / 工具清单 / 问诊的最小示例 |
 | `/patient` | 患者端：**只**保留问诊 agent（无域选择、无 API 地址、无 top_k、无指标），面向真实使用者 |
+| **`/consult`** | **交互式临床问诊（多轮）**：科室建议 + 病症排序 + 检查/用药建议 + 确定性急诊红线。走 `ClinicalPipeline`（契约化输出），不是 `/patient` 那条图 + 工具循环的老路径 |
+
+### 交互式问诊（`/consult`）：自己点着测
+
+起服务后直接开 <http://127.0.0.1:8080/consult>（本机另起实例时用 `--port` 指定的端口）：
+
+```bash
+.venv/Scripts/python.exe -m kubedocs.cli --domain clinic serve --port 8082
+```
+
+- **多轮采问**：`session_id` 复用同一份 `IntakeState`，最多追问 `MAX_ASK` 次就收敛，不会无限问；
+- **急诊红线由服务端强制**：`RiskGuard` 判出危险信号时，响应里 `emergency=true` 并带固定
+  `emergency_note`（120 / 急诊），**不管模型把 urgency 判成什么**——前端只渲染、不二次判断；
+- **降级会说**：模型没走通时页面顶部显示黄色提示，不会把兜底文案伪装成模型结论；
+- **会话在进程内**：重启即丢、多副本不共享（`GET /consult/status` 会直接这么告诉你）；
+- 端点：`GET /consult`（页面）、`POST /consult`（推进一轮）、`POST /consult/reset`、`GET /consult/status`。
 
 ### 把工具暴露给外部客户端（MCP）
 

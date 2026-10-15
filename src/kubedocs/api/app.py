@@ -77,6 +77,7 @@ from fastapi.responses import HTMLResponse, Response
 from sse_starlette.sse import EventSourceResponse, ServerSentEvent
 
 from kubedocs.agent.tools import ToolRegistry
+from kubedocs.api.consult import CONSULT_HTML, build_consult_router
 from kubedocs.api.schemas import (
     AskRequest,
     AskResponse,
@@ -129,6 +130,11 @@ STATS_TTL_S = 2.0
 
 PATIENT_HTML = ("data", "web", "patient.html")
 """患者端页面。**只**保留问诊 agent，面向真实使用者（见 `patient` 端点的说明）。"""
+
+# `CONSULT_HTML` 由 `kubedocs.api.consult` 定义并 import（单一来源，避免两处不一致）。
+# 与 `patient.html` 的区别：`patient` 走的是**图 + 工具循环**那条老路径，
+# `consult` 走的是 `ClinicalPipeline`（契约化输出 + 确定性红线 + 检索式分诊）。
+# 两者并存是有意的：老路径可用，新路径要看它到底能不能用起来。
 
 
 # ===========================================================================
@@ -702,6 +708,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.state.index_html = repo_root().joinpath(*INDEX_HTML)
     app.state.console_html = repo_root().joinpath(*CONSOLE_HTML)
     app.state.patient_html = repo_root().joinpath(*PATIENT_HTML)
+    app.state.consult_html = repo_root().joinpath(*CONSULT_HTML)
     app.state.runtimes_lock = threading.Lock()
     app.state.agent_lock = threading.Lock()
     app.state.clinic_agent = None
@@ -715,6 +722,15 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.state.runtimes = {cfg.domain: current}
     app.state.store = current.store  # 约定：当前域的 store 挂在 app.state.store
     _register_tools()
+
+    # 交互式问诊（`/consult`）：装配 `ClinicalPipeline`，**复用 clinic 域的同一份
+    # store / embedder**（不重复加载模型）。运行时对象惰性构造，见 consult.py。
+    app.include_router(
+        build_consult_router(
+            runtime_provider=lambda req: _runtime_for_app(req.app, "clinic"),
+            page_path=app.state.consult_html,
+        )
+    )
 
     @app.middleware("http")
     async def _observe_requests(request: Request, call_next: Any) -> Any:

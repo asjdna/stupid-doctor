@@ -23,6 +23,31 @@
 一轮以"关闭真实缺陷 + 抹平文档与实现的自相矛盾"为目标的改动。每一条都标注了
 **怎么验证**，而不是只写"已修复"。
 
+### Added — 交互式临床问诊 `/consult`（可自己点着测）
+
+- **`src/kubedocs/api/consult.py` + `data/web/consult.html`**：把 `ClinicalPipeline`
+  真正装配起来的那个点（此前 `clinical/__init__.py` 只导出、不构造，所以"补全映射表 +14 点"
+  这类收益线上拿不到）。四个端点：`GET /consult`（页面）、`POST /consult`（推进一轮）、
+  `POST /consult/reset`、`GET /consult/status`。
+- **页面内容**：对话 + 多轮采问、分诊科室（带置信度条）、可能病症（带可能性标签）、
+  建议检查、用药提示（**只列药名类别不带剂量**）、小结与证据、原始 JSON 折叠区、
+  顶部急诊横幅与降级提示、免责声明。
+- **复用 clinic 域同一份 store / embedder**（不重复加载模型）；管线惰性装配一次并缓存。
+- **`RetrievalTriage(department_map=load_department_map(min_confidence="high"))`**：
+  把 §5.1 实测 +14 点的补全表接进线上路径。表缺失时**记 warning 并退化为解析正文**，
+  不静默当成"没有这项收益"。
+- **急诊红线由服务端强制**：`red_line_positive ⇒ emergency=true` 且带固定 `emergency_note`
+  （120 / 急诊），**不看模型把 urgency 判成什么**——`to_payload()` 的这条逻辑有参数化回归测试
+  （`routine` / `urgent` 两种都必须报急诊）。前端只渲染，不写第二份判断。
+- **会话在进程内**：`session_id` 复用 `IntakeState`，条数上限 200、最久未用淘汰；
+  **重启即丢、多副本不共享**——这一点由 `GET /consult/status` 直接吐出来，不假装有持久化。
+- **索引不可用 = 503 + 可执行指引**，不是 500 堆栈（`klubedocs ingest` 建索引）。
+- **实测（本机 8082，真调模型）**：普通口语主诉 → `action=answer`、`degraded=''`、
+  科室 `中医科(0.6)/呼吸内科(0.5)/传染科(0.3)`、10 条证据、契约校验 0 问题；
+  `「我胸痛，喘不上气」` → `action=emergency`、`emergency=true`、`red_line_word='胸痛'`、
+  文案含 120；`「嗯嗯好的谢谢你」` → 不乱给科室。
+  回归测试：`tests/unit/test_consult_api.py`（12 条，用假管线，不联网不花钱）。
+
 ### Added — 分诊金标 C2：从 5 条扩到 71 条（按原型标准派生）
 
 - **新增 `scripts/build_triage_gold.py`**：依据全部来自原型，不是我编的——

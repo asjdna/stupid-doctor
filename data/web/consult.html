@@ -1,0 +1,280 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>在线问诊 · 交互测试</title>
+<style>
+  :root {
+    --bg:#0b1220; --panel:#131c2e; --panel2:#1b2740; --line:#2a3a58;
+    --fg:#e8eefc; --dim:#93a4c4; --accent:#4f8cff; --ok:#31c48d; --warn:#f0b429; --bad:#f04d4d;
+  }
+  * { box-sizing:border-box; }
+  body { margin:0; background:var(--bg); color:var(--fg);
+    font:15px/1.6 -apple-system,"Segoe UI","Microsoft YaHei",sans-serif; }
+  header { padding:16px 20px; border-bottom:1px solid var(--line);
+    display:flex; align-items:baseline; gap:12px; flex-wrap:wrap; }
+  header h1 { margin:0; font-size:17px; }
+  header .sub { color:var(--dim); font-size:13px; }
+  header .spacer { flex:1; }
+  .wrap { max-width:1080px; margin:0 auto; padding:18px 20px 80px; }
+  .grid { display:grid; grid-template-columns:1fr 1fr; gap:16px; }
+  @media (max-width:860px){ .grid{ grid-template-columns:1fr; } }
+  .card { background:var(--panel); border:1px solid var(--line); border-radius:10px; padding:14px 16px; }
+  .card h2 { margin:0 0 10px; font-size:14px; color:var(--dim); font-weight:600;
+    letter-spacing:.04em; text-transform:uppercase; }
+  .banner { border-radius:10px; padding:14px 16px; margin-bottom:16px; display:none; }
+  .banner.emergency { display:block; background:#3a1111; border:1px solid var(--bad); }
+  .banner.emergency .t { color:#ffb4b4; font-weight:700; font-size:16px; margin-bottom:6px; }
+  .banner.emergency .n { color:#ffd9d9; }
+  .banner.warn { display:block; background:#3a2c08; border:1px solid var(--warn); color:#ffe6a8; }
+  .banner.disc { display:block; background:var(--panel2); border:1px solid var(--line);
+    color:var(--dim); font-size:13px; }
+  #log { min-height:180px; max-height:46vh; overflow-y:auto; padding-right:4px; }
+  .msg { margin-bottom:12px; }
+  .msg .who { font-size:12px; color:var(--dim); margin-bottom:3px; }
+  .msg .bubble { padding:9px 12px; border-radius:9px; white-space:pre-wrap; word-break:break-word; }
+  .msg.me .bubble { background:#22355a; }
+  .msg.sys .bubble { background:var(--panel2); border:1px solid var(--line); }
+  .msg.ask .bubble { background:#243a2e; border:1px solid #2f5f47; }
+  form { display:flex; gap:8px; margin-top:12px; }
+  textarea { flex:1; background:var(--panel2); color:var(--fg); border:1px solid var(--line);
+    border-radius:9px; padding:10px 12px; font:inherit; resize:vertical; min-height:52px; }
+  button { background:var(--accent); color:#fff; border:0; border-radius:9px;
+    padding:0 18px; font:inherit; font-weight:600; cursor:pointer; }
+  button.ghost { background:transparent; border:1px solid var(--line); color:var(--dim); }
+  button:disabled { opacity:.5; cursor:not-allowed; }
+  .kv { display:flex; gap:8px; font-size:13px; color:var(--dim); margin-top:8px; flex-wrap:wrap; }
+  .pill { border:1px solid var(--line); border-radius:999px; padding:1px 9px; font-size:12px; }
+  .pill.bad { border-color:var(--bad); color:#ffb4b4; }
+  .pill.ok { border-color:var(--ok); color:#a6f0cd; }
+  .row { padding:8px 0; border-bottom:1px dashed var(--line); }
+  .row:last-child { border-bottom:0; }
+  .row .name { font-weight:600; }
+  .bar { height:6px; background:var(--panel2); border-radius:3px; overflow:hidden; margin-top:5px; }
+  .bar > i { display:block; height:100%; background:var(--accent); }
+  .why { color:var(--dim); font-size:13px; margin-top:3px; }
+  .like { font-size:12px; padding:0 7px; border-radius:4px; margin-left:6px;
+    background:var(--panel2); color:var(--dim); border:1px solid var(--line); }
+  .like.high { color:#ffb4b4; border-color:#5c2b2b; }
+  .like.medium { color:#ffe6a8; border-color:#5c4a1a; }
+  .empty { color:var(--dim); font-size:13px; }
+  details { margin-top:8px; }
+  summary { cursor:pointer; color:var(--dim); font-size:13px; }
+  pre { background:var(--panel2); border:1px solid var(--line); border-radius:8px;
+    padding:10px; overflow:auto; font-size:12px; max-height:240px; }
+  .ev { font-size:12px; color:var(--dim); padding:5px 0; border-bottom:1px dashed var(--line); }
+  .ev b { color:var(--fg); font-weight:600; }
+</style>
+</head>
+<body>
+<header>
+  <h1>在线问诊 · 交互测试</h1>
+  <span class="sub">科室建议 / 病症排序 / 检查用药建议 / 多轮采问</span>
+  <span class="spacer"></span>
+  <span class="sub" id="sid"></span>
+  <button class="ghost" id="reset" type="button">重新开始</button>
+</header>
+
+<div class="wrap">
+  <div class="banner emergency" id="emg">
+    <div class="t">⚠️ 请立即就医</div>
+    <div class="n" id="emgtext"></div>
+  </div>
+
+  <div class="banner warn" id="degraded"></div>
+
+  <div class="grid">
+    <div class="card">
+      <h2>对话</h2>
+      <div id="log"></div>
+      <form id="f">
+        <textarea id="q" placeholder="用您自己的话描述不舒服的地方，例如：这两天老咳嗽，还有点低烧" autofocus></textarea>
+        <button id="send" type="submit">发送</button>
+      </form>
+      <div class="kv">
+        <span class="pill" id="turnpill">第 0 轮</span>
+        <span class="pill" id="actpill">等待输入</span>
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>分诊建议</h2>
+      <div id="depts"><div class="empty">还没有结果</div></div>
+
+      <h2 style="margin-top:16px">可能病症（排序）</h2>
+      <div id="diffs"><div class="empty">还没有结果</div></div>
+    </div>
+
+    <div class="card">
+      <h2>建议检查</h2>
+      <div id="exams"><div class="empty">还没有结果</div></div>
+
+      <h2 style="margin-top:16px">用药提示</h2>
+      <div id="meds"><div class="empty">还没有结果</div></div>
+      <div class="kv" style="margin-top:8px">
+        <span class="sub" style="font-size:12px;color:var(--dim)">
+          仅列药名类别，不含剂量——开药需医生面诊。
+        </span>
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>小结与依据</h2>
+      <div id="summary"><div class="empty">还没有结果</div></div>
+      <details>
+        <summary>检索到的知识卡片（点击展开）</summary>
+        <div id="ev"></div>
+      </details>
+      <details>
+        <summary>原始响应 JSON（排障用）</summary>
+        <pre id="raw">—</pre>
+      </details>
+    </div>
+  </div>
+
+  <div class="banner disc" style="margin-top:16px" id="disc"></div>
+</div>
+
+<script>
+const $ = (id) => document.getElementById(id);
+const SID_KEY = "kubedocs.consult.sid";
+let sid = sessionStorage.getItem(SID_KEY);
+if (!sid) {
+  sid = (crypto.randomUUID ? crypto.randomUUID() : String(Date.now()) + Math.random()).slice(0, 36);
+  sessionStorage.setItem(SID_KEY, sid);
+}
+$("sid").textContent = "会话 " + sid.slice(0, 8);
+
+function esc(s) {
+  return String(s == null ? "" : s).replace(/[&<>"]/g, (c) =>
+    ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+}
+function addMsg(who, text, cls) {
+  const d = document.createElement("div");
+  d.className = "msg " + (cls || "sys");
+  d.innerHTML = '<div class="who">' + esc(who) + '</div><div class="bubble">' + esc(text) + "</div>";
+  $("log").appendChild(d);
+  $("log").scrollTop = $("log").scrollHeight;
+  return d;
+}
+function rows(el, items, render) {
+  if (!items || !items.length) { el.innerHTML = '<div class="empty">没有返回这一项</div>'; return; }
+  el.innerHTML = items.map(render).join("");
+}
+const LIKE = { high: "可能性高", medium: "可能性中", low: "可能性低" };
+
+function paint(p) {
+  $("raw").textContent = JSON.stringify(p, null, 2);
+  $("turnpill").textContent = "第 " + (p.turns || 0) + " 轮";
+  const ACT = { ask:"继续采问", answer:"已给出建议", error:"出错了", booking:"挂号流程" };
+  $("actpill").textContent = ACT[p.action] || p.action;
+
+  // 急诊：**由服务端判定**，客户端只负责渲染（避免两处判断不一致）
+  if (p.emergency) {
+    $("emgtext").textContent = p.emergency_note || "请立即拨打 120 或前往急诊科。";
+    $("emg").classList.add("emergency");
+  } else {
+    $("emg").classList.remove("emergency");
+  }
+  // 降级提示：没走通模型时必须说清楚，否则用户会把兜底文案当成模型结论
+  if (p.degraded) {
+    $("degraded").textContent = "⚠️ 本次未走通大模型（" + p.degraded + "），以下内容来自兜底逻辑，仅供参考。";
+    $("degraded").classList.add("warn");
+  } else {
+    $("degraded").classList.remove("warn");
+  }
+  $("disc").textContent = p.disclaimer || "";
+
+  rows($("depts"), p.departments, (d) => {
+    const pct = Math.round((d.confidence || 0) * 100);
+    return '<div class="row"><div class="name">' + esc(d.name) +
+      '<span class="pill">' + pct + '%</span></div>' +
+      '<div class="bar"><i style="width:' + pct + '%"></i></div>' +
+      (d.reason ? '<div class="why">' + esc(d.reason) + "</div>" : "") + "</div>";
+  });
+  rows($("diffs"), p.differentials, (d) =>
+    '<div class="row"><span class="name">' + esc(d.condition) + "</span>" +
+    '<span class="like ' + esc(d.likelihood) + '">' + esc(LIKE[d.likelihood] || d.likelihood) + "</span>" +
+    (d.rationale ? '<div class="why">' + esc(d.rationale) + "</div>" : "") + "</div>");
+  rows($("exams"), p.exams, (e) =>
+    '<div class="row"><span class="name">' + esc(e.name) + "</span>" +
+    (e.why ? '<div class="why">' + esc(e.why) + "</div>" : "") + "</div>");
+  rows($("meds"), p.medications, (m) =>
+    '<div class="row"><span class="name">' + esc(m.name) + "</span>" +
+    (m.drug_class ? '<span class="pill">' + esc(m.drug_class) + "</span>" : "") +
+    (m.why ? '<div class="why">' + esc(m.why) + "</div>" : "") + "</div>");
+
+  let s = "";
+  if (p.patient_summary) s += "<div>" + esc(p.patient_summary) + "</div>";
+  if (p.urgency) s += '<div class="kv"><span class="pill ' +
+    (p.urgency === "emergency" ? "bad" : p.urgency === "urgent" ? "" : "ok") + '">紧急度 ' +
+    esc(p.urgency) + "</span></div>";
+  if (p.followup_questions && p.followup_questions.length)
+    s += '<div class="why">还想了解：' + p.followup_questions.map(esc).join("；") + "</div>";
+  if (p.problems && p.problems.length)
+    s += '<div class="why" style="color:#ffb4b4">契约校验：' + p.problems.map(esc).join("；") + "</div>";
+  if (p.intake && Object.keys(p.intake.filled || {}).length)
+    s += '<div class="why">已采集：' + Object.entries(p.intake.filled)
+      .map(([k, v]) => esc(k) + "=" + esc(v)).join("，") + "</div>";
+  $("summary").innerHTML = s || '<div class="empty">没有返回这一项</div>';
+
+  rows($("ev"), p.evidence, (e) =>
+    '<div class="ev"><b>[' + esc(e.kind) + ']</b> ' + esc(e.text) + "</div>");
+}
+
+async function send(text) {
+  $("send").disabled = true;
+  addMsg("我", text, "me");
+  try {
+    const r = await fetch("/consult", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ question: text, session_id: sid }),
+    });
+    if (!r.ok) {
+      const d = await r.json().catch(() => ({}));
+      addMsg("系统", "请求失败（HTTP " + r.status + "）：" + (d.detail || r.statusText), "sys");
+      return;
+    }
+    const p = await r.json();
+    addMsg(p.action === "ask" ? "医生助理（追问）" : "医生助理", p.message,
+      p.action === "ask" ? "ask" : "sys");
+    paint(p);
+  } catch (e) {
+    addMsg("系统", "网络错误：" + e, "sys");
+  } finally {
+    $("send").disabled = false;
+    $("q").focus();
+  }
+}
+
+$("f").addEventListener("submit", (ev) => {
+  ev.preventDefault();
+  const v = $("q").value.trim();
+  if (!v) return;
+  $("q").value = "";
+  send(v);
+});
+$("reset").addEventListener("click", async () => {
+  await fetch("/consult/reset", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ session_id: sid }),
+  }).catch(() => {});
+  $("log").innerHTML = "";
+  ["depts", "diffs", "exams", "meds", "summary", "ev"].forEach((k) => {
+    $(k).innerHTML = '<div class="empty">还没有结果</div>';
+  });
+  $("raw").textContent = "—";
+  $("emg").classList.remove("emergency");
+  $("degraded").classList.remove("warn");
+  $("turnpill").textContent = "第 0 轮";
+  $("actpill").textContent = "等待输入";
+  addMsg("系统", "已重新开始，请重新描述症状。", "sys");
+});
+
+addMsg("系统", "请用您自己的话描述不舒服的地方。系统会先问 1～2 个关键问题，再给出科室、可能病症、检查与用药建议。", "sys");
+</script>
+</body>
+</html>
