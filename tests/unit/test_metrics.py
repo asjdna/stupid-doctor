@@ -34,7 +34,6 @@ def test_hit_and_mrr():
 
 
 def test_recall_counts_multiple_targets():
-    # k=2 时只看到 a,b，两个目标里命中一个
     assert recall_at_k(RANKED, {"a", "c"}, 2) == pytest.approx(0.5)
     assert recall_at_k(RANKED, {"a", "c"}, 4) == pytest.approx(1.0)
 
@@ -43,7 +42,6 @@ def test_ndcg_matches_hand_computation():
     # 命中在位置 2：DCG = 1/log2(3)；理想 DCG = 1/log2(2)
     expected = (1 / math.log2(3)) / 1.0
     assert ndcg_at_k(RANKED, {"b"}, 4) == pytest.approx(expected)
-    # 命中在位置 1 时 nDCG 必须是 1.0（上界）
     assert ndcg_at_k(RANKED, {"a"}, 4) == pytest.approx(1.0)
 
 
@@ -54,8 +52,7 @@ def test_ndcg_penalises_lower_rank():
 
 
 def test_duplicate_docs_do_not_inflate_scores():
-    """同一文档的多个块命中是常态：去重后不该被算成两次命中。
-    这里传入的已经是文档级序列（同一文档出现两次）。"""
+    """同一文档的多个块命中是常态：文档级序列去重后不该被算成两次命中。"""
     dupes = ["a", "a", "b"]
     assert recall_at_k(dupes, {"a", "b"}, 3) == pytest.approx(1.0)
     assert recall_at_k(dupes, {"a"}, 3) == pytest.approx(1.0)  # 不是 2.0

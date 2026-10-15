@@ -1,4 +1,4 @@
-"""检索层：多路召回 + 融合 + 重排。"""
+"""检索层：多路召回（BM25 + 向量）+ RRF 融合 + 可选精排。"""
 
 from __future__ import annotations
 

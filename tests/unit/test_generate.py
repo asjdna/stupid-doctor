@@ -1,6 +1,6 @@
 """回答生成测试：引用核对、拒答、预算、无密钥降级。
 
-全部用打桩 LLM：CI 与单测**不调用真实模型、不花一分钱、不依赖密钥**。
+全部走打桩 LLM：不联网、不调真实模型、不需要密钥。
 """
 
 from __future__ import annotations
@@ -34,8 +34,7 @@ from kubedocs.store.base import ChunkHit
 class StubLLM:
     """返回固定文本，并记录是否被调用过。
 
-    "是否被调用"是可断言的**成本与诚实性指标**：检索为空时调用 LLM
-    既浪费钱，又给了模型凭空作答的机会。
+    调用次数本身是断言对象：检索为空时调用 LLM 既花钱又给它凭空作答的机会。
     """
 
     def __init__(
@@ -112,7 +111,7 @@ class TestBuildContext:
         assert cites[0].source_url.startswith("https://kubernetes.io/docs/")
 
     def test_dropped_chunk_is_not_citable(self):
-        """只给了模型一部分片段，却允许它引用全部编号——引用错位的常见来源。"""
+        """契约：被丢弃的片段不进上下文，其编号也不可引用（引用错位的常见来源）。"""
         hits = [_hit(1, body="x" * 100), _hit(2, body="y" * 1000)]
         ctx, cites = build_context(hits, max_chars=200, per_chunk_chars=1000)
         assert len(cites) == 1
@@ -131,10 +130,9 @@ class TestBuildContext:
 
 
 class TestContextDiversity:
-    """同篇相邻小节的向量高度相似，会一起涌进前几名。
+    """同一篇文档的相邻小节向量高度相似，容易一起挤进前几名。
 
-    实测一次真实查询的前 4 段里有 3 段来自同一篇文档：既挤掉别的来源，
-    也让上下文冗余。限流是上下文组装的标准做法。
+    故默认每篇最多取 2 段：既给别的来源留位置，也降低上下文冗余。
     """
 
     def _hits(self) -> list[ChunkHit]:
@@ -216,7 +214,7 @@ class TestDailyBudget:
     def test_zero_limit_means_unlimited(self, tmp_path: Path):
         b = DailyBudget(tmp_path / "spend.json", 0.0)
         b.record(99.0)
-        b.check()  # 不抛
+        b.check()
 
     def test_corrupt_file_does_not_break_service(self, tmp_path: Path):
         p = tmp_path / "spend.json"
@@ -231,11 +229,10 @@ class TestDailyBudget:
 
 
 class TestUnknownCostIsNotFree:
-    """缺陷回归：**算不出价不许按 0 记**。
+    """契约：算不出价的调用不许按 0 记账。
 
-    缺陷形态：`LiteLLMClient` / `LiteLLMToolCaller` 都把 `completion_cost()` 的异常
-    吞掉后按 `cost_usd=0.0` 记账 ⇒ 账本上永远是 0 ⇒ `check()` 永远不触发，
-    "日预算上限"对未知模型完全失效（SECURITY.md 的 S-2）。
+    记 0 会让账本永远停在 0、`check()` 永不触发，"日预算上限"对未知模型形同虚设；
+    所以未定价调用按保守上限计入，并单独计数。
     """
 
     def test_unpriced_call_is_charged_the_conservative_ceiling(self, tmp_path: Path):
@@ -243,7 +240,7 @@ class TestUnknownCostIsNotFree:
         b.record(0.0, priced=False)
         assert b.spent_today() == pytest.approx(0.25), "未定价的调用被当成了免费"
         assert b.unpriced_calls_today() == 1
-        assert b.record(0.0, priced=False) == pytest.approx(0.5)  # 逐次累计
+        assert b.record(0.0, priced=False) == pytest.approx(0.5)
 
     def test_unpriced_calls_reach_the_limit_and_then_refuse(self, tmp_path: Path):
         b = DailyBudget(tmp_path / "spend.json", 0.5, unpriced_usd=0.25)
@@ -276,7 +273,7 @@ class TestUnknownCostIsNotFree:
         assert again.spent_today() == pytest.approx(0.25)
 
     def test_legacy_spend_file_still_loads(self, tmp_path: Path):
-        """老格式（`{"日期": 金额}`）必须继续可用：这是**已落盘**的账本。"""
+        """已落盘的老格式账本必须继续可读：升级不能丢掉已有的花费记录。"""
         p = tmp_path / "spend.json"
         today = time.strftime("%Y-%m-%d")
         p.write_text(json.dumps({today: 0.3}), encoding="utf-8")
@@ -287,7 +284,7 @@ class TestUnknownCostIsNotFree:
         assert b.spent_today() == pytest.approx(0.4)
 
     def test_default_fallback_is_a_conservative_positive_number(self):
-        """默认值必须是**正数**：0 就等于"未知 = 免费"，那正是缺陷本身。"""
+        """默认罚金必须为正数：0 等于把"未知"当成"免费"。"""
         assert UNPRICED_CALL_FALLBACK_USD > 0
 
 
@@ -376,34 +373,21 @@ class TestApiKeyDetection:
         assert has_api_key("deepseek/deepseek-chat") is False
 
     def test_env_example_placeholder_is_not_a_key(self, monkeypatch):
-        """`.env` 里留着占位符时必须算"没配密钥"。
+        """占位符文本不算密钥。
 
-        回归的是一个**真实踩到的**坑：占位/说明文本原先会被判为"已配置"，
-        于是 `/ask` 拿着它发起一次注定失败的请求，`degraded` 里回显的是
-        LiteLLM 的原始异常，用户看到的是"模型报错"而不是"你没配密钥"。
+        判成"已配置"会让 `/ask` 拿它发起必然失败的请求，用户看到的是模型异常，
+        而不是"你没配密钥"。
         """
         monkeypatch.setenv("DEEPSEEK_API_KEY", "your-deepseek-api-key-placeholder-here")
         assert has_api_key("deepseek/deepseek-chat") is False
 
     def test_non_ascii_value_is_not_a_key(self, monkeypatch):
-        """**实测逼出来的那条**：本机 `.env` 里留的是一句中文说明（38 字符 / 78 字节，
-        20 个非 ASCII 字符）。
-
-        当时链路是：`has_api_key` 只判非空 ⇒ True ⇒ LiteLLM 把这段值放进 HTTP 头
-        ⇒ 抛 `'ascii' codec can't encode characters in position 9-24`。用户看到的
-        是"模型报错"，指不到"你 `.env` 里写的是一句中文"。
-
-        任何真密钥都是可打印 ASCII（要进 `Authorization` 头），所以这条判据不会误伤。
-        """
+        """非 ASCII 值不算密钥：真密钥要进 `Authorization` 头，必然是可打印 ASCII。"""
         monkeypatch.setenv("DEEPSEEK_API_KEY", "请把你的 DeepSeek 密钥填在这里，留空则不用大模型")
         assert has_api_key("deepseek/deepseek-chat") is False
 
     def test_non_ascii_check_matches_the_real_env_shape(self, monkeypatch):
-        """把本机真实那段的**形态**钉住：38 字符、非全 ASCII、且不含词表里的词。
-
-        这条是上一条的"为什么词表不够"的证据：那段值一个占位符关键词都不含，
-        只有非 ASCII 判据能挡住它。
-        """
+        """词表判据挡不住的值：38 字符、非 ASCII，且不含任何占位符关键词。"""
         shape = "ab" + "填" * 16 + "a" * 11 + "填" * 3 + "a" * 5 + "填"
         assert len(shape) == 38
         assert not shape.isascii()
@@ -430,12 +414,9 @@ class TestApiKeyDetection:
         assert has_api_key("deepseek/deepseek-chat") is False
 
     def test_real_looking_key_still_passes(self, monkeypatch):
-        """黑名单不能误伤真密钥：DeepSeek 的形态是 `sk-` + 32 位随机串。
+        """黑名单不能误伤真密钥：`sk-` + 32 位随机串仍须判为已配置。
 
-        **值在运行时拼装，文件里不留密钥形状的字面量。** 这不是洁癖：
-        原先写成字面量时，GitHub **Push Protection** 把它认成真的 DeepSeek Key，
-        `GH013: Repository rule violations` 直接拒绝整次 push（实测拦过）。
-        拼装出来的字符串仍然满足"`sk-` + 32 位"，所以这条测试的**意图一字未改**。
+        值在运行时拼装，文件里不留密钥形状的字面量，否则密钥扫描会把它当成真 key。
         """
         fake = "sk-" + "0123456789abcdef" * 2
         monkeypatch.setenv("DEEPSEEK_API_KEY", fake)
@@ -488,7 +469,7 @@ class TestAnswerer:
         ans = _answerer(settings, [], llm).answer("q")
         assert ans.refused is True
         assert "没有找到" in ans.refusal_reason
-        assert llm.calls == []  # 关键断言：一次都没调用
+        assert llm.calls == []  # 一次都没调用
 
     def test_missing_key_degrades_but_still_returns_retrieval(self, settings, monkeypatch):
         monkeypatch.delenv("DEEPSEEK_API_KEY", raising=False)
@@ -500,10 +481,9 @@ class TestAnswerer:
         assert any("仅返回检索结果" in d for d in ans.degraded)
 
     def test_provider_error_degrades_instead_of_crashing(self, settings):
-        """供应商侧失败（401/429/超时/宕机）不该让整个请求崩掉。
+        """供应商失败（401/429/超时/宕机）只降级，不让整个请求崩掉。
 
-        检索结果本身有价值：用户应当拿到它 + 一句明确的失败原因，
-        而且异常类型必须记进诊断——否则就成了静默吞异常。
+        用户仍应拿到检索结果和一句明确的失败原因；异常类型必须进诊断，否则就是静默吞异常。
         """
 
         class AuthenticationError(Exception):
@@ -539,7 +519,7 @@ class TestAnswerer:
         assert a.budget.spent_today() == pytest.approx(0.05)
 
     def test_unpriced_cost_is_charged_and_flagged(self, settings):
-        """`/ask` 路径同样不许把"算不出价"当免费（原先 `except: cost = 0.0`）。"""
+        """`/ask` 路径同样不许把算不出价的调用当成免费。"""
         settings.llm_unpriced_call_usd = 0.25
         a = _answerer(settings, [_hit(1)], StubLLM("ok [1]", cost_priced=False))
 
@@ -550,7 +530,7 @@ class TestAnswerer:
         assert any("算不出价" in d for d in ans.degraded), "降级说明里要能看见它"
 
     def test_priced_zero_does_not_touch_the_ledger(self, settings):
-        """真免费的调用不写账本文件（与修复前的行为逐字相同）。"""
+        """定价为 0 的调用不写账本文件。"""
         a = _answerer(settings, [_hit(1)], StubLLM("ok [1]", cost=0.0))
         a.answer("q")
         assert a.budget.spent_today() == 0.0

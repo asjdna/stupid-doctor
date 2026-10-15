@@ -1,39 +1,30 @@
-"""分诊评测：把"症状 → 科室"的准确率测成一个**可复现的数字**。
+"""分诊评测：把"症状 → 科室"的准确率测成一个可复现的数字（离线、免费、确定）。
 
-## 为什么需要派生集（以及它为什么可以被接受）
+人工金标只有 5 条（`data/eval/clinic_gold.jsonl` 的 `triage_department`），不够支撑结论；
+`data/clinic/cards.json` 里 14,440 张卡带 `departments`，正文的「建议就诊科室：X、Y。」
+可稳定解析，于是用**卡片自身内容当查询、它的 `departments` 当期望**派生大规模用例。
 
-人工金标只有 **5 条**（`data/eval/clinic_gold.jsonl` 的 `triage_department`）。
-在 5 条上谈"≥80%"是数字游戏。而 `data/clinic/cards.json` 给了我们大规模测法的依据：
-
-- 31,592 张卡，**14,440 张（45.7%）带 `departments`**；
-- 卡片正文里「建议就诊科室：X、Y。」可稳定解析（前 3000 条与字段零不一致）。
-
-于是可以派生：**用卡片自己的内容当查询、用它的 `departments` 当期望**。
-这是"查询症状名应能召回自己的卡片"那类**语料自洽性**测法 —— 与原型 `rag_gold.jsonl` 同一思路。
-
-## 四个集，口径由松到紧（**必须分开报，不许混成一个数**）
+四个集，口径由松到紧（**必须分开报，不许混成一个数**）：
 
 | 集 | 查询 | 性质 |
 |---|---|---|
-| A 规范名 | 卡片的 `key`（如 `纤毛结构缺陷`） | **上限**：规范名与索引里的键几乎逐字相同，最容易被召回 |
-| **B 去答案描述** | 卡片正文**剥掉「建议就诊科室」那句** | **主口径**：症状描述里不含答案，比 A 接近真实 |
-| C 人工金标 | 5 条真实问法（"我咳嗽还有点发热"） | 人手写、最接近真实，但**只有 5 条**，不足以支撑结论 |
-| **C2 标准派生** | 71 条口语变体（"一直咳"、"拉黑便"） | 由 `scripts/build_triage_gold.py` 按原型 `department_scope.md` 标准派生，**未经医学复核** |
+| A 规范名 | 卡片的 `key`（如 `纤毛结构缺陷`） | **上限**：与索引键几乎逐字相同，最容易被召回 |
+| **B 去答案描述** | 卡片正文剥掉「建议就诊科室」那句 | **主口径**：描述里不含答案，比 A 接近真实 |
+| C 人工金标 | 5 条真实问法（"我咳嗽还有点发热"） | 最接近真实，但只有 5 条，不足以支撑结论 |
+| **C2 标准派生** | 71 条口语变体（"一直咳"、"拉黑便"） | 按原型标准派生，**未经医学复核**（`human_verified=false`） |
 
-**C2 是本节新增的主力口径**：它把样本量从 5 提到 71，且查询是**口语**（这是 C 的意义所在）。
-但它的答案来自标准文档的规则 + 挖掘来的口语变体表，`human_verified=false`——
-**它测的是"对原型标准的符合度"，不是诊断正确性，也不是上线准确率。**
-构造过程中的三道质量闸与它们各自拦下的错例，见 `build_triage_gold.py` 的模块文档。
+C2 测的是"对原型标准的符合度"，B 用的仍是规范表述而非真实问法：**都不是上线准确率。**
 
-**B 也不是真实问法的替代品**：真实患者会说"咳了三天有点烧"，而 B 用的仍是规范表述。
-所以本脚本报的是**语料自洽性与可测基线**，不是"上线准确率"。任何引用这些数字的地方
-都必须带上这句限定。
-
-## 用法
-
-    python scripts/eval_triage.py                      # A/B 各 200 条 + C，全离线免费
+用法：
+    python scripts/eval_triage.py                      # A/B 各 200 条 + C/C2，全离线免费
     python scripts/eval_triage.py --limit 50           # 少抽一点，快
-    python scripts/eval_triage.py --gate 0.8           # 主口径低于 80% 即退出码 1
+    python scripts/eval_triage.py --gate 0.8           # 主口径（B）top-3 低于 80% 即退出码 1
+    python scripts/eval_triage.py --department-map high
+
+前置条件：`data/clinic/cards.json` 与已建好的 clinic 索引；缺 `data/eval/triage_gold.jsonl` 时跳过 C2。
+`--department-map off|high|medium` 启用语料补全映射表，`high` 档需先跑 `clinic_derive_departments.py`，
+表为空时直接以退出码 2 结束，不静默按 off 跑。
+退出码：0 通过 / 1 主口径缺失或低于 `--gate` / 2 映射表为空。
 """
 
 from __future__ import annotations
@@ -52,12 +43,7 @@ sys.path.insert(0, str(REPO / "src"))
 
 from kubedocs.clinical.triage import DEFAULT_PRECISION_K  # noqa: E402
 
-"""`--precision-k` 的默认值**取自模块**，不在这里另写一个数字。
-
-踩过的坑：脚本里写成 `default=10` 而模块是 `DEFAULT_PRECISION_K = 0`（不截断），
-于是同一个旋钮有两个默认值——脚本一直按"截断到 10"跑，而直连探针不截断，
-两边结果一个 40% 一个 80%，我为此白查了一轮"不可复现"。
-**一个旋钮只能有一个默认值。**"""
+"""`--precision-k` 的默认值取自模块常量，不在这里另写数字：一个旋钮只能有一个默认值。"""
 
 CARDS = REPO / "data" / "clinic" / "cards.json"
 GOLD = REPO / "data" / "eval" / "clinic_gold.jsonl"
@@ -162,9 +148,8 @@ def main(argv: list[str] | None = None) -> int:
     if args.department_map != "off":
         dep_map = load_department_map(min_confidence=args.department_map)
         if not dep_map:
-            # **响亮失败**：`data/clinic/` 是 .gitignore 的，换台机器就没有这张表。
-            # 若在这里静默放行，跑出来的其实是 "off" 的数字，却会被当成 "high" 记档——
-            # 那正是"看起来测了、其实没测"的假证据。
+            # 响亮失败：`data/clinic/` 是 .gitignore 的，换台机器就没有这张表；静默放行
+            # 跑出的其实是 "off" 的数字，却会被当成 "high" 记档。
             print(
                 f"[x] --department-map={args.department_map} 但映射表为空"
                 f"（{DEFAULT_DEPARTMENT_MAP} 不存在或该档位无条目）。\n"
@@ -174,8 +159,7 @@ def main(argv: list[str] | None = None) -> int:
             return 2
         print(f"补全映射表：{args.department_map} 档，{len(dep_map):,} 条")
     engine = RetrievalTriage(known_departments=None, precision_k=args.precision_k, department_map=dep_map)
-    """**不约束科室清单**：派生集的期望科室来自卡片数据（42 个），
-    与号源系统的科室名未必一致；约束会把正确答案误判成"不在系统里"。"""
+    """**不约束科室清单**：期望科室来自卡片数据，与号源系统的科室名未必一致。"""
 
     set_a = [(str(c["key"]), list(c["departments"])) for c in sample]
     set_b = [(_DEPT_CLAUSE.sub("", str(c["text"])).strip(), list(c["departments"])) for c in sample]

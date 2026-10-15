@@ -1,20 +1,7 @@
 """`run_tool_loop` 的单测：全打桩，不联网、不调真实模型。
 
-## 为什么必须有"错误回灌"的断言
-
-工具循环最容易写成两种错法："报错就抛"和"报错就静默跳过"。它们在真实模型下都测不出来
-——模型不会抱怨，评测也只看最终回答。所以这里直接抓 `choose` 收到的 messages，断言错误
-文本**真的**进了下一轮的上下文：这是"模型能自我纠正"这个说法的唯一硬证据。
-
-## 为什么每个安全用例都断言 handler 没被调用
-
-"参数不合法 → 不执行""副作用未确认 → 不执行"都是安全属性。只看回答文本看不出工具有没有
-被偷偷执行过，所以这些用例都用记录调用的桩 handler 兜底。
-
-## 为什么打桩要覆盖两种 handler 形状
-
-仓库里 `rag_tools` 写成 `handler(params)`、`clinic.tools` 写成 `handler(**kwargs)`。
-循环的分发逻辑必须同时支持两者，否则"接线"只接得上一半的工具。
+关注三类契约：错误必须回灌进下一轮上下文（直接抓 `choose` 收到的 messages）、安全用例下
+桩 handler 一次都不能被调用、`handler(params)` 与 `handler(**kwargs)` 两种形状都要能驱动。
 """
 
 from __future__ import annotations
@@ -32,16 +19,14 @@ from kubedocs.agent.tools import SearchDocsParams, ToolError, ToolSpec
 
 
 class ScriptExhausted(BaseException):
-    """打桩脚本用尽。
+    """打桩脚本用尽：继承 `BaseException`，避免被循环的 `except Exception` 降级成"没答完"。
 
-    刻意继承 `BaseException` 而不是 `Exception`：循环会用 `except Exception` 把 LLM 的任何
-    异常都降级成"没答完"，于是测试桩自己的"调用次数超出预期"断言会被**静默吞掉**，用例
-    假装通过。这是本文件真实踩过的坑——`max_steps=0` 那次就是被它掩盖成 "DID NOT RAISE"。
+    若继承 `Exception`，脚本用尽会被当成 LLM 失败吞掉，用例就假装通过了。
     """
 
 
 class StubLLM:
-    """按脚本逐次返回的打桩 LLM，同时记下每轮收到的 messages / tools 供断言。
+    """按脚本逐次返回的打桩 LLM，记下每轮 messages / tools 供断言。
 
     脚本里可以塞异常对象：用于验证"LLM 自己炸了"的降级路径。
     """
@@ -98,9 +83,7 @@ def spec_of(
     )
 
 
-# ===========================================================================
-# 正常路径：模型选工具、拿结果、再作答
-# ===========================================================================
+# ------------------------------------------- 正常路径：模型选工具、拿结果、再作答
 class TestHappyPath:
     def test_llm_picks_tool_then_answers(self) -> None:
         """LLM 先选工具、拿到结果后再作答：used_tools 与 steps 都要准确。"""
@@ -126,7 +109,7 @@ class TestHappyPath:
 
     @pytest.mark.parametrize("chosen", ["search_docs", "check_citations"])
     def test_different_tool_names_take_different_paths(self, chosen: str) -> None:
-        """两次打桩返回不同工具名 → 执行的是各自 handler，另一个一次都没跑。"""
+        """参数化两种工具名：只有被选中的那个 handler 执行，另一个一次都没跑。"""
         search, cite = Recorder({"n": 3}), Recorder({"ok": True})
         tools = [spec_of("search_docs", search), spec_of("check_citations", cite)]
         llm = StubLLM(call(chosen, query="同一个问题"), answer("done"))
@@ -194,9 +177,7 @@ class TestHappyPath:
         assert turn.tool_calls[0].result == {"echo": {"query": " 前导空格", "top_k": 5}}
 
 
-# ===========================================================================
-# 错误回灌：不存在 / 参数非法 / handler 失败
-# ===========================================================================
+# ------------------------------------------- 错误回灌：不存在 / 参数非法 / handler 失败
 class TestErrorFeedback:
     def test_unknown_tool_is_fed_back_not_raised(self) -> None:
         """工具名不存在 → 不抛异常、error 非空，且该错误被回灌给下一轮 LLM。"""
@@ -283,9 +264,7 @@ class TestErrorFeedback:
         assert "不是合法 JSON" in llm.messages[1][-1]["content"]
 
 
-# ===========================================================================
-# 有界、安全、降级
-# ===========================================================================
+# --------------------------------------------------------------- 有界、安全、降级
 class TestBoundSafetyDegrade:
     def test_max_steps_bounds_the_loop(self) -> None:
         """max_steps 生效：模型一直要工具也停得下来，notes 写明达到步数上限。"""
@@ -403,9 +382,7 @@ class TestBoundSafetyDegrade:
         assert turn.cost_usd == 0.0
 
 
-# ===========================================================================
-# 真实接线：rag_tools 产出的 ToolSpec 必须能被循环直接驱动
-# ===========================================================================
+# ------------------------------------- 真实接线：rag_tools 的 ToolSpec 能被循环直接驱动
 class TestRagToolsWiring:
     def test_search_tool_from_rag_tools_is_driven_by_the_loop(self) -> None:
         """真实接线：`make_search_tool` 的 ToolSpec 能被循环按 schema 驱动（命中被回灌）。"""
@@ -454,15 +431,11 @@ class TestRagToolsWiring:
         assert "已截断" in refed
 
 
-# ===========================================================================
-# 多轮上下文：history 必须**真的**进模型，且不带 history 时序列逐字不变
-# ===========================================================================
+# ----------------------------------- 多轮上下文：history 必须真的进模型，且不改变默认序列
 class TestHistoryReachesTheModel:
-    """这一组是"多轮上下文有没有丢"的唯一硬证据。
+    """history 必须真的进模型：直接抓 `choose` 收到的 messages 来断言。
 
-    为什么不能只断言"history 参数被接了"：那是个静态事实，改动接线（把 history 传进
-    循环却仍不拼进 messages）照样能通过。这里直接抓 `choose` 收到的 messages 列表——
-    模型拿到什么，就断言什么。
+    只断言"history 参数被接了"是静态事实——参数进了循环却没拼进 messages 照样通过。
     """
 
     HISTORY: list[dict[str, Any]] = [
@@ -494,10 +467,9 @@ class TestHistoryReachesTheModel:
         assert messages[0] == [*self.HISTORY, {"role": "user", "content": "昨天量了 150/95"}]
 
     def test_history_trailing_user_message_is_not_merged_or_reordered(self) -> None:
-        """history 以 user 结尾时**不做合并**（诚实边界：连续两条 user 原样发出）。
+        """history 以 user 结尾时不做合并、不重排，连续两条 user 原样发出。
 
-        这条不是在主张"两条连续 user 是对的"，而是钉住"循环不替调用方猜意图"：
-        合并 content 会改写用户原话，重排会颠倒他说话的先后。
+        合并 content 会改写用户原话，重排会颠倒他说话的先后：循环不替调用方猜意图。
         """
         history: list[dict[str, Any]] = [{"role": "user", "content": "在吗"}]
 
@@ -525,7 +497,7 @@ class TestHistoryReachesTheModel:
         assert messages[0][0] == {"role": "assistant", "content": "稍等"}
 
     def test_caller_history_list_is_not_mutated(self) -> None:
-        """不改调用方的列表：`api/app.py` 把同一份 history 存在 `app.state` 上复用。"""
+        """不改调用方的列表：调用方会把同一份 history 存在应用状态上复用。"""
         history = [dict(item) for item in self.HISTORY]
         before = copy.deepcopy(history)
 
@@ -552,7 +524,7 @@ class TestHistoryReachesTheModel:
 
 
 class TestHistoryDefaultsAreUnchanged:
-    """回归：不传 history 时的消息序列必须与加这个参数之前**逐字相同**。"""
+    """不传 history 时，消息序列就是 system + 本轮 user，不引入任何额外消息。"""
 
     def test_default_none_sends_exactly_system_and_question(self) -> None:
         llm = StubLLM(answer("答"))
@@ -581,10 +553,9 @@ class TestHistoryDefaultsAreUnchanged:
 
 
 class TestInvalidHistoryIsRejectedNotSilentlyDropped:
-    """非法 history 必须**报错**：静默丢弃在日志里与"模型没记住"无法区分。
+    """非法 history 必须报错，不能静默丢弃：丢弃与"模型没记住"无法区分。
 
-    每个用例都断言 `choose` **一次都没被调用**——校验必须发生在请求发出去之前，
-    否则"报错"就变成了"先花一次钱再报错"。
+    每个用例都断言 `choose` 一次都没被调用——校验要发生在请求发出之前，而不是先花钱再报错。
     """
 
     @pytest.mark.parametrize(
@@ -622,15 +593,8 @@ class TestInvalidHistoryIsRejectedNotSilentlyDropped:
             )
 
 
-# ===========================================================================
-# 预算闸门（`budget=`）：缺陷回归组
-#
-# 缺陷形态（SECURITY.md S-2）：`/chat` 的工具循环里，成本只被 `LiteLLMToolCaller`
-# 累加到 `self.cost`、从不与预算比较，而 caller 每轮新建 ⇒ `/chat` 的花费没有上限。
-# 现在的契约：**每次调用模型之前 check()、之后 record()**；check() 抛出的异常
-# **原样上抛**（不许被"LLM 是外部服务"那个 except 降级成一条 note——note 在 /chat
-# 的响应里根本到不了调用方）。
-# ===========================================================================
+# ------------------------- 预算闸门（budget=）：调用前 check()、调用后 record()
+# check() 抛出的异常必须原样上抛，不能被降级成一条 note（note 到不了调用方）。
 class BudgetExceeded(Exception):
     """打桩用的"超限"异常：循环**不认识**这个类型，必须照样上抛。"""
 
@@ -664,13 +628,13 @@ class TestBudgetGateInTheLoop:
         assert budget.checks == 2
 
     def test_default_is_no_budget_check(self) -> None:
-        """不给 `budget=` 时行为与从前逐字相同（打桩循环、离线自检不受影响）。"""
+        """不给 `budget=` 时不做任何预算检查：打桩循环与离线自检照常跑。"""
         llm = StubLLM(answer("答"))
         turn = run_tool_loop("问", tools=[spec_of("search_docs", Recorder())], llm=llm)
         assert turn.answer == "答"
 
     def test_over_budget_stops_calling_the_model(self) -> None:
-        """**关键断言**：超限之后一次模型调用都不发生（不是"先花了再拒"）。"""
+        """超限之后一次模型调用都不发生，而不是"先花了再拒"。"""
         budget = StubBudget(fail_after=1)
         llm = StubLLM(call("search_docs", query="q"), answer("答"), answer("多余的"))
 

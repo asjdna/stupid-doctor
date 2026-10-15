@@ -1,47 +1,31 @@
-"""按原型的**科室导诊标准**构建分诊金标 C 集：`data/eval/triage_gold.jsonl`。
-
-## 为什么要扩金标
-
-原 C 集只有 **5 条**人工手写用例。5 条里 1 条就值 20%，
-"分诊准确率 80%"在这个样本量上**不可复现、不该写进结论**。
-方案 §5.1 已经把"扩到 ≥50 条"列为前置条件。
-
-## 依据的"标准"来自原型（不是我编的）
-
-| 来源文件 | 作用 |
-|---|---|
-| `data/eval/prototype/department_scope.md` | **科室导诊范围标准**：显式给出「症状 → 科室」判据 |
-| `data/eval/prototype/phenomenon_to_symptom.json` | **口语现象 → 规范症状**（300 个规范症状，含大量口语变体） |
-| `data/eval/prototype/disease_to_department.json` | 疾病 → 科室（8,819 条，用于交叉校验） |
-
-原型 `scripts/build_rag_gold.py` 的**金标规范**也照搬：文件首行是 `kind=meta`
-头（含 `built_from` 的语料指纹、抽样策略、`human_verified`、`disclaimer`），
-其余行是 `kind=<类型>` 的条目。原型的 `rag_gold.jsonl` 明确写着
-`"human_verified": false`——**本文件同样如此**，见下面的"诚实边界"。
-
-## 构造规则（确定性，可复现）
-
-1. 从标准文档的「症状 → 科室」规则里取 `(科室, 症状关键词)` 对；
-2. **一个症状同时归属多个科室时直接丢弃**——金标答案必须唯一，
-   （例：`胸痛` 同时出现在呼吸内科"胸痛伴呼吸相关症状"与心内科"胸闷胸痛"，
-   `发热` 在呼吸内科是"发热**伴呼吸道症状**"；这类模糊项进金标只会制造假错）；
-3. 用 `phenomenon_to_symptom.json` 把每个症状关键词换成**口语变体**作查询文本
-   （C 集的意义就是"真实问法"）；
-4. 每个 `(科室, 症状)` 最多取 `--per-symptom` 个变体，跨科室**轮转**选取，
-   避免某个科室/症状主导样本；
-5. 变体优先取**在 clinic 语料里真实存在**的（检索才可能命中），
-   排序键 `(不在语料, 长度, 字典序)` —— 完全确定，无随机。
-
-## 诚实边界（照原型的写法）
-
-- `human_verified: false`：条目的**答案来自标准文档的规则**，不是医学人员逐条复核过；
-- 这是**导诊参考**，不是诊断正确性判定；
-- 用它测出来的数字是"**对原型标准的符合度**"，不是"上线准确率"。
+"""构建分诊金标 C 集 `data/eval/triage_gold.jsonl`，答案取自标准文档的「症状 → 科室」判据。
 
 用法::
 
-    python scripts/build_triage_gold.py --report-only   # 只看覆盖率与排除项
-    python scripts/build_triage_gold.py                  # 写金标
+    python scripts/build_triage_gold.py --report-only        # 只打印覆盖率与排除项
+    python scripts/build_triage_gold.py --per-symptom 2      # 写 `--out`
+
+前置条件：标准文档 `data/eval/prototype/department_scope.md` 与现象表
+`data/eval/prototype/phenomenon_to_symptom.json`（口语现象 → 规范症状），缺任一返回 2；
+`manual_annotation.csv` 可选，用来给口语变体加人工同义词背书；`--cards` 指向 clinic 语料，
+用于交叉校验并优先挑选语料里真实存在的查询词。
+
+构造规则（确定性、无随机）：从标准文档抄录 `(科室, 症状关键词)` 对；同时归属多科室、或
+互为子串且归属不同科室的关键词整条丢弃——金标答案必须唯一；用现象表把关键词换成口语变体，
+按 `(不在语料, 长度, 字典序)` 排序并跨科室轮转，每对最多取 `--per-symptom` 个。
+
+输出：`--out`（默认 `data/eval/triage_gold.jsonl`）为 JSONL。首行 `kind=meta`，含
+`built_from`（卡片语料 sha/数量、标准文件、规则数、抽样策略、被丢弃的歧义关键词）、
+`human_verified: false` 与 `disclaimer`；其余行 `kind=triage_department`，字段 `text`
+（口语查询）、`expect_department`（标准文档给出的科室）、`canonical`（规范症状）、
+`synonym_verified`（是否有 `manual_annotation.csv` 背书）、`source`、`note`。
+
+结果解读：打印按科室分布、查询词在语料中存在的比例，以及标准文档与语料卡片科室的两来源
+一致率——冲突项逐条列出，需人工裁决。`human_verified=false` 说明答案来自标准文档规则而非
+医学人员逐条复核：它测的是「对原型标准的符合度」，不是诊断正确性，也不是上线准确率。
+生成不足 50 条时会提示：上限由标准文档的规则数量决定，不要为凑数放宽规则。
+
+退出码：0 成功 / 2 缺少标准文件。
 """
 
 from __future__ import annotations
@@ -65,12 +49,9 @@ PHENOMENON = PROTO / "phenomenon_to_symptom.json"
 MANUAL_ANNOTATION = PROTO / "manual_annotation.csv"
 
 STANDARD_SECTION = "department_scope.md#科室导诊范围说明"
-"""依据段落：`科室导诊范围.md` 的「本文说明各科室大致覆盖的就诊方向……」
+"""依据段落：`source` 字段回指到标准文档的这一节，便于人工核对。"""
 
-规则按**该文档的原文**逐条抄录，`source` 字段回指到这一节，便于人工核对。
-"""
-
-# (科室, [症状关键词], 文档小节) —— 逐条抄自 department_scope.md，未作引申。
+# (科室, [症状关键词], 文档小节)：逐条抄自标准文档，未作引申。
 RULES: list[tuple[str, list[str], str]] = [
     ("呼吸内科", ["咳嗽", "咳痰", "咯血", "气短", "胸痛", "发热"], "内科系统"),
     ("消化内科", ["腹痛", "腹胀", "反酸", "恶心", "呕吐", "腹泻", "便秘", "呕血", "黑便"], "内科系统"),
@@ -93,7 +74,7 @@ _GENERIC_CHARS = set("的了个是有很都好一二三五几多量些点儿时�
 """虚字/量词：判定"实义字重合"时先剔掉，否则「一直咳」与「咳嗽」只能靠虚字沾边。"""
 
 _BODY_PARTS = set("头面眼耳鼻咽喉口牙舌唇颈肩胸背腰腹肚脐臀腿脚踝膝手胳膊皮肤阴乳肛")
-"""身体部位字。用于「部位冲突」判定——这是第二道闸要拦的东西。"""
+"""身体部位字：用于「部位冲突」判定。"""
 
 _LEAD_STOPWORDS = ("全", "所有", "整个", "无", "不", "没")
 """起首的总括/否定词：「全部痛」「无痛」不是「头痛」的口语说法。"""
@@ -106,27 +87,16 @@ def _clean_variant(v: str) -> str:
 def _plausible_variant(variant: str, canonical: str) -> bool:
     """口语变体必须是**可辨认的同义说法**，否则丢掉。
 
-    **这道闸是必须的**：原型的 `phenomenon_to_symptom.json` 是**挖掘**出来的，
-    含大量伪变体——实测见过 `腰痛 -> 腿疼`、`口臭 -> 胃热/喉咙有痰`、
-    `咳痰 -> 吐好多`、以及 `通痛` 这种 OCR 噪声。拿它们当查询文本，
-    金标答案（标准文档给的科室）会和文本实际含义对不上，
-    整份金标就会被假错污染——**宁可少几条，也不要错的**。
-
-    三道判定，逐条都是被实际错例逼出来的：
-
-    1. **部位冲突**：与规范症状**起首部位字不同**的直接丢。
-       `头痛 -> 乳头疼`（乳≠头）就是这么错的——只按"实义字重合"判它会通过，
-       因为二者都有 `头/疼`。这一条把它拦掉。
-    2. **起首总括/否定词**：`全部痛`、`无痛` 不是症状口语说法。
-    3. 完全同形、互为子串、或实义字有交集（兜底，且要过上面两条）。
+    现象表是挖掘出来的，含大量伪变体（如 `腰痛 -> 腿疼`、`口臭 -> 胃热`、OCR 噪声
+    `通痛`）：拿它们当查询文本，金标答案会与文本实际含义对不上，整份金标被假错污染。
+    三道判定：① 起首是总括/否定词则丢（`全部痛`/`无痛`）；② 起首部位字与规范症状不同
+    则丢（`头痛 -> 乳头疼`）；③ 同形、互为子串或实义字有交集则留（须先过前两道）。
     """
     if variant == canonical:
         return True
     if len(canonical) < 2:
         return False
-    """单字规范症状（`眼`/`耳`/`咽`/`牙`）语义太宽：其变体实测出了
-    `干涩感 -> 眼科`、`有异物 -> 耳鼻喉科`、`出牙血 -> 口腔科` 这类
-    文本里根本没提部位的假题，一律不建。"""
+    """单字规范症状（`眼`/`耳`/`咽`/`牙`）语义太宽：其变体常造出文本里没提部位的假题，一律不建。"""
     if variant.startswith(_LEAD_STOPWORDS):
         return False
     if canonical[0] in _BODY_PARTS and variant[0] in _BODY_PARTS and variant[0] != canonical[0]:
@@ -155,10 +125,10 @@ def _conflicting_keywords() -> set[str]:
 
 
 def _load_manual_synonyms(path: Path) -> set[frozenset[str]]:
-    """原型的人工实体等价标注（`实体1,实体2,标注结果`，标注结果=1 表示同一实体）。
+    """人工实体等价标注（`实体1,实体2,标注结果`，标注结果=1 表示同一实体）。
 
-    这是**第二份独立的人工依据**：如果口语变体与规范症状在这份表里被判为同一实体，
-    该条金标的"查询文本↔规范症状"这一环就有人工背书，不只是我的形态学判定。
+    第二份独立依据：口语变体与规范症状在这份表里被判为同一实体时，该条金标的
+    "查询文本↔规范症状"就有人工背书，不只是形态学判定。
     """
     if not path.is_file():
         return set()
@@ -192,12 +162,10 @@ def _load_colloquial(path: Path) -> dict[str, list[str]]:
 
 
 def _match_canonical(keyword: str, table: dict[str, list[str]]) -> list[str]:
-    """把标准文档里的症状关键词对到现象表的规范症状上。
+    """把标准文档的症状关键词对到现象表的规范症状上：只做前缀匹配，不做子串包含。
 
-    **只用前缀匹配，不用子串包含**——这条是被实测纠过的：用包含匹配时，
-    泌尿科的「绞痛」会匹配到规范症状「心绞痛」，于是造出
-    `「心绞痛」-> 泌尿科` 这种概念完全不同的假金标。
-    前缀匹配下「绞痛」找不到规范症状，就诚实记为"建不出用例"，而不是硬造。
+    包含匹配会把泌尿科的「绞痛」接到规范症状「心绞痛」，造出 `「心绞痛」-> 泌尿科` 这种
+    概念不同的假金标；前缀匹配下「绞痛」找不到规范症状，就诚实记为建不出用例。
     """
     if keyword in table:
         return [keyword]
@@ -240,7 +208,7 @@ def main() -> int:
     if args.cards.is_file():
         card_keys = {str(c.get("key", "")) for c in json.loads(args.cards.read_text(encoding="utf-8"))}
 
-    # 规则 2：症状同时归属多科室 ⇒ 丢弃（金标答案必须唯一）
+    # 同时归属多科室的症状关键词丢弃：金标答案必须唯一
     owner: dict[str, set[str]] = {}
     for dept, keywords, _ in RULES:
         for kw in keywords:
@@ -248,7 +216,7 @@ def main() -> int:
     dropped = sorted({kw for kw, depts in owner.items() if len(depts) > 1} | _conflicting_keywords())
     print(f"标准文档共 {len(owner)} 个症状关键词；因多科室归属/互为子串被丢弃 {len(dropped)} 个：{dropped}")
 
-    # 语料交叉校验用：卡片 key -> 该卡片自己标注的科室（独立于标准文档的第二个来源）
+    # 交叉校验用：卡片 key -> 语料里这张卡自己标注的科室（独立于标准文档）
     corpus_depts: dict[str, list[str]] = {}
     if args.cards.is_file():
         from kubedocs.clinical.triage import departments_in_card
@@ -258,7 +226,7 @@ def main() -> int:
             if deps:
                 corpus_depts.setdefault(str(c.get("key", "")), deps)
 
-    # 每条 (科室, 症状) 先备好候选，再跨科室轮转取用（规则 4）
+    # 先给每条 (科室, 症状) 备好候选，再跨科室轮转取用，避免单个科室/症状主导样本
     per_pair: list[tuple[str, str, str, list[tuple[str, str]]]] = []
     unmapped: list[str] = []
     for dept, keywords, section in RULES:
@@ -269,11 +237,8 @@ def main() -> int:
             if not canon:
                 unmapped.append(f"{dept}/{kw}")
                 continue
-            # 变体要同时满足两件事：
-            #   (a) 与它**真正来源**的那个规范症状像（由 _pick_variants 保证）；
-            #   (b) 与**标准文档的关键词**也像——否则文本读者看不出它属于这一条规则。
-            # 只做 (a) 会漏进 `月经量少 -> 怕量少`：它对「月经量少」成立，
-            # 但把答案记成「月经→妇产科」时，查询文本「怕量少」谁都读不出是月经问题。
+            # 变体既要像它真正来源的规范症状（_pick_variants 保证），也要像标准文档的
+            # 关键词，否则读者看不出这条文本属于哪条规则。
             picked: list[tuple[str, str]] = []
             for c in canon[:3]:
                 for v in _pick_variants(c, table, card_keys, args.per_symptom * 2):
@@ -325,9 +290,8 @@ def main() -> int:
         by_dept[c["expect_department"]] = by_dept.get(c["expect_department"], 0) + 1
     print("按科室分布：", dict(sorted(by_dept.items(), key=lambda kv: -kv[1])))
 
-    # **两来源交叉校验**（诊断，不用于筛选）：标准文档 vs 语料卡片自己的科室标注。
-    # 不一致不是"金标错了"，而是"语料与标准打架"——正是分诊会答错的那些题，
-    # 必须逐条列出来给人看，不能藏。
+    # 两来源交叉校验（只诊断、不筛选）：标准文档 vs 语料卡片自己的科室标注。
+    # 冲突不是"金标错了"，而是语料与标准打架，正是分诊会答错的题——逐条列出供人工裁决。
     agree = disagree = unknown = 0
     conflicts: list[str] = []
     for c in cases:

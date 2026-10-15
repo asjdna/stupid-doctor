@@ -1,9 +1,8 @@
 """LLM 驱动的 clinic 路径测试：红线前置、工具接线、确认策略。
 
-这组测试关心的是**控制流归谁**与**安全不变量是否保住**，而不是回答质量：
-- 红线必须在进入工具循环**之前**判定（命中时 LLM 一次都不该被调用）
-- 工具必须真的注册进注册表（否则循环拿到空 tools，会静默退化成纯对话）
-- 未明确要求挂号时，有副作用的工具必须被拒绝
+关心的只有控制流归谁与安全不变量，不是回答质量：红线必须在进入工具循环之前判定
+（命中时 LLM 一次都不该被调用）；工具必须真的注册进注册表，否则循环拿到空 tools
+会静默退化成纯对话；未明确要求挂号时，有副作用的工具必须被拒绝。
 """
 
 from __future__ import annotations
@@ -146,15 +145,10 @@ class TestConfirmationPolicy:
 
 
 class TestHistoryReachesTheModel:
-    """`/chat` 的多轮上下文必须真的到模型——这是补过的一次真实缺陷。
+    """多轮上下文必须真的进到模型收到的 messages 里。
 
-    缺陷形态：`ClinicReactRuntime.turn` 收下 `history`，拼进一个本地 `messages` 列表，
-    然后**从来没把它交给 `run_tool_loop`**（循环当时也没有这个参数）。`messages` 被
-    `extend` 过，所以连 F841 都不报。结果是工具循环路径的多轮上下文全丢，而
-    `app.state.clinic_history` 那边看起来一切正常。
-
-    这组用例直接抓模型收到的 messages：**只断言"history 被传进 turn 了"是抓不到它的**
-    ——缺陷版同样收下了这个参数。
+    只断言"history 被传进 turn 了"抓不到问题：tool loop 路径可能收下 history
+    却从不使用它，所以这里直接检查模型收到的 messages。
     """
 
     def _capture(
@@ -210,11 +204,9 @@ class TestHistoryReachesTheModel:
 
 
 class TestBudgetIsWiredIntoTheToolLoop:
-    """缺陷回归：`/chat` 的工具循环**必须有**成本上限（SECURITY.md 的 S-2）。
+    """`/chat` 的工具循环必须有成本上限，否则这一路径的花费没有日上限。
 
-    缺陷形态：`DailyBudget` 只在 `Answerer.answer()` 里 `check()`，而 `/chat` 走
-    `LiteLLMToolCaller`——它只把成本累加到 `self.cost`、从不比较；caller 还每轮新建，
-    累加值随对象丢弃 ⇒ `/chat` 的花费没有任何日上限。
+    预算必须在进入循环前收口：每轮只累加成本、从不比较的话，日上限形同虚设。
     """
 
     def test_runtime_builds_a_budget_from_settings(self, tmp_path):
@@ -230,9 +222,7 @@ class TestBudgetIsWiredIntoTheToolLoop:
 
         assert rt.budget.limit == 1.5
         assert rt.budget.unpriced_usd == 0.4
-        # 与 CLI `ask` / `POST /ask` 共用**同一个**花费文件：两条路径算的是同一个钱包，
-        # 各记各的账等于给了两份额度。路径是**全局一份**（不在域目录下）——
-        # 按域分账时，切换 domain 就能把日上限翻成 N 份（见 config.llm_spend_path）。
+        # 与 CLI `ask` / `POST /ask` 共用同一份花费文件，否则日上限会被按域翻倍。
         assert rt.budget.path == settings.llm_spend_path
         assert rt.budget.path == settings.index_root / "llm_spend.json"
         assert settings.domain not in str(rt.budget.path)

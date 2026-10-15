@@ -1,7 +1,7 @@
 """clinic 域包与检索接线测试：卡片 -> 索引 -> 中文检索 -> self-ask 回答。
 
-不加载真实模型：用 HashingEmbedder 建索引起见（**只有 BM25 通道被断言**），
-稠密通道的语义质量由离线全量编码负责。这样测试秒级完成且不联网。
+不加载真实模型：HashingEmbedder 只负责建索引，断言只覆盖 BM25 通道，
+稠密通道的语义质量由离线全量编码负责——测试因此秒级完成且不联网。
 """
 
 from __future__ import annotations
@@ -61,9 +61,7 @@ def _store(settings: Settings) -> SqliteStore:
     )
 
 
-# ===========================================================================
 # 卡片 -> 索引
-# ===========================================================================
 class TestCardsToInputs:
     def test_each_card_becomes_one_doc_and_one_chunk(self):
         docs, chunks = cards_to_inputs(CARDS)
@@ -93,7 +91,7 @@ class TestPackBuildIndex:
             ClinicPack().load_cards()
 
     def test_ingest_then_chinese_bm25_retrieval_works(self, tmp_path, monkeypatch):
-        """核心验收：中文查询能命中中文卡片——这正是 P0 归一化层存在的意义。"""
+        """中文查询必须命中中文卡片：这是归一化层存在的意义。"""
         cards_file = tmp_path / "cards.json"
         cards_file.write_text(json.dumps(CARDS, ensure_ascii=False), encoding="utf-8")
         monkeypatch.setattr("kubedocs.domains.clinic.domain.clinic_cards_path", lambda: cards_file)
@@ -122,9 +120,7 @@ class TestPackBuildIndex:
         assert "呼吸内科" in links["咳嗽"]
 
 
-# ===========================================================================
 # self-ask 接在检索上
-# ===========================================================================
 class _StubDecomposer:
     def __init__(self, subs: list[str] | None = None) -> None:
         self.subs = subs or ["咳嗽可能是什么原因？", "应该去哪个科室？"]
@@ -156,8 +152,7 @@ class TestSelfAskOverClinicIndex:
                 # 只用 BM25 通道：占位向量不该参与断言
                 return retriever.search(query, channels=("bm25",))
 
-            # 注意：needs_decomposition 有长度闸门（默认 ≥12 字），过短的中文问题
-            # 不会被分解——这是有意的（短问题分解只会徒增调用）。所以这里用长问题。
+            # needs_decomposition 有长度闸门（默认 ≥12 字），所以这里必须用长问题
             result = self_ask(
                 "我咳嗽而且头痛，分别该去哪个科室？要不要做检查？",
                 search=search,
@@ -173,9 +168,7 @@ class TestSelfAskOverClinicIndex:
             store.close()
 
 
-# ===========================================================================
 # 域注册
-# ===========================================================================
 class TestClinicDomainRegistration:
     def setup_method(self):
         DomainRegistry.clear()
@@ -193,10 +186,9 @@ class TestClinicDomainRegistration:
         assert DomainRegistry.get("k8s_docs").normalizer_name == "identity"
 
     def test_declared_eval_sets_actually_exist_on_disk(self):
-        """声明的金标集必须真实存在——否则自省输出会变成一个空头承诺。
+        """声明的金标集必须真实存在，否则自省输出只是空头承诺。
 
-        clinic 目前刻意返回空列表（金标集与 A/B 对照在 P4 一起做），
-        所以这里断言的是"**凡声明了就必须存在**"，而不是"每个域都必须有"。
+        断言的是"凡声明了就必须存在"——clinic 刻意返回空列表，空列表合法，假路径不合法。
         """
         from kubedocs.config import repo_root
 

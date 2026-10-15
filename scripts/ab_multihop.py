@@ -1,29 +1,22 @@
-"""多跳对照 + 两轮筛选：初次筛选（可验证的构造规则）→ 精选（单轮真的失手）。
+"""多跳 vs 单轮对照：先筛出有区分度的用例，再比逐跳覆盖率。
 
-## 为什么必须两轮筛选
+用例两轮筛出：初次筛选（确定性、零 LLM 成本）只留每跳要点都能从该跳查询检索到的用例
+——要点在语料里找不到的用例会把"语料没有"伪装成"系统没答对"；精选（只跑单轮）只留单轮
+至少漏一跳要点的用例，否则两路都满分、对照没有信息量；精选不跑多跳，避免事后调集合。
 
-一个"看起来是多跳"的问题集**不等于**能区分单轮与多跳的集合。要让对照有意义，
-必须满足两件事：
-
-1. **可检索性（初次筛选，不花钱）**：每一跳的期望要点必须真的能从该跳的查询里
-   检索到。若某个要点在语料里根本找不到，那条用例就是无效的——它会把
-   "语料没有"伪装成"系统没答对"。这一轮纯确定性，用真实索引跑，零 LLM 成本。
-2. **区分度（精选，要花钱但只跑单轮）**：单轮在这条用例上**必须至少漏掉一跳的要点**。
-   否则无论多跳做得多好，两路都是满分，对照没有信息量。
-   这一轮只跑单轮，因此成本只有对照的一半。
-
-顺序是刻意的：**先做便宜且客观的一轮，再做贵的一轮**；并且精选只用单轮，
-把"多跳"留到集合确定之后才跑——避免看到多跳结果后回头改集合（事后调参）。
-
-## 逐子目标判定
-
-每条用例的每一跳都单独标注 `expect_points`；判定是"该跳的要点至少命中一个"。
-最终指标是**逐跳覆盖率**与**全跳覆盖率**，两路用同一套判定，因此可比。
+判定逐跳进行：每跳的 `expect_points` **全部**命中才算该跳覆盖；指标为 `full_coverage`
+（全跳）与 `hop_coverage`（逐跳），两路同一套判定，因此可比。
 
 用法：
     python scripts/ab_multihop.py --screen            # 只做初次筛选（不花钱）
-    python scripts/ab_multihop.py --select --limit 6  # 精选（只跑单轮）
+    python scripts/ab_multihop.py --select --limit 6  # 初次筛选 + 精选（只跑单轮）
     python scripts/ab_multihop.py --limit 6           # 两轮 + 对照
+
+前置条件：`--gold`（默认 `data/eval/multihop_gold.jsonl`）指向多跳集，索引已建好；
+`--select` 与对照还需 `DEEPSEEK_API_KEY`。
+
+输出：逐条打印每跳命中，末尾按模式对照全跳覆盖 / 逐跳覆盖 / 依赖率 / LLM 调用数 /
+p50 延迟（JSON 写入 `--out`）。退出码：0 正常结束；3 缺少 `DEEPSEEK_API_KEY`。
 """
 
 from __future__ import annotations
@@ -95,7 +88,6 @@ class Planner:
             self.cost = self.cost
         return str(resp.choices[0].message.content or "").strip()
 
-    # --- 多跳协议 ---
     def plan(self, question: str, max_hops: int) -> list[dict[str, Any]]:
         raw = self._chat(
             "把问题拆成一条**有依赖**的多跳链。若后一跳需要用到前一跳的答案，"
@@ -143,10 +135,9 @@ def run_single_shot(question: str, retriever: Any, planner: Planner, *, top_k: i
 
 
 def hop_coverage(answer: str, hops: list[dict[str, Any]]) -> tuple[bool, list[bool]]:
-    """逐跳判定：该跳的要点至少命中一个（大小写不敏感）。"""
+    """逐跳判定：该跳的 `expect_points` 全部命中才算覆盖（大小写不敏感）。"""
     low = answer.lower()
-    # **ALL 而不是 ANY**：一条要点标注的全部点都该被覆盖，否则"覆盖"只是
-    # "碰到了这个话题"。这一收紧在**看多跳结果之前**完成，不构成事后调参。
+    # 每跳的要点必须**全部**命中：否则"覆盖"只等于"碰到了这个话题"。
     per_hop = [all(str(p).lower() in low for p in h.get("expect_points", [])) for h in hops]
     return all(per_hop), per_hop
 
@@ -177,7 +168,6 @@ def main(argv: list[str] | None = None) -> int:
         retriever = HybridRetriever(store, build_embedder(settings), settings)
         retriever.search("warmup", top_k=1)
 
-        # ---------------- 第一轮：初次筛选（确定性，零 LLM 成本） ----------------
         print("【初次筛选】每跳期望要点必须能从该跳查询检索到（确定性，不花钱）")
         screened: list[dict[str, Any]] = []
         for row in rows:
@@ -205,7 +195,6 @@ def main(argv: list[str] | None = None) -> int:
         planner = Planner(settings)
         selected: list[dict[str, Any]] = []
         if args.select:
-            # ---------------- 第二轮：精选（只跑单轮，成本减半） ----------------
             print("\n【精选】只跑单轮；单轮必须至少漏一跳要点才算有区分度")
             for row in screened[: args.limit]:
                 r = run_single_shot(row["q"], retriever, planner, top_k=args.top_k)
@@ -224,7 +213,6 @@ def main(argv: list[str] | None = None) -> int:
             print(f"本轮花费 ${planner.cost:.4f}（{planner.calls} 次调用，只跑了单轮）")
             return 0
 
-        # ---------------- 第三轮：对照（多跳 vs 单轮） ----------------
         print("\n【对照】多跳 vs 单轮（逐跳覆盖率）")
         out: dict[str, Any] = {"n": len(screened[: args.limit]), "modes": {}}
         for mode in ("single_shot", "multi_hop"):

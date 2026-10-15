@@ -1,35 +1,24 @@
-"""重建 clinic 域的知识卡片语料（`cards.json`）。
-
-## 为什么不把 cards.json 放进版本库
-
-`cards.json`（8.4 MB）与它的向量（39.4 MB）都是**派生语料**，几分钟就能重建；
-而且它们的上游（OpenCMKG 三元组）标注着**「仅用于学术研究，不得用于商用」**。
-把它带进一个公开的作品仓库，是把许可风险当成便利来交换。详见 docs/adr/0003。
-
-所以本仓库只携带**构建脚本**，不携带语料：
-
-    源目录（本地，不入库）                      kubedocs 侧（本地，不入库）
-    data/knowledge/*.json  ──本脚本──▶  data/clinic/cards.json ──▶ 索引
-
-## 前置：源目录从哪来
-
-源目录是**上游项目的中间产物**（不是 OpenCMKG 原始三元组）：
-先在上游跑 `scripts/build_knowledge.py`（OpenCMKG -> `data/knowledge/*.json`）。
-
-本脚本**不设默认源目录**：它来自另一个项目，写死任何路径都只对一台机器成立
-（仓库里也不该出现本机绝对路径）。请显式指定：
-
-    --source <上游产物目录>
-    # 或设环境变量 KUBEDOCS_CLINIC_SOURCE=<上游产物目录>
-
-**没有语料也能跑通三条流程**：clinic 域的规则轨（`data/` 下约 271 行词典）不依赖它，
-检索轨只是"为什么这样建议"的接地增强。这正是把受限语料做成可选的原因。
+"""构建 clinic 域知识卡片语料 `data/clinic/cards.json`（向量索引的上游）。
 
 用法：
     python scripts/clinic_build_cards.py --source <上游产物目录> --dry-run
-    python scripts/clinic_build_cards.py --source <上游产物目录>
+    python scripts/clinic_build_cards.py --source <上游产物目录> --out data/clinic
 
-退出码：0 成功 / 3 源目录不可用（含"没指定源目录"）。
+前置条件：`--source` 指向跑过上游 `scripts/build_knowledge.py`（OpenCMKG → 中间产物）
+得到的目录，默认取环境变量 `KUBEDOCS_CLINIC_SOURCE`，脚本不写死本机路径。目录须含
+`symptoms.json`、`diseases.json`、`disease_to_department.json`、`symptom_to_diseases.json`、
+`disease_to_drugs.json`、`drugs.json`，缺任一即报错退出。clinic 域的规则轨
+（`data/` 下的词典）不依赖该语料，没有源目录也能跑通问诊/挂号/紧急。
+
+输出：`<--out>/cards.json`，JSON 数组，元素为 `{kind, key, text, ...}`。`kind` 取
+`symptom`/`disease`/`drug`；症状卡另有 `diseases` 与 `departments`，疾病卡另有
+`departments` 与 `drugs`，药物卡只有 `text`。该语料是派生数据且上游标注「仅用于学术
+研究，不得用于商用」，不入库（`.gitignore` 已忽略 `data/clinic/`），不要提交到公开仓库。
+
+结果解读：打印各 `kind` 的卡片数与带科室的卡片数——后者是分诊落地的依据，其余只能给疾病
+方向；"跳过条目"是非字符串条目数（上游混有列表/字典，过滤但不静默丢弃）。
+
+退出码：0 成功 / 3 未指定源目录或源目录不可用（含缺少必需文件）。
 """
 
 from __future__ import annotations
@@ -45,11 +34,11 @@ sys.path.insert(0, str(REPO_ROOT / "src"))
 
 from kubedocs.domains.clinic.data.departments import normalize_department  # noqa: E402
 
-# 不写死机器路径：默认从环境变量取，没有就让调用方显式 --source（见模块文档）。
+# 不写死本机路径：默认取环境变量，缺失时由调用方显式给 --source。
 DEFAULT_SOURCE = os.environ.get("KUBEDOCS_CLINIC_SOURCE", "")
 OUT_DIR = REPO_ROOT / "data" / "clinic"
 
-# 每种卡片需要的中间文件；缺任何一个就说明源目录还没构建完
+# 源目录必须齐备的中间文件；缺任一说明上游还没构建完
 REQUIRED = (
     "symptoms.json",
     "diseases.json",
@@ -68,9 +57,8 @@ def _load(src: Path, name: str) -> object:
 def _names(obj: object) -> tuple[list[str], int]:
     """取出名字列表，返回 (名字, 被跳过的条目数)。
 
-    上游数据是抓取聚合来的，**不保证每个条目都是字符串**（实测混有列表/字典）。
-    这里过滤掉非字符串，但把跳过数量报出去——静默丢数据在语料构建里是最危险的做法，
-    因为卡片数变少只会表现为"检索覆盖变小"，没有任何报错。
+    上游是抓取聚合来的数据，条目不保证是字符串（混有列表/字典）；这里过滤掉非字符串，
+    但把跳过数量报出去——静默丢数据只表现为"检索覆盖变小"，不会有任何报错。
     """
     if isinstance(obj, list):
         raw: list[object] = list(obj)

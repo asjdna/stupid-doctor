@@ -1,31 +1,19 @@
-"""把现有 SQLite 索引里的向量灌进 Milvus（本地文件），**不重新编码**。
+"""把现有 SQLite 索引的向量灌进 Milvus（本地文件），不重新编码。
 
-## 为什么需要这个脚本
+按 `chunks.vector_row` ↔ `.npy` 矩阵行号把向量搬进 Milvus 的 HNSW 索引，向量本身不变；
+同时把索引的 `vector_backend` 标记切到 milvus，挡住同一份索引在两个后端间来回写
+（块表更新、另一个后端的向量表不更新，会静默读到陈旧向量）。**只读原索引**。
 
-换后端时，向量本身一个字节都没变，变的只是"存放位置"（`.npy` 矩阵 / `chunks_vec`
-虚表 → Milvus 的 HNSW 索引）。全量重编码在本机是 1.9 万块 × 约 9.4 块/秒 ≈ 33 分钟，
-而这一步只需要十来秒。
-
-它同时承担第二个职责：**把索引元信息切换到 milvus**。`MilvusStore` 与
-`SqliteVecStore` 一样用 `vector_backend` 这道闸门挡住"同一份索引在两个后端之间来回写"
-（块表会更新、另一个后端的向量表不会，结果是静默读到陈旧向量）。
-真正搬向量的动作在 `MilvusStore.adopt_legacy_matrix()` 里（与 `sqlite-vec` 的同名方法
-一个模式），本脚本只负责参数解析、进度打印与**逐位抽样校验**。
-
-## 从哪读向量
-
-按 `chunks.vector_row` ↔ `.npy` 矩阵行号的对应关系读（旧实现 `finalize()` 写入的那个
-映射）。越界、行数不符一律报错退出，不做"部分迁移也算成功"的假动作。
-**只读原索引**：Milvus 的数据写到一个独立的 `.db` 文件里。
-
-## 用法
-
+用法：
     python scripts/migrate_to_milvus.py                     # 默认 data/index/k8s_docs
     python scripts/migrate_to_milvus.py --domain clinic
     python scripts/migrate_to_milvus.py --check-only        # 只校验，不写入
     python scripts/migrate_to_milvus.py --milvus-db D:/x/milvus.db
 
-迁移幂等：每次先 drop 集合再灌，重复跑不会产生重复行。
+前置条件：旧索引已建好且带 `chunk_vectors.npy`；`vector_row` 越界或行数不符一律报错退出。
+输出：块数、耗时、抽样逐位比较结果、向量与全文索引自检。
+幂等：每次先 drop 集合并重灌，重复跑不会产生重复行。`--detach` 摘除 Milvus 后端标记。
+退出码：0 迁移并自检通过 / 1 索引为空、StoreError 或抽样与向量自检不通过。
 """
 
 from __future__ import annotations
@@ -51,10 +39,9 @@ EXIT_USER = 1
 def _verify(
     store: MilvusStore, mat: np.ndarray, pairs: list[tuple[str, int, str]], sample: int
 ) -> tuple[bool, str]:
-    """抽样核对：灌进去的向量必须与矩阵**逐位相等**，不是"差不多"。
+    """抽样核对：灌进去的向量必须与矩阵逐位相等，不接受近似。
 
-    走的是公开读取路径（`existing_hash_to_vector`），顺便证明那条路径真的能用；
-    自己再写一条旁路查询只能证明"我写的另一条查询是对的"。
+    走公开读取路径（`existing_hash_to_vector`），顺便证明那条路径真的能用。
     """
     if not pairs:
         return True, "索引为空，无需校验"
@@ -102,8 +89,7 @@ def main(argv: list[str] | None = None) -> int:
         hnsw_ef_construction=settings.milvus_hnsw_ef_construction,
         hnsw_ef_search=settings.milvus_hnsw_ef_search,
         metric=settings.milvus_metric,
-        # 只有这里会打开闸门：本脚本是"向量真的被搬过去了"的那条路径。
-        # 普通代码路径（CLI / API / ingest）一律不许抢别的后端的索引。
+        # 只有迁移脚本打开这道闸门：普通代码路径（CLI / API / ingest）不许抢别的后端的索引
         allow_backend_takeover=True,
     )
     try:

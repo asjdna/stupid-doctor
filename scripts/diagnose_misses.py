@@ -1,21 +1,16 @@
-"""诊断未命中的标注：把"没命中时实际返回了什么"打出来，用于复查标注质量。
+"""复查检索标注质量：打印未命中条目**实际返回**了什么。
 
-## 为什么需要它
-
-文档级单目标标注的固有风险是：**另一个同样正确的文档会被记成未命中**。
-例如问"我的 Pod 一直重启"，`pod-lifecycle`（讲重启策略）与
-`debug-running-pod`（讲 CrashLoopBackOff）都是合格答案，但标注只写了后者，
-于是一次正确的检索被记成失败。
-
-这类问题的正确处理**不是**调低指标或删掉难例，而是：
-1. 先把实际返回打出来，人眼判断替代答案是否真的同样正确；
-2. 只在对**确实等价**的情况下把标注扩成多目标，并把理由写进 note；
-3. 修改前后的数字都要留档（见 README），因为改标注集就是改度量尺子。
+文档级单目标标注的固有风险是替代答案被记成未命中（问"Pod 一直重启"时
+`pod-lifecycle` 与 `debug-running-pod` 都算合格，标注只写后者就记一次失败）。
+本脚本把实际返回打出来，供人判断替代答案是否同样正确，再决定要不要扩标注。
 
 用法：
-    python scripts/diagnose_misses.py                 # 只看未命中
-    python scripts/diagnose_misses.py --all           # 全部条目
-    python scripts/diagnose_misses.py --top-k 3
+    python scripts/diagnose_misses.py --judge-k 10 --show 3   # 只看未命中
+    python scripts/diagnose_misses.py --all                   # 连命中的一起打印
+
+前置条件：`--gold` 指向标注文件，索引已按 `--provider` 建好（或用 `--index-dir` 指定）。
+输出：每条列出标注目标、前 `--show` 名（`<-标注` 标出命中项）与名次；`--json` 改为逐行 JSON（含 `ranked` / `hit`）；末行是未命中总数。
+`--judge-k` 决定"算不算命中"，**必须与评测的 `--top-k` 取同一个值**，否则两者未命中数不一致。
 """
 
 from __future__ import annotations
@@ -74,8 +69,7 @@ def main(argv: list[str] | None = None) -> int:
         retriever.search("warmup", top_k=1)  # 排除冷启动
         misses = 0
         for row in rows:
-            # 判定用 judge_k，显示只取前 show 条：判定口径必须与评测一致，
-            # 否则"诊断说 30 条未命中、评测说 16 条"这种矛盾会浪费大量时间。
+            # 判定用 judge_k、显示只取前 show 条：判定口径与评测一致，才不会出现两套未命中数。
             res = retriever.search(row.q, top_k=args.judge_k)
             ranked = [r.doc_id for r in res.results]
             hit = bool(set(ranked) & row.relevant)

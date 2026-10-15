@@ -1,16 +1,11 @@
 """变异验证：故意改坏关键逻辑，确认对应测试**变红**，然后原样还原。
 
-一个测试如果在实现被改坏之后依然是绿的，那它就没有在守任何东西。
-这里对若干处关键逻辑各做一次"回退式变异"，跑指定的测试并记录退出码。
-
-分组：
-- M1~M4：存储层（sqlite-vec 写向量 / 删文档 / 后端工厂 / 页缓存）；
-- M5：clinic 闸门里的**分诊**判据（摘掉它，"分诊 0 分也通过"的缺陷就该回来）；
-- M6：工具循环**调用前**的预算检查（摘掉它，`/chat` 就又能超预算调模型）；
-- M7 / M10：`/ask` 与 `/chat` 两条路径上"**算不出价按 0 记**"的缺陷；
-- M8 / M9：`/chat` 会话表的**属主校验**与**LRU 淘汰**。
+实现被改坏之后依然绿的测试没有在守任何东西。对 `CASES` 里每处逻辑各做一次"回退式
+变异"，跑指定测试节点并看退出码。
 
 用法：python scripts/mutation_check.py
+前置条件：仓库根有 `.venv/Scripts/python.exe`，且 `CASES` 引用的测试节点能单独跑。
+退出码：0 全部按预期变红；1 有变异没让测试变红，或有待替换片段没找到。
 """
 
 from __future__ import annotations
@@ -145,13 +140,10 @@ CASES = [
 
 
 def _read(path: pathlib.Path) -> str:
-    """按**原样**读文本：不翻译换行（`newline=""`）。
+    """按**原样**读文本（`newline=""`）：不翻译换行。
 
-    这个脚本会改写仓库里的真实源文件，所以换行必须逐字节保留：Windows 上
-    `read_text` / `write_text` 默认会做换行翻译，写回时把 LF 变成 CRLF——
-    实测把 `sqlite_vec_store.py` 的 382 行、`store/__init__.py` 的 77 行全改成 CRLF，
-    `git status` 立刻显示这两个**没被这次变异碰过内容**的文件被修改了。
-    本仓库要求 LF（`.gitattributes` 是 `* text=auto eol=lf`），所以读写都显式关掉翻译。
+    脚本会改写仓库里的真实源文件，本仓库要求 LF，默认的换行翻译会写回 CRLF，
+    让没被变异碰过的文件也显示成已修改。
     """
     with open(path, encoding="utf-8", newline="") as fh:
         return fh.read()
@@ -173,11 +165,9 @@ def main() -> int:
             continue
         _write(path, original.replace(old, new, 1))
         try:
-            # 命令是本文件里写死的（解释器路径 + 固定参数），不存在外部输入参与构造；
-            # S603/S607 在这个场景下是误报，逐条说明而不是全局忽略。
-            # ⚠️ noqa 必须挂在 `subprocess.run(` 这一行：S603 的诊断**落在调用起始行**，
-            # 而 `ruff format` 会把参数拆到后续行——把 noqa 留在参数行上等于没抑制
-            # （实测：格式化后 `ruff check .` 反而变红，2026 年那次全量格式化就是）。
+            # 命令由本文件写死（解释器路径 + 固定参数），无外部输入参与构造，S603/S607 属误报。
+            # 抑制标记必须挂在 `subprocess.run(` 那一行：诊断落在调用起始行，而 `ruff format`
+            # 会把参数拆到后续行，留在参数行上等于没抑制。
             proc = subprocess.run(  # noqa: S603
                 [PY, "-m", "pytest", node, "-p", "no:cacheprovider"],
                 cwd=str(ROOT),

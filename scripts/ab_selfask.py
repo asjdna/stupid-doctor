@@ -1,29 +1,20 @@
-"""A/B 对照：**self-ask vs 单轮 RAG**，同一批问题、同一套检索、同一个模型。
+"""A/B：self-ask vs 单轮 RAG，同一批问题、同一套检索、同一个模型。
 
-## 为什么放在 k8s 域做
-
-它的索引已建好（18861 块、真实 bge 向量），金标集每条都带 `must_contain` 关键词
-——于是"答案有没有覆盖到关键内容"可以用**确定性字符串检查**判定，不需要
-LLM-as-judge（后者分数波动大、还要再花钱、且不可复现）。
-
-## 两路各自是什么
-
-| 模式 | 流程 | LLM 调用 |
-|---|---|---|
-| single-shot | 检索 top-k → 组装上下文 → 生成带引用答案 | 1 |
-| self-ask | 分解为子问题 → 各自检索 → 合成带引用答案 | 2 |
-
-## 判定指标（全部确定性，除成本外都可复现）
-
-- `term_coverage`：答案是否包含该条金标的 `must_contain` 关键词（**弱接地检查**：
-  包含关键词不等于答对，但不包含几乎一定没答到点子上）
-- `cited`：答案是否带至少一个引用标记
-- `citation_valid`：引用编号是否都指向真实提供的片段（复用现有校验策略）
-- `llm_calls` / `cost_usd` / `latency_ms`
+single-shot 检索 top-k 后直接生成；self-ask 先分解为子问题、各自检索再合成。
+指标除成本外全部确定性、可复现：`term_coverage`（答案是否含该条金标的
+`must_contain` 关键词，弱接地检查：含关键词不等于答对，但不含几乎一定没答到点上）、
+`cited`、`citation_valid`（引用编号是否都指向真实片段）、`llm_calls`、`latency_ms`。
 
 用法：
-    python scripts/ab_selfask.py --limit 12          # 小样本先跑
-    python scripts/ab_selfask.py --limit 12 --json
+    python scripts/ab_selfask.py --limit 12                  # 小样本先跑
+    python scripts/ab_selfask.py --kinds paraphrase,concept  # 只跑指定类型
+    python scripts/ab_selfask.py --json                      # 打印结果 JSON
+
+前置条件：`--gold`（默认 `data/eval/retrieval_gold.jsonl`，需带 `must_contain`）与索引
+已就绪，且有 `DEEPSEEK_API_KEY`；结果 JSON 落盘到 `--out`。
+
+输出/解读：逐条打印覆盖与耗时，末尾按模式对照一张表。self-ask 的 `term_coverage` 应
+不低于 single-shot，代价是 `llm_calls` 约翻倍。退出码：0 正常结束；3 缺少密钥。
 """
 
 from __future__ import annotations
@@ -84,7 +75,7 @@ class LiteLLMDecomposer:
         try:
             self.cost += float(self.litellm.completion_cost(completion_response=resp) or 0.0)
         except Exception:  # noqa: BLE001 - 成本算不出不该让流程失败
-            self.cost = self.cost  # 明确保留原值：成本统计失败不阻断主流程
+            self.cost = self.cost
         return str(resp.choices[0].message.content or "").strip()
 
     def decompose(self, question: str, max_sub: int) -> list[str]:

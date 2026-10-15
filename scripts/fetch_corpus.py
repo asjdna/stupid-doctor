@@ -1,12 +1,11 @@
-"""取 Kubernetes 官方文档语料。
+"""下载 Kubernetes 官方文档语料：取 codeload tarball 流式解包，只抽 content/en/docs/**/*.md。
 
-环境实测结论（决定了本脚本的做法）：
-- git 直连 github.com 被墙（Failed to connect ... 21s），无法 clone
-- 逐文件 CDN（jsDelivr / statically / githack）全部连接被拒
-- GitHub API 可用但限流 60/h，取 1720 个文件必然撞墙
-- ⇒ 只有一条路：下 `codeload` 的 tarball，流式解包只抽 content/en/docs/**/*.md
+用法：
+    python scripts/fetch_corpus.py
 
-用 `tarfile` 的 `r|gz`（流式、不 seek、不吃内存），边下边抽，抽完删 tarball。
+前置条件：能直连 codeload.github.com（受限网络下 git clone 与逐文件 CDN 都不可用），磁盘留 ~2.6GB。
+输出：`data/raw/k8s-docs/` 下与官方文档根同构的 markdown 树；流式解包，抽完删 tarball。
+退出码：0 成功 / 2 下载超过 2.6GB 上限 / 3 没抽到任何文档（保留 tarball 供排查）。
 """
 
 from __future__ import annotations
@@ -21,25 +20,21 @@ from pathlib import Path
 import httpx
 
 URL = "https://codeload.github.com/kubernetes/website/tar.gz/refs/heads/main"
-# 仓库根**从脚本位置推导**，不写死机器路径：写死的路径只在作者那台机器上成立，
-# 而"照抄 README 把命令跑起来"的人会在第一时间撞墙（且报错信息还是一句无关的
-# "文件不存在"）。其它脚本（clinic_build_cards / check_gold / eval_clinic）用的是同一套推导。
+# 仓库根从脚本位置推导（与其它脚本一致），不写死机器路径。
 ROOT = str(Path(__file__).resolve().parents[1])
 TARBALL = os.path.join(ROOT, ".cache", "k8s-website.tar.gz")
 OUT_DIR = os.path.join(ROOT, "data", "raw", "k8s-docs")
-# tarball 内的路径形如 `kubernetes-website-<sha>/content/en/docs/concepts/foo.md`，
-# 所以**不能**用 startswith("content/en/docs/") 匹配（第一版就栽在这，抽出 0 个文件）。
+# tarball 内路径形如 `kubernetes-website-<sha>/content/en/docs/foo.md`，不能直接 startswith 匹配。
 INNER_PREFIX = "content/en/docs/"
 MAX_BYTES = 2_600_000_000  # 保险：超过 2.6GB 说明判断有误，中止而不是塞满磁盘
 
 
 def _iter_docs(member_name: str) -> str | None:
-    """从 tarball 成员名解析出 (语料内相对路径)。不是目标文档则返回 None。
+    """从 tarball 成员名解析出语料内相对路径；非 `content/en/docs/**.md` 返回 None。
 
-    剥掉两层：仓库目录前缀（`kubernetes-website-<sha>/`）与 `content/en/docs/`，
-    使语料根 == 官方文档根，source_url 映射才是直通的。
+    同时剥掉仓库目录前缀与 INNER_PREFIX，使语料根 == 官方文档根，source_url 映射直通。
     """
-    _, _, rest = member_name.partition("/")  # 去掉仓库目录那一层
+    _, _, rest = member_name.partition("/")
     if not rest.startswith(INNER_PREFIX) or not rest.endswith(".md"):
         return None
     return rest[len(INNER_PREFIX) :]
@@ -104,7 +99,7 @@ def main() -> int:
         print(f"    例：{s}", flush=True)
 
     if n == 0:
-        # 抽不到东西说明匹配逻辑又错了：保留 tarball 以便重试，且以非零码退出（不要静默成功）
+        # 抽不到任何文档即以 3 退出（不静默成功），并保留 tarball 供重试
         print("  ✗ 没有抽到任何文档，保留 tarball 供排查/重试", flush=True)
         return 3
 

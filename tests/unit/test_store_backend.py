@@ -1,15 +1,8 @@
-"""后端选择：默认值、环境变量、非法取值必须报错、工厂分派。
+"""后端选择：`KUBEDOCS_STORE` 的取值、工厂分派与协议覆盖。
 
-## 这个文件守的是什么
-
-`KUBEDOCS_STORE` 是**唯一**决定"索引数据放在哪、用什么算法检索"的开关。
-它出错的方式有两种，都必须被测试挡住：
-
-1. **静默回退**：配了 `pgvector` 却因为连不上而悄悄用本地 SQLite ——
-   于是"我把数据灌进 Postgres 了，怎么检索不到"变成一个没有日志的谜。
-   这里用"工厂分派"用例把它钉死：选谁就构造谁，不做任何替换。
-2. **非法取值**：必须在**启动时**报错（`Settings` 的字面量校验），
-   而不是等到第一次检索才炸，更不是自动纠正成默认值。
+`KUBEDOCS_STORE` 是**唯一**决定"索引数据放在哪、用什么算法检索"的开关，它的两种出错方式
+都必须被挡住：**静默回退**（配了 `pgvector` 却因连不上而悄悄用本地 SQLite）与
+**非法取值**（必须在启动时报错，不等到首次检索，也不自动纠正成默认值）。
 """
 
 from __future__ import annotations
@@ -46,11 +39,10 @@ def _settings(tmp_path: Path, **over: object) -> Settings:
 
 
 class TestDefaultBackend:
-    """默认值 = 新的 sqlite-vec 实现（用户已拍板的取舍，不是随手选的）。"""
+    """默认后端：未显式配置时 `KUBEDOCS_STORE` 取 `sqlite-vec`。"""
 
     def test_default_is_sqlite_vec(self):
-        # 用字段默认值而不是 Settings() 实例：实例会被 .env / 真实环境变量影响，
-        # 那样测的是"我这台机器的配置"，不是"代码里的默认值"。
+        # 用字段默认值而不是 Settings() 实例：实例会读到 .env，测的就不是代码默认值。
         assert Settings.model_fields["store"].default == "sqlite-vec"
 
     def test_backend_names_are_stable(self):
@@ -111,8 +103,8 @@ class TestFactory:
     ):
         """分派到正确模块，且**不会**顺带构造别的实现（没有回退链）。
 
-        用哨兵替掉四个模块各自的 `from_settings`：如果工厂在自己失败后回退，
-        计数器就会显示"构造了不止一个"。
+        用哨兵替掉四个模块各自的 `from_settings`：工厂若在失败后回退，计数器就会显示
+        "构造了不止一个"。
         """
         calls: list[str] = []
 
@@ -160,10 +152,8 @@ class TestFactory:
 
 
 class TestPgVectorProbe:
-    """`probe()` 是"数据库不可达就 skip"这条纪律的唯一判据，它自己必须可靠。
-
-    这两条**不依赖数据库**（一条连不通的 DSN 就够了），所以在任何环境下都会跑：
-    否则"探测逻辑坏了"只会表现为"pgvector 的用例全被 skip"，而那是绿的不是红的。
+    """`probe()` 是"库不可达就 skip"的唯一判据，它自己必须可靠：两条用例只靠一条连不通
+    的 DSN，任何环境下都会跑，否则探测逻辑坏掉只会表现为"pgvector 用例全被 skip"（那是绿的）。
     """
 
     def test_unreachable_dsn_reports_reason_not_exception(self):
@@ -179,9 +169,8 @@ class TestPgVectorProbe:
 class TestProtocolCoverage:
     """协议与实现的同步：给 `Store` 加方法时，四个实现都得跟上。
 
-    mypy 已经在 src 上保证了这一点；这里再测一次是因为
-    `Store` 是 `runtime_checkable` 的协议，任何 `getattr` 风格的下游代码
-    （以及测试替身）都依赖同一份方法清单。
+    mypy 已在源码上保证，这里再测一次是因为 `Store` 是 `runtime_checkable` 的协议，
+    `getattr` 风格的下游代码与测试替身都依赖同一份方法清单。
     """
 
     def test_every_implementation_covers_the_protocol(self):

@@ -1,32 +1,24 @@
 """FastAPI 服务层：把 CLI 已经跑通的能力包成一组 HTTP 端点。
 
-## 这一层为什么必须"薄"
+本层只做协议转换：JSON → 参数 → 内核 → JSON。检索与生成一律复用 CLI 的同一套实现
+（`kubedocs.retrieve` / `kubedocs.generate` / `kubedocs.agent`），不在这里重写，
+否则"CLI 能跑通"这条可复现性基线就失效了。
 
-摄取 / 检索 / 生成 / agent 全部在 CLI 里能跑通，HTTP 层只做三件事：把 JSON 变成参数、
-把参数交给内核、把结果变成 JSON。任何在这里"顺手重写"的检索或生成逻辑，都会让
-"CLI 能跑通"这条基线失效——它才是本项目可复现性的来源。所以本文件里没有一句 SQL、
-没有一次自己拼的提示词，只有装配与协议转换。
+## 空索引不是故障
 
-## 为什么"索引为空"不返回 500
-
-空索引是**部署过程中的正常中间态**（先起服务、再灌语料），也可能是这个域还没建索引。
-它跟"服务坏了"是两件事，但 500 会把它们混成一件：调用方开始重启、告警、重试，
-而真正该做的是 `python -m kubedocs.cli ingest`。所以：
-
-- `/healthz` 返回 `ok=true, n_chunks=0`——判活探针关心的是"进程活着"，不是"有没有数据"；
-- `/search` `/ask` 返回 **200 + 空结果 + 一句说明**（`note` / `degraded`）；
-- 唯一必须失败的是**回答里出现没有依据的内容**：没有语料就明说没有语料。
-
-索引与配置**不兼容**（向量维度 / 嵌入模型 / 归一化器不符 -> `StoreError`）走同一条路：
-记下 `index_error`、端点返回 200 + 说明。让进程起不来不会"更安全"，
-只会把所有错误一起变成 500，藏得更深。
+空索引是部署过程中的正常中间态（先起服务、再灌语料），也可能是这个域还没建索引，
+所以它不是 500：`/healthz` 给 `ok=true, n_chunks=0`；`/search` `/ask` 给
+**200 + 空结果 + 一句说明**（`note` / `degraded`）；索引与配置**不兼容**
+（向量维度 / 嵌入模型 / 归一化器不符 → `StoreError`）走同一条路——记下
+`index_error`、端点返回 200 + 说明。必须失败的只有"回答里出现没有依据的内容"：
+没有语料就明说没有语料。
 
 ## 资源只打开一次
 
-`Settings` -> `SqliteStore` 是进程级资源（一个连接 + 一份常驻内存的向量矩阵），
-在 `create_app` 里按域建好并缓存（约定 `app.state.store` = 当前域的 store），
-**每次请求不再打开**；embedder 与 retriever 惰性构造——bge 首次加载要几十秒，
-`/healthz` 和 `/tools` 不该付这个代价；lifespan 关闭时统一 `close()`。
+`Settings` → `SqliteStore` 是进程级资源（一个连接 + 一份常驻内存的向量矩阵），
+在 `create_app` 里按域建好并缓存到 `app.state.runtimes`（约定 `app.state.store` =
+当前域的 store），**每次请求不再打开**；embedder 与 retriever 惰性构造——bge 首次
+加载要几十秒，`/healthz` 与 `/tools` 不该付这个代价；lifespan 结束时统一 `close()`。
 
 ## SSE 事件格式（`/chat`）
 
@@ -37,24 +29,21 @@
     event: message  data: {"text": "...", ...}       <- 最终文本（或等待用户回答的追问）
     event: done     data: {"thread_id": "..."}       <- 流结束
 
-`data` 一律 `json.dumps(..., ensure_ascii=False)`：SSE 的 data 遇到换行会被拆成多条
-`data:` 行、需要接收端自己拼回来，把 JSON 压成一行是最不容易写错的做法。
+`data` 一律 `json.dumps(..., ensure_ascii=False)` 并压成一行：SSE 的 data 遇到换行会被
+拆成多条 `data:` 行、需要接收端自己拼回来。这里流的是**事件**，不是 LLM 的 token——
+clinic 内核的推理是确定性的规则 + 词表（`ClinicAgent` 是同步 `graph.invoke`），本文件
+用线程池把它挪出事件循环，使 `thread` 事件能先于这一轮推理送达客户端；token 级流式
+要等生成层给出流式接口。
 
-注意"流式"的诚实边界：这里流的是**事件**，不是 LLM 的 token。clinic 内核的推理是
-确定性的规则 + 词表（`ClinicAgent` 是同步 `graph.invoke`），本文件用线程池把它挪出
-事件循环，使 `thread` 事件能先于这一轮推理送达客户端；真正的 token 级流式要等
-生成层给出流式接口，这里**没有**伪造成 token 流。
+`thread_id` 由客户端自带，服务端管住两件事（实现见 `api/threads.py`）：**属主校验**
+（首次出现即绑定 `patient_id`，换一个 `patient_id` 用同一个 `thread_id` → **409**；
+校验在**端点里**做，响应头还没发出所以能给明确的 4xx，工具循环路径与确定性图路径
+同受这道检查）与**有界**（LRU：`MAX_THREADS` 个会话 × 每会话 `MAX_MESSAGES_PER_THREAD`
+条消息，淘汰最久未用者）。
 
-## `thread_id` 的属主与上界（`api/threads.py`）
-
-`thread_id` 是**客户端自带**的，所以这里有两件事必须由服务端管住：
-
-- **属主校验**：`thread_id` 首次出现即绑定 `patient_id`；换一个 `patient_id` 用同一个
-  `thread_id` → **409**（在响应头发出之前就拒绝，所以能给出明确的 4xx 与可读原因）。
-  不静默当新会话、也不静默接到别人的历史上。属主判定放在**端点里**（不是流里面），
-  因此工具循环路径与确定性图路径受同一道检查。
-- **有界**：会话表是 LRU（`MAX_THREADS` 个会话 × 每会话 8 条消息），
-  淘汰最久未用者——理由与边界见 `api/threads.py`。
+加一个端点：在 `create_app` 里声明 `@app.get` / `@app.post`，把请求与响应形状放进
+`api/schemas.py`，重活交给内核（`kubedocs.retrieve` / `kubedocs.generate` /
+`kubedocs.agent`）；有状态或有副作用的资源挂到 `app.state`，并在 lifespan 里释放。
 """
 
 from __future__ import annotations
@@ -120,21 +109,20 @@ INDEX_HTML = ("data", "web", "index.html")
 CONSOLE_HTML = ("data", "web", "console.html")
 """控制台页相对仓库根的位置。
 
-和演示页分成两个文件、而不是把演示页改胖：演示页是"最小可用示例"，控制台是
-"把运维信号摆出来"（索引体检、/metrics 摘要、每路检索名次、降级原因）。
-两者共用同一套设计令牌，视觉上是一家的，但职责不同、可以各自演进。
+与演示页分成两个文件：演示页是"最小可用示例"，控制台是"把运维信号摆出来"
+（索引体检、`/metrics` 摘要、每路检索名次、降级原因）。两者共用同一套设计令牌，
+视觉上是一家的，但职责不同、可以各自演进。
 """
 
 STATS_TTL_S = 2.0
-"""`_DomainRuntime.stats()` 的缓存有效期（秒）。取值理由见该方法 docstring。"""
+"""`_DomainRuntime.stats()` 的缓存有效期（秒），取值理由见该方法 docstring。"""
 
 PATIENT_HTML = ("data", "web", "patient.html")
 """患者端页面。**只**保留问诊 agent，面向真实使用者（见 `patient` 端点的说明）。"""
 
 # `CONSULT_HTML` 由 `kubedocs.api.consult` 定义并 import（单一来源，避免两处不一致）。
-# 与 `patient.html` 的区别：`patient` 走的是**图 + 工具循环**那条老路径，
-# `consult` 走的是 `ClinicalPipeline`（契约化输出 + 确定性红线 + 检索式分诊）。
-# 两者并存是有意的：老路径可用，新路径要看它到底能不能用起来。
+# 与 `patient.html` 的区别：`patient` 走**图 + 工具循环**，`consult` 走 `ClinicalPipeline`
+# （契约化输出 + 确定性红线 + 检索式分诊）。两者并存是刻意的：两条路径的取舍不同。
 
 
 # ===========================================================================
@@ -143,9 +131,8 @@ PATIENT_HTML = ("data", "web", "patient.html")
 class _DomainRuntime:
     """一个域的运行期资源：store / embedder / retriever / answerer。
 
-    为什么要按域分开：索引目录是 `<index_dir>/<domain>/`，两个域的向量维度、
-    嵌入模型、归一化器、语料都不同。共用一个 store 只会把两个域的数据混进
-    同一份矩阵，而且失败时完全没有报错。
+    按域分开的理由：索引目录是 `<index_dir>/<domain>/`，两个域的向量维度、嵌入模型、
+    归一化器、语料都不同。共用一个 store 会把两个域的数据混进同一份矩阵。
     """
 
     def __init__(self, settings: Settings) -> None:
@@ -171,30 +158,13 @@ class _DomainRuntime:
     def stats(self, *, max_age_s: float = STATS_TTL_S) -> StoreStats | None:
         """取索引统计（**带短 TTL 缓存**）；索引不可用或库读坏了都返回 None。
 
-        ## 为什么必须缓存（这是实测出来的性能缺陷，不是优化洁癖）
-
-        `StoreStats` 里有一个 `n_with_code`，SQLite 侧是用
-        `SELECT COUNT(*) FROM chunks WHERE body LIKE '%```%'` 算的 ——
-        **18822 行大文本列的全表扫描**。实测（store 自己的连接、同一口径）：
-
-        | 查询 | ms/次 |
-        |---|---|
-        | `COUNT(documents)` | 0.01 |
-        | `COUNT + SUM(n_chars)` | 3.94 |
-        | `COUNT WHERE body LIKE '%```%'` | **17.31** |
-        | `SELECT meta` | 0.01 |
-        | **`stats()` 合计** | **24.40** |
-
-        而 `/healthz` **每个请求**都走 `n_chunks()` → `stats()`，`/search` 也会
-        （`_index_note` 只为拼一句提示），并且整段都在 store 的 `threading.Lock` 里。
-        后果实测：本地直跑 `/healthz` 的吞吐被硬卡在 **≈19.6 req/s**，
-        并发从 1 升到 16 时 p50 从 54.6 ms 线性涨到 802 ms（**并发完全没有收益**）——
-        典型的"每个请求都要过一次 20ms 串行临界区"。
-
-        TTL 取 2 秒的取舍：探针间隔是 10 s（compose 的 healthcheck），所以探针看到的
-        仍是"最多 2 秒前"的真实状态；代价是"索引刚坏掉"到"探针报错"之间最多差 2 秒。
-        **这个取舍是显式的**：要即时值就传 `max_age_s=0`（CLI `stats` 走的是 store 直连，
-        不经过这里，所以 `cli stats --verify` 的语义一个字都没变）。
+        必须缓存：`StoreStats.n_with_code` 在 SQLite 侧是
+        `SELECT COUNT(*) FROM chunks WHERE body LIKE '%```%'`，即大文本列的全表扫描
+        （约 20 ms）。而 `/healthz` 每个请求都走 `n_chunks()` → `stats()`（`/search`
+        也会，只为拼一句提示），并且整段都在 store 的 `threading.Lock` 里，于是并发
+        完全失去收益。TTL 取 2 秒（`STATS_TTL_S`）：compose 的探针间隔是 10 s，
+        探针看到的仍是"最多 2 秒前"的真实状态。要即时值就传 `max_age_s=0`
+        （CLI `stats` 走的是 store 直连，不经过这里）。
         """
         if self.store is None:
             return None
@@ -230,9 +200,9 @@ class _DomainRuntime:
     def answerer(self) -> Answerer | None:
         """惰性构造回答器（复用同一个预算文件与 LLM 配置）。
 
-        生成层**完全复用 CLI `ask` 那一套**：`generate.build_answerer` ->
-        `Answerer` -> `LiteLLMClient`（`litellm.completion`）+ 引用越界剥除 + 日预算。
-        在这里重写一遍提示词或引用校验，只会让"CLI 能用"与"HTTP 能用"变成两件事。
+        生成层**完全复用 CLI `ask` 那一套**：`generate.build_answerer` → `Answerer`
+        → `LiteLLMClient`（`litellm.completion`）+ 引用越界剥除 + 日预算。在这里重写
+        提示词或引用校验，只会让"CLI 能用"与"HTTP 能用"变成两件事。
         """
         retriever = self.retriever()
         if retriever is None:
@@ -255,8 +225,8 @@ def _build_retriever(
 ) -> HybridRetriever:
     """按域构造检索器：优先用域包自己的 `retriever()`，域包未注册时退回默认实现。
 
-    域包是"域与内核之间唯一的边界"，检索器配置属于域（不同域可以换精排、
-    换候选池大小）。这里保留默认实现做兜底，是为了让"域包没注册"不会变成 500。
+    检索器配置属于域（不同域可以换精排、换候选池大小）。保留默认实现做兜底，
+    是为了让"域包没注册"不会变成 500。
     """
     try:
         pack = DomainRegistry.get(settings.domain)
@@ -323,9 +293,9 @@ def _ask_response(ans: Answer, runtime: _DomainRuntime) -> AskResponse:
     """把 `generate.Answer` 映射成 HTTP 响应，并把"为什么没有回答"写清楚。
 
     `degraded` 按"最相关的原因在前"拼装：先讲检索有没有依据，再讲生成为什么没跑，
-    最后把检索层自己的降级（例如向量路不可用、已退化成纯 BM25）带出来——
-    这些都是调用方必须知道的，但它们**都不改变 HTTP 状态码**：200 是"服务正常回答了
-    它能回答的部分"，不是"一切完美"。
+    最后把检索层自己的降级（例如向量路不可用、已退化成纯 BM25）带出来。这些调用方
+    必须知道，但**都不改变 HTTP 状态码**：200 是"服务正常回答了它能回答的部分"，
+    不是"一切完美"。
     """
     hits = list(ans.retrieval.results) if ans.retrieval is not None else []
     notes: list[str] = []
@@ -356,8 +326,7 @@ def _ask_response(ans: Answer, runtime: _DomainRuntime) -> AskResponse:
 def _clinic_links() -> dict[str, tuple[str, ...]]:
     """症状 -> 候选关联表（8MB 的卡片语料只解析一次）。
 
-    语料缺失时返回空表而不是报错：clinic 的规则轨（红线 / 症状词典 / 挂号）不依赖它，
-    "没有受限语料也要能跑通"是这个域明确的设计目标。
+    语料缺失时返回空表而不是报错：clinic 的规则轨（红线 / 症状词典 / 挂号）不依赖它。
     """
     from kubedocs.domains.clinic.pack import build_links_from_cards, clinic_cards_path
 
@@ -366,18 +335,10 @@ def _clinic_links() -> dict[str, tuple[str, ...]]:
 
 
 def _make_checkpointer(settings: Settings) -> object | None:
-    """按配置造图的持久化 checkpointer；未配置时返回 None（内存态，与以前一致）。
+    """按配置造图的持久化 checkpointer；未配置时返回 None（内存态）。
 
-    ## 为什么要有这条路径（借用参考项目的"外部记忆"做法）
-
-    图的状态原先只在 `InMemorySaver` 里：**进程一重启，追问到一半的会话就没了**。
-    参考项目（`Agent_In_Action` 的 LangGraph 章节）演示的正是"外部记忆"——
-    把 checkpoint 落盘。而我们的 `build_clinic_graph` 早就留了 `checkpointer` 参数
-    （它的 docstring 甚至写着"传入 `SqliteSaver` 则状态落 SQLite，可断点续跑"），
-    只是**没有任何调用点传它**。这条把那个空位接上。
-
-    实测性质（`langgraph.checkpoint.sqlite.SqliteSaver`）：新连接 + 新编译的图
-    能读到**同一 `thread_id`** 的历史状态 ⇒ 跨请求、跨重启续跑成立。
+    配了 `KUBEDOCS_CLINIC_STATE_DB` 时把图状态落 SQLite，使追问到一半的会话能跨请求、
+    跨重启续跑（`build_clinic_graph` 的 `checkpointer` 参数即为此而留）。
 
     `check_same_thread=False` 是必需的：`/chat` 跑在 `asyncio.to_thread` 的线程池里，
     连接会跨线程使用。
@@ -399,11 +360,10 @@ def _make_checkpointer(settings: Settings) -> object | None:
 def _get_clinic_agent(app: FastAPI) -> ClinicAgent:
     """惰性构造 clinic agent 并缓存到 `app.state`。
 
-    为什么必须缓存：agent 持有 `MockAppointmentProvider` 与图的 checkpointer，
-    每次请求新建会把上一轮的追问状态丢掉——`thread_id` 续跑会静默失效。
-    为什么惰性：构造 agent 要编译 LangGraph 图（秒级），不碰 `/chat` 的请求不该付这个代价。
-    为什么持锁：`/chat` 跑在线程池里，两个并发的首次请求各自建一个 agent 的话，
-    只有一个能留下——另一个用过的会话状态会跟着那个被丢弃的 agent 一起消失。
+    必须缓存：agent 持有 `MockAppointmentProvider` 与图的 checkpointer，每请求新建会
+    丢掉上一轮的追问状态，`thread_id` 续跑静默失效。必须惰性：构造要编译 LangGraph 图
+    （秒级），不碰 `/chat` 的请求不该付这个代价。必须持锁：`/chat` 跑在线程池里，
+    两个并发的首次请求各自建一个 agent 的话，只有一个能留下。
     """
     agent: ClinicAgent | None = getattr(app.state, "clinic_agent", None)
     if agent is not None:
@@ -433,9 +393,9 @@ def _sse(event: str, payload: Mapping[str, Any]) -> ServerSentEvent:
 def _tool_events(state: ClinicState) -> list[tuple[str, dict[str, Any]]]:
     """把内核**真的执行过**的步骤映射成 `tool` 事件。
 
-    为什么不监听工具调用：clinic 内核的节点是确定性闭包（`book` / 红线检查），
-    它并不经过 `ToolRegistry` 的 function calling，所以只能按状态的痕迹发事件。
-    宁可一个都不发，也不为了"看起来像 agent"发假事件。
+    clinic 内核的节点是确定性闭包（`book` / 红线检查），它并不经过 `ToolRegistry` 的
+    function calling，所以只能按状态的痕迹发事件：宁可一个都不发，也不为了"看起来像
+    agent"发假事件。
     """
     events: list[tuple[str, dict[str, Any]]] = []
     red = state.get("red_line")
@@ -467,14 +427,11 @@ class _ChatOutcome:
     def from_clinic_turn(cls, turn: Any) -> _ChatOutcome:
         """从**工具循环**的一轮结果构造。
 
-        工具循环是无状态的（不像图有 checkpointer），所以多轮上下文由本文件
-        用 `app.state.clinic_history` 按 thread_id 维护——这是与图路径的**真实差异**，
-        不是实现细节：图路径重启进程后能续聊，工具循环路径不能。
-
-        这份 history 是**真的会进模型**的（`_converse_with_tools` 交给
-        `ClinicReactRuntime.turn`，再由它传给 `run_tool_loop(history=...)`）。
-        在补上那条接线之前，这里维护的 history 被 `turn()` 收下之后就丢掉了
-        ——维护动作看起来一切正常，模型却永远只看到当轮。
+        工具循环是无状态的（不像图有 checkpointer），多轮上下文由本文件用
+        `app.state.clinic_threads` 按 thread_id 维护——这是与图路径的**真实差异**：
+        图路径重启进程后能续聊，工具循环路径不能。这份 history 是**真的会进模型**的
+        （`_converse_with_tools` 交给 `ClinicReactRuntime.turn`，再由它传给
+        `run_tool_loop(history=...)`）。
         """
         self = cls.__new__(cls)
         self.state = {}  # 工具循环无图状态，留空字典占位
@@ -515,17 +472,17 @@ def _converse_with_tools(app: FastAPI, request: ChatRequest, thread_id: str) -> 
     """走工具循环：**LLM 通过 function calling 自己决定调哪个工具、调几次**。
 
     历史存在 `app.state.clinic_threads`（属主 + LRU 上界，见 `api/threads.py`）：
-    属主校验在**端点**里已经做过一次，这里的 `history/append` 是第二道——
-    两次都必须过，因为这一层才是真正读写别人历史的地方。
+    属主校验在**端点**里已经做过一次，这里的 `history/append` 是第二道——两次都必须过，
+    因为这一层才是真正读写别人历史的地方。
     """
     rt = _get_clinic_react(app)
     store: ThreadStore = app.state.clinic_threads
     past = store.history(thread_id, request.patient_id)
     # `patient_id` 必须一路传到工具执行体：号源记的是"谁在调用"。
-    # 曾经它只到这里为止，`book_appointment` 读不到它，于是**所有号都记在 "anon" 名下**
-    # （实测：`ChatRequest.patient_id` 被静默忽略，票据也无法按属主查回）。
+    # 只传到这一层为止的话，`book_appointment` 读不到它，号会记在 "anon" 名下，
+    # 票据也无法按属主查回。
     turn = rt.turn(request.message, history=past, patient_id=request.patient_id)
-    # 保留最近 8 条（4 轮）由 ThreadStore 自己按 max_messages 执行（与修复前的 [-8:] 同口径）
+    # 历史上界由 ThreadStore 按 max_messages 执行（默认最近 8 条 = 4 轮）
     store.append(
         thread_id,
         request.patient_id,
@@ -537,16 +494,13 @@ def _converse_with_tools(app: FastAPI, request: ChatRequest, thread_id: str) -> 
 def _run_turn(app: FastAPI, request: ChatRequest, thread_id: str) -> _ChatOutcome:
     """同步跑一轮问诊（在线程池里调用，别挡住事件循环）。
 
-    **两条路径的取舍**：
+    **两条路径的取舍**：有 LLM 密钥 → 走 `run_tool_loop`，控制流交给模型，它会自己
+    决定"先查号源再回答"还是"先追问"，工具调用是模型选的而不是代码排的；无密钥 →
+    回退到确定性图（`ClinicAgent`），红线与挂号照常可用，只是不会主动追问。
+    **宁可降级也不报错。**
 
-    - 有 LLM 密钥 → 走 `run_tool_loop`：控制流交给模型，它会自己决定
-      "先查号源再回答"还是"先追问"，工具调用是模型选的而不是代码排的。
-      这是"是不是 agent"的分界线。
-    - 无密钥 → 回退到确定性图（`ClinicAgent`）：红线与挂号照常可用，
-      只是不会主动追问。**宁可降级也不报错**。
-
-    红线在两条路径里都在**进循环之前**用确定性规则判定（见 clinic_react），
-    所以这条安全不变量不因走哪条路径而改变。
+    红线在两条路径里都在**进循环之前**用确定性规则判定（见 clinic_react），所以这条
+    安全不变量不因走哪条路径而改变。
     """
     react = None
     try:
@@ -563,7 +517,7 @@ def _run_turn(app: FastAPI, request: ChatRequest, thread_id: str) -> _ChatOutcom
             state = agent.resume(request.message, thread_id=thread_id)
         else:
             state = agent.start(request.message, thread_id=thread_id, patient_id=request.patient_id)
-        # 跑完再看一次：这一轮可能又停在一个新追问上（这才是"追问有界"的真实体现）
+        # 跑完再看一次：这一轮可能又停在一个新追问上
         return _ChatOutcome(state, resuming=resuming, pending=agent.pending_question(thread_id=thread_id))
 
 
@@ -586,7 +540,7 @@ async def _chat_events(app: FastAPI, request: ChatRequest, thread_id: str) -> As
     pending = outcome.pending
     text = pending or outcome.text
     if not text:
-        # 兜底的兜底：图里既没有答案也没有追问时，宁可给一句人话，也不要让前端拿到空串
+        # 兜底：图里既没有答案也没有追问时，宁可给一句人话，也不要让前端拿到空串
         text = "这一轮没有产生可回复的内容；请换一种说法，或说明具体症状。"
     yield _sse(
         "message",
@@ -610,8 +564,8 @@ async def _chat_events(app: FastAPI, request: ChatRequest, thread_id: str) -> As
 def _fallback_html(reason: str) -> str:
     """没有前端产物时的说明页。
 
-    为什么不是 404：404 会被浏览器与探针当成"服务没起来"，而实际情况是
-    "服务起来了，只是没构建前端"。这两件事必须能区分，所以说明页返回 **200**。
+    返回 **200** 而不是 404：404 会被浏览器与探针当成"服务没起来"，而实际情况是
+    "服务起来了，只是没构建前端"。这两件事必须能区分。
     """
     return (
         "<!doctype html><html lang='zh-CN'><head><meta charset='utf-8'>"
@@ -641,11 +595,10 @@ def _register_tools() -> None:
 
     - clinic 需要注入 `BookingService`，而 API 的对话域固定走进程内号源替身
       （`MockAppointmentProvider`，见 `/chat`），所以这里注入同一个替身；
-    - `search_docs` **不注册**：注册它必须在启动时传入一个真检索器，而那会强制
-      加载嵌入模型（bge 首次几十秒）——与"资源惰性构造"直接冲突。检索能力
-      由 `/search` 端点提供，功能没有缺失；
-    - `ToolRegistry` 按**工具名**索引，两个域都注册 `search_docs` 会直接撞名，
-      而注册表没有支持同名多域，所以这里不做"都注册一遍"。
+    - `search_docs` **不在这里注册**：注册它必须在启动时传入一个真检索器，而那会强制
+      加载嵌入模型（bge 首次几十秒），与"资源惰性构造"冲突——检索能力由 `/search`
+      提供，功能没有缺失。clinic 域内的 `search_docs` 由 `consult.py` 在检索器就绪后注册。
+      另外 `ToolRegistry` 按**工具名**索引，注册表不支持同名多域，两个域都注册会直接撞名。
 
     `register_domain_tools` 内部先按域清理再注册，反复调用（`uvicorn --reload`）安全。
     """
@@ -666,8 +619,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     资源在这里建好并挂到 `app.state`：**同一个 Settings 只打开一次 store**。
     """
     # 把 .env 导出到 os.environ：LiteLLM 与 has_api_key() 读的都是 os.environ，
-    # 而 pydantic-settings 只把 .env 填进 Settings 对象（这个坑项目里踩过一次）。
-    # 不导出的话，即使 .env 里有密钥，/chat 也会永远走"无 LLM"的降级分支。
+    # 而 pydantic-settings 只把 .env 填进 Settings 对象。不导出的话，即使 .env 里有
+    # 密钥，/chat 也会永远走"无 LLM"的降级分支。
     from kubedocs.config import load_env_file
 
     load_env_file()
@@ -680,16 +633,14 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
         为什么显式关：SQLite 连接不关会在 Windows 上锁住索引目录（删不掉、换不了），
         `--reload` 反复重启还会累积连接。
-        资源**不在这里创建**：`TestClient(app)`（不进入 lifespan）也必须能直接用，
-        把创建放在 startup 会让不带 `with` 的客户端拿不到 store。
+        资源**不在这里创建**：`TestClient(app)`（不进入 lifespan）也必须能直接用。
         """
         try:
             yield
         finally:
             for runtime in app.state.runtimes.values():
                 runtime.close()
-            # 图状态的 SQLite 连接同样要关：不关会在 Windows 上锁住那个文件
-            # （删不掉、换不了），与上面 runtime 的理由完全一样。
+            # 图状态的 SQLite 连接同样要关（理由同上：Windows 上会锁住文件）。
             checkpointer = getattr(app.state, "clinic_checkpointer", None)
             if checkpointer is not None:
                 conn = getattr(checkpointer, "conn", None)
@@ -702,8 +653,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     # 日志级别真正设到 root logger，OTel 真正建 provider。
     configure_logging(cfg)
     setup_tracing(cfg)
-    # 预算上限与"有没有调用过 LLM"无关，必须在装配点就发出去；否则控制台会把
-    # 一个真实存在的上限读成 gauge 默认值 0，而 0 的约定是"不限"（假信息）。
+    # 预算上限与"有没有调用过 LLM"无关，必须在装配点就发出去；否则控制台会把一个
+    # 真实存在的上限读成 gauge 默认值 0，而 0 的约定是"不限"（假信息）。
     publish_config_gauges(cfg)
     app.state.index_html = repo_root().joinpath(*INDEX_HTML)
     app.state.console_html = repo_root().joinpath(*CONSOLE_HTML)
@@ -715,8 +666,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.state.clinic_checkpointer = None
     """图状态的持久化 checkpointer（仅当 `KUBEDOCS_CLINIC_STATE_DB` 配了路径时才非 None）。"""
     # /chat 的会话表：属主绑定 + LRU 上界。**不放在 `_get_clinic_react` 里**——
-    # 那个函数只在有 LLM 密钥、且真的走到工具循环时才被调用，而属主校验必须在
-    # 端点里、对两条路径都生效，所以它必须是 create_app 的常驻状态。
+    # 那个函数只在有 LLM 密钥、且真的走到工具循环时才被调用，而属主校验必须在端点里、
+    # 对两条路径都生效，所以它必须是 create_app 的常驻状态。
     app.state.clinic_threads = ThreadStore()
     current = _DomainRuntime(cfg)
     app.state.runtimes = {cfg.domain: current}
@@ -736,10 +687,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     async def _observe_requests(request: Request, call_next: Any) -> Any:
         """按端点统计请求数与耗时。
 
-        端点名取**路由模板**（`request.scope["route"].path`）而不是原始 URL：
-        用 URL 会把 `/search?q=...` 的每个不同查询变成一个新的时间序列标签，
-        指标基数会随流量无界增长（Prometheus 的经典自伤方式）。
-        /metrics 自身不计数，否则抓取得越勤、它自己的曲线越陡。
+        端点名取**路由模板**（`request.scope["route"].path`）而不是原始 URL：用 URL 会把
+        `/search?q=...` 的每个不同查询变成一个新的时间序列标签，指标基数随流量无界增长。
+        `/metrics` 自身不计数，否则抓取得越勤、它自己的曲线越陡。
         """
         started = time.perf_counter()
         response = await call_next(request)
@@ -805,7 +755,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         """检索 + 生成（LiteLLM）。
 
         没有 LLM 密钥**不是 500**：检索结果与引用照常返回，`degraded` 里写明原因。
-        这条路径让没有密钥的环境（CI、面试官本机）也能完整走通整条链路。
+        这条路径让没有密钥的环境（CI、离线机器）也能完整走通整条链路。
         """
         _require_domain(body.domain)
         runtime = _runtime(request, body.domain)
@@ -826,11 +776,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
         `thread_id` 留空时由服务端生成，并在**首个事件** `thread` 里返回；
         带同一个 `thread_id` 再来一次即续聊（内核用 `interrupt` 挂起的追问会被 `resume`）。
+        `patient_id` 由调用方在请求体里注入（默认 `"anon"`），模型不能提供或改写它——
+        号源记账与属主绑定都用这个值。
 
         **属主校验在这里做**（不是流里面）：`thread_id` 首次出现即绑定 `patient_id`，
-        换一个 `patient_id` 用同一个 `thread_id` → **409**。放在这里有两个好处：
-        响应头还没发出，所以能给出真正的 4xx 而不是流里的一条 error 事件；
-        而且它同时覆盖工具循环与确定性图两条路径。
+        换一个 `patient_id` 用同一个 `thread_id` → **409**。放在这里是因为响应头还没发出，
+        能给出真正的 4xx 而不是流里的一条 error 事件，而且它同时覆盖工具循环与确定性图
+        两条路径。
         """
         thread_id = body.thread_id or uuid.uuid4().hex
         store: ThreadStore = request.app.state.clinic_threads
@@ -870,17 +822,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     def patient(request: Request) -> HTMLResponse:
         """患者端：**只**保留问诊 agent，面向真实使用者。
 
-        与另外两个页面的分工（三者的差异是**刻意**的，不是没整理的重复）：
-
-        | 页面 | 给谁 | 有什么 |
-        |---|---|---|
-        | `/patient` | 患者/使用者 | 只有对话、急诊提示、追问与依据；**没有**域名/API 地址/top_k/指标/工具清单 |
-        | `/` | 开发者 | 检索 / 工具清单 / 问诊的最小示例 |
-        | `/console` | 运维 | 索引体检、`/metrics`、每路检索名次、降级原因 |
-
-        为什么患者端的"没有"很重要：`/` 与 `/console` 上的那些输入项（`API 地址`、
-        `域`、`top_k`）对患者是纯粹的认知负担，而且**能改到不该改的东西**——
-        患者端因此一律**同源**、不暴露任何可调参数。
+        三个页面的分工：`/patient` 给患者，
+        只有对话、急诊提示、追问与依据；`/` 给开发者（检索 / 工具清单 / 问诊的最小示例）；
+        `/console` 给运维（索引体检、`/metrics`、每路检索名次、降级原因）。
+        `/` 与 `/console` 上的输入项（`API 地址`、`域`、`top_k`）对患者是额外的认知负担，
+        而且**能改到不该改的东西**，所以患者端一律**同源**、不暴露任何可调参数。
         """
         return _serve_page(request.app.state.patient_html)
 
@@ -890,6 +836,6 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 app = create_app()
 """模块级实例：`uvicorn kubedocs.api.app:app`。
 
-`create_app()` 只打开索引、不加载嵌入模型，所以这一步是廉价的；
-它换来的是"配置错误在启动时就报，而不是在第一个请求时炸"。
+`create_app()` 只打开索引、不加载嵌入模型，所以这一步是廉价的；换来的是"配置错误
+在启动时就报，而不是在第一个请求时炸"。
 """

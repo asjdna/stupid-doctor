@@ -1,15 +1,14 @@
-"""clinic 域评测入口：红线硬闸门 + 挂号意图 + 分诊（依赖语料，可缺）。
+"""clinic 域评测：红线硬闸门 + 挂号意图 + 分诊。
 
 用法：
-    python scripts/eval_clinic.py                 # 跑一遍，打印指标
-    python scripts/eval_clinic.py --gate          # 与冻结基线比，不达标退出码 2
-    python scripts/eval_clinic.py --write-baseline
+    python scripts/eval_clinic.py --gate --json      # 跑评测；闸门不通过则退出码 2
+    python scripts/eval_clinic.py --write-baseline   # 用当前结果重建冻结基线
 
+前置条件：`--gold` 默认 `data/eval/clinic_gold.jsonl`；分诊依赖 clinic 受限卡片语料，
+缺语料时记为「未评测」、闸门不通过。
+输出：红线召回率/误报率、挂号意图准确率、分诊 top-3 命中率与证据键覆盖率、各错误明细。
 退出码：0 通过 / 1 参数错误 / 2 闸门不通过 / 3 前置条件不满足。
-
-`--json` **只影响输出格式**：退出码照样由 `--gate` / `--write-baseline` 决定
-（它**不**绕过闸门），人类可读的旁白改道 stderr，stdout 留给纯 JSON——
-与 `evaluation/harness.run_eval` 的 `emit()` 同一约定、同一理由。
+`--json` 只改格式（旁白改道 stderr），**不**绕过闸门，退出码仍由 `--gate` 决定。
 """
 
 from __future__ import annotations
@@ -35,24 +34,18 @@ from kubedocs.evaluation.clinic import (  # noqa: E402
 GOLD = REPO_ROOT / "data" / "eval" / "clinic_gold.jsonl"
 BASELINE = REPO_ROOT / "data" / "eval" / "clinic_baseline.json"
 
-# 门限：红线召回容差为 0（安全属性），误报率上限见 evaluation/clinic.py
-GAITE_FP_TOLERANCE = 0.05  # 相对基线允许的误报率上升幅度
+GATE_FP_TOLERANCE = 0.05  # 相对基线允许的误报率上升幅度；红线召回容差为 0（安全属性）
 
-TRIAGE_RED_NOTE = """为什么分诊现在是红的：**这不是本次改动引入的回归，而是冻结基线里本来就记着 0 分**。
+TRIAGE_RED_NOTE = """分诊为什么是红的：冻结基线里记着的就是 0 分。
   · data/eval/clinic_baseline.json 的 triage.accuracy = 0.0（hit 0 / total 5、evaluated=true）；
-  · 根因是受限卡片语料与症状词典两套词汇不重合（证据键覆盖率 1/6，详见 SECURITY.md S-4）；
-  · 基线是冻结的、**不允许为了让闸门变绿而改**（改基线 = 把红灯涂成绿灯）；
+  · 根因是受限卡片语料与症状词典两套词汇不重合（证据键覆盖率 1/6）；
+  · 基线是冻结的、**不允许为了让闸门变绿而改**（改基线等于把红灯涂成绿灯）；
   · 要让它变绿只有一条路：真的把分诊做对（补口语->体征映射或换语料），而不是放宽门限。
   门限取值理由见 src/kubedocs/evaluation/clinic.py 的 DEFAULT_TRIAGE_MIN_ACCURACY。"""
 
 
 def _emit(text: str, *, json_mode: bool) -> None:
-    """人类可读的旁白：`--json` 时改道 **stderr**，stdout 留给机器可读的纯 JSON。
-
-    与 `evaluation/harness.run_eval` 的 `emit()` 同一约定：否则
-    `python scripts/eval_clinic.py --gate --json | jq` 会被旁白打断。
-    非 `--json` 时输出位置**逐字不变**（仍在 stdout）。
-    """
+    """`--json` 时旁白改道 stderr，stdout 留给纯 JSON（否则 `--gate --json | jq` 会被旁白打断）。"""
     print(text, file=sys.stderr if json_mode else sys.stdout)
 
 
@@ -104,16 +97,14 @@ def main(argv: list[str] | None = None) -> int:
     built = _triage_candidates(json_mode=args.json)
     if built is not None:
         links, extract_evidence, hypothesis, _ = built
-        # `evaluated` 与 `evaluation/clinic.evaluate_triage()` 保持同一口径：
-        # 有语料但一条分诊用例都没有，同样是"没测"，不该记成"评测过了"。
+        # 与 `evaluation/clinic.evaluate_triage()` 同口径：有语料但无分诊用例同样是"没测"。
         triage_total, triage_hit, evaluated, missed = 0, 0, bool(triage_cases), []
         cov_num: int = 0
         cov_den: int = 0
         for case in triage_cases:
             ev = extract_evidence(case.text, 1)
-            # 覆盖率诊断：抽出的症状有几个真的在关联表里做键。
-            # 这个数字比命中率更能说明问题——两套词汇不重合时命中率必然为 0，
-            # 而"0%"会被误读成"系统试过但失败了"，其实是"数据还支撑不了这个指标"。
+            # 覆盖率诊断：抽出的症状有几个真在关联表里做键。两套词汇不重合时命中率必然为 0，
+            # 而这个数字能区分"数据还支撑不了该指标"与"系统试过但失败了"。
             cov_den += len(ev)
             cov_num += sum(1 for e in ev if e.symptom in links)
             scores = hypothesis.score(ev, links)
@@ -194,8 +185,7 @@ def main(argv: list[str] | None = None) -> int:
         base = base_raw["metrics"]
         current_sha = clinic_gold_sha256(cases)
         if "gold_sha256" not in base_raw:
-            # 旧格式基线：**拒绝比较**，而不是"没有指纹就跳过这一关"。
-            # "缺字段就跳过校验"正是检索闸门 top_k 那个假绿洞的成因（见 harness.check_gate）。
+            # 旧格式基线缺指纹即拒绝比较：跳过校验会放过"改了尺子"的情况。
             fails.append(
                 "基线没有 gold_sha256（旧格式）：无法判断这把尺子是否被改过 ⇒ 拒绝比较。"
                 "确认无误后用 `--write-baseline` 重建基线"
@@ -213,15 +203,14 @@ def main(argv: list[str] | None = None) -> int:
                 )
             base_fp = float(base["redline"]["false_positive_rate"])
             delta = report.redline_false_positive_rate - base_fp
-            if delta > GAITE_FP_TOLERANCE:
-                fails.append(f"红线误报率相对基线上升 {delta:.2%}（上限 {GAITE_FP_TOLERANCE:.0%}）")
+            if delta > GATE_FP_TOLERANCE:
+                fails.append(f"红线误报率相对基线上升 {delta:.2%}（上限 {GATE_FP_TOLERANCE:.0%}）")
     else:
         _emit("（没有基线文件；跳过基线比较）", json_mode=args.json)
 
     for f in fails:
         _emit(("  ✗ " if not f.startswith("  ") else "") + f, json_mode=args.json)
     if any("分诊" in f and not f.startswith("  ") for f in fails):
-        # 闸门变红时把"为什么红"一并打出来，省得读的人以为是自己这次改坏的。
         _emit("\n" + TRIAGE_RED_NOTE, json_mode=args.json)
     if fails:
         _emit("\n闸门：不通过", json_mode=args.json)

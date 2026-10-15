@@ -1,11 +1,7 @@
-"""真实 LLM 走工具循环的演示：把"LLM 自己决定调什么工具"的证据打出来。
+"""演示真实 LLM 的工具循环：调用顺序不是代码排的，是模型自己通过 function calling 选的。
 
-这是本项目唯一能证明"它是 agent 而不是流水线"的运行记录：
-调用顺序不是代码排的，是模型通过 function calling 自己选的。
-
-用法：
-    python scripts/demo_clinic_agent.py            # 默认两轮：描述症状 → 要求挂号
-    python scripts/demo_clinic_agent.py --turn "我咳嗽三天了，帮我挂呼吸内科"
+用法：`python scripts/demo_clinic_agent.py`（默认两轮）；`--turn "..."` 可重复替代默认轮次。
+需 `DEEPSEEK_API_KEY`（预约走内置 mock）；输出逐轮的所选工具、参数与调用次数；退出码 0 正常、3 无可用密钥。
 """
 
 from __future__ import annotations

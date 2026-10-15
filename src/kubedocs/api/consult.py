@@ -1,50 +1,39 @@
 """临床问诊的**交互式 HTTP 层**（`/consult`）：把 `ClinicalPipeline` 接到前端。
 
-## 为什么单独一个模块
-
-`ClinicalPipeline` 的每一段依赖都是注入的（这是它可测的原因），但也因此
-**一直没有一个地方真正装配它**——`clinical/__init__.py` 只导出、不构造，
-所以"接上映射表能 +14 点"这类收益线上拿不到（CHANGELOG 里记为 Known gap）。
-本模块就是那个装配点，并且只做装配与协议转换，不含医学逻辑：
+本模块只做装配与协议转换，不含医学逻辑。管线各段依赖在此注入：
 
     检索后端 ← 复用 app 的 clinic 运行时（同一份 store / embedder，不重复加载模型）
-    重点：`RetrievalTriage(department_map=load_department_map())` ← 这条是实测 +14 点的关键
-    **工具编排** ← `ClinicalToolLoop`：**模型自己决定调哪些工具取证**（检索/引用核对…）
-    主判   ← `ClinicalReasoner` + `LiteLLMAdapter` + `BudgetedClient`（**与 CLI/eval 共用同一本日预算账**）
-    急诊   ← **模型按「病症 + 严重程度」判出的 `red_flags`**（`system.md` R1）
-    挂号   ← `default_registry(booking_backend=BookingService(MockAppointmentProvider()))`
-    会话   ← 进程内 `IntakeState` + 对话上文（多轮采问的状态属于会话层，不属于流程）
+    重点     ← `RetrievalTriage(department_map=load_department_map())` 科室补全表
+    **工具编排** ← `ClinicalToolLoop`：**模型自己决定调哪些工具取证**（检索 / 引用核对…）
+    主判     ← `ClinicalReasoner` + `LiteLLMAdapter` + `BudgetedClient`（**与 CLI/eval 共用同一本日预算账**）
+    急诊     ← **模型按「病症 + 严重程度」判出的 `red_flags`**（`system.md` R1）
+    挂号     ← `default_registry(booking_backend=BookingService(MockAppointmentProvider()))`
+    会话     ← 进程内 `IntakeState` + 对话上文（多轮采问的状态属于会话层，不属于流程）
 
 ## ⚠️ 急诊红线在本路径上**不是** `RiskGuard`（与图路径相反）
 
-本仓库有**两条临床路径，急诊设计是相反的**，改代码前必须先看清走的是哪条：
+本仓库有**两条临床路径，急诊设计相反**，改代码前必须先看清走的是哪条：
 
 | 路径 | 入口 | 急重症怎么判 | `RiskGuard` 的作用 |
 |---|---|---|---|
 | **本路径**（临床管线） | `/consult` | **模型**按病症 + 严重程度判，输出 `red_flags` | **已退出判断链**：不进提示词、不影响 `urgency`、不触发横幅；只在主判不可用时给一句保守提示，并在"命中而模型未判"时留一条不一致痕迹 |
-| 图路径（较早） | `/chat`、`/patient` | `RiskGuard` 关键词命中即强制转急诊（`agent/kernel.py` 的强制边） | **仍是确定性强制边，LLM 不可绕过** |
+| 图路径 | `/chat`、`/patient` | `RiskGuard` 关键词命中即强制转急诊（`agent/kernel.py` 的强制边） | **仍是确定性强制边，LLM 不可绕过** |
 
-两条路径**故意并存**（老路径可用，新路径要看能不能用起来），但它们的取舍完全相反：
-图路径宁可我多发一次急诊（词表覆盖不到的表述会漏），本路径把判断权交给模型
-（模型漏判时没有确定性兜底）。**做产品决策时不要把它们混为一谈。**
+两条路径**故意并存**，但取舍完全相反：图路径宁可我多发一次急诊（词表覆盖不到的表述
+会漏），本路径把判断权交给模型（模型漏判时没有确定性兜底）。
+**做产品决策时不要把它们混为一谈。**
 
-## 会话状态**在进程内**，这是明确的限制
+## 会话状态与急诊横幅
 
-- 单进程内存字典，**重启即丢**；多副本部署下同一 `session_id` 会落到不同实例。
-- 有条数上限（`MAX_SESSIONS`），超出按最久未用淘汰——避免被无限建会话撑爆内存。
-- 真要持久化得换外部存储；`clinical/persistence.py` 目前还是占位实现，**不假装它有**。
-
-## 急诊横幅**只在模型自己判出急重症时**出现
-
-- `emergency` = 模型这一轮的 `urgency == "emergency"`（它由模型判出的 `red_flags` 推出），
-  且**该判断真的出自模型**（`degraded` 非空 ⇒ 结论来自兜底，不算模型判断，不弹横幅）。
-- **关键词红线不参与**：`domains.clinic.redline` 的命中结果既不进提示词、也不影响
-  `urgency`（见 `clinical/evidence.py` 的 `render`）。它只在主判不可用时给一句对话提示。
-- **不一致要留痕，不静默**：关键词表命中而模型没判出急重症时，回传
-  `keyword_hit_conflict=true`，并在对话正文**追加**一句风险提示
-  （`RED_LINE_CONFLICT_NOTE`）。**只进对话、不弹横幅**——
+- 会话状态**在进程内**：单进程内存字典，**重启即丢**，多副本部署下同一 `session_id`
+  会落到不同实例；有条数上限（`MAX_SESSIONS`），超出按最久未用淘汰。
+- `emergency` = 模型这一轮的 `urgency == "emergency"`（由模型判出的 `red_flags` 推出），
+  且 `degraded` 为空——结论来自兜底时不算模型判断，不弹横幅。
+- **关键词红线不参与判断**：`domains.clinic.redline` 的命中既不进提示词、也不影响
+  `urgency`（见 `clinical/evidence.py` 的 `render`），只在主判不可用时给一句对话提示。
+  关键词表命中而模型没判出急重症时，回传 `keyword_hit_conflict=true` 并在对话正文
+  **追加**一句风险提示（`RED_LINE_CONFLICT_NOTE`）：**只进对话、不弹横幅**——
   判断权归模型，但"系统担心过这件事"不能被抹掉。
-
 """
 
 from __future__ import annotations
@@ -95,9 +84,9 @@ RED_LINE_CONFLICT_NOTE = (
 )
 """关键词表命中、但模型未判急重症时的**对话内**风险提示（不弹横幅）。
 
-为什么还要留着它：判断权已经交给模型，但"关键词表担心过这件事"若被完全抹掉，
-一旦模型漏判就没有任何痕迹。这条提示把它留成**可被复核的一句话**：
-横幅不弹（尊重模型的结论），但系统不会假装自己没担心过。
+判断权已经交给模型，但"关键词表担心过这件事"若被完全抹掉，一旦模型漏判就没有任何
+痕迹。这条提示把它留成**可被复核的一句话**：横幅不弹（尊重模型的结论），
+但系统不会假装自己没担心过。
 """
 
 DISCLAIMER = "本结果由系统根据您描述的症状与知识卡片生成，仅供导诊参考，不能替代医生诊断，也不构成处方。"
@@ -132,20 +121,18 @@ class _Session:
     history: list[dict[str, Any]] = field(default_factory=list)
     """本会话的对话上文（user/assistant 成对）。
 
-    没有它，"科室/用药留待用户追问"就做不成：模型看不到自己上一轮说过什么，
-    追问时会重跑一遍判断，**同一个病例可能问出另一个科室**。
-    `MAX_HISTORY_TURNS` 只是上界——不设上界等于每次调用都把整段对话重新计费。
+    没有它，"科室/用药留待用户追问"就做不成：模型看不到自己上一轮说过什么，追问时会
+    重跑一遍判断，**同一个病例可能问出另一个科室**。`MAX_HISTORY_TURNS` 只是上界——
+    不设上界等于每次调用都把整段对话重新计费。
     """
 
     def remember(self, question: str, turn: Any) -> None:
         """把这一轮记进上文。
 
-        **助手那一侧存的是契约 JSON，不是给患者看的那段散文。** 这条是被实测逼出来的：
-        存散文时，模型看到"我上一轮输出的是散文"，这一轮就接着写散文、
-        **不再输出契约 JSON** ⇒ 解析失败 ⇒ 整轮降级
-        （实测：用户追问"那建议挂哪个科？"时 `action=error`、`degraded=模型输出不可解析`）。
-        存 JSON 两个好处都占：`patient_summary` 本来就在 JSON 里（散文信息不丢），
-        而且每一轮都在提醒模型"你的输出格式是这个"。
+        **助手那一侧存的是契约 JSON，不是给患者看的那段散文。** 存散文时模型会以为
+        自己上一轮输出的是散文，这一轮接着写散文、**不再输出契约 JSON**，于是解析失败、
+        整轮降级。存 JSON 两个好处都占：`patient_summary` 本来就在 JSON 里（散文信息
+        不丢），而且每一轮都在提醒模型"你的输出格式是这个"。
         """
         payload = ""
         assessment = getattr(turn, "assessment", None)
@@ -180,8 +167,8 @@ class ConsultRuntime:
     def pipeline(self) -> Any:
         """惰性装配一次并缓存（嵌入器与预算文件都贵，不能每请求重来）。
 
-        返回 `Any` 而不是 `ClinicalPipeline`：测试接缝允许塞入任何满足
-        `advance()` 协议的对象，标注成具体类型会逼测试桩去继承真实类。
+        返回 `Any` 而不是 `ClinicalPipeline`：测试接缝允许塞入任何满足 `advance()`
+        协议的对象，标注成具体类型会逼测试桩去继承真实类。
         """
         with self._lock:
             if self._pipeline is None:
@@ -211,12 +198,12 @@ class ConsultRuntime:
         )
         # **把 `search_docs` 注册进 clinic 域**——这一步是工具循环能不能工作的前提。
         #
-        # 为什么启动时（`app._register_tools`）故意不注册它：那会强制在启动时构造检索器、
-        # 加载嵌入模型（首次几十秒），与"资源惰性构造"冲突。
-        # 而这里**retriever 已经建好了**（上面那行），此时注册不增加任何成本。
-        # 实测教训：漏了这一步，`tool_schemas(domain="clinic")` 在过滤掉副作用工具后是**空的**，
-        # 模型一个工具都没得调，于是退回用自己的通用医学知识作答——
-        # 表面上"有回答"，实际上 R3「检索不到就不给」被架空了。
+        # 启动时（`app._register_tools`）故意不注册它：那会强制在启动时构造检索器、
+        # 加载嵌入模型（首次几十秒），与"资源惰性构造"冲突；而这里 retriever 已经建好了
+        # （上面那行），此时注册不增加任何成本。
+        # 漏了这一步，`tool_schemas(domain="clinic")` 在过滤掉副作用工具后是**空的**，
+        # 模型一个工具都没得调，于是退回用自己的通用医学知识作答——表面上"有回答"，
+        # 实际上 R3「检索不到就不给」被架空了。
         from kubedocs.agent.bootstrap import register_domain_tools
 
         register_domain_tools("clinic", service=self._booking_backend(), retriever=retriever)
@@ -225,9 +212,8 @@ class ConsultRuntime:
         # 用同一个 BudgetedClient ⇒ 循环里每一次调用都过同一本日预算账。
         budgeted = BudgetedClient(LiteLLMClient(settings), budget)
         tool_loop = ClinicalToolLoop(budgeted, domain="clinic")
-        # **这一行是实测 +14 点（top-3 67.6%→81.7%）的来源**：
-        # 语料里 47.1% 的卡片科室是「未标注」，靠这张补全表把票补回来。
-        # 只信 high 档（图谱直接关系 + SameAs 别名）；含模糊归并的 medium 档实测更差。
+        # 科室补全映射表：语料里近半卡片的科室是「未标注」，靠这张表把票补回来。
+        # 只信 high 档（图谱直接关系 + SameAs 别名）；含模糊归并的 medium 档准确率更差。
         dep_map = load_department_map(min_confidence="high")
         if not dep_map:
             logger.warning(
@@ -333,20 +319,17 @@ def _assessment_payload(a: ClinicalAssessment | None) -> dict[str, Any]:
 
 
 def to_payload(turn: ClinicalTurn, session_id: str, *, turns: int = 0) -> dict[str, Any]:
-    """把一轮产物转成前端契约。
-
-    ## 三条规则（都由产品决定，改动请连同测试一起改）
+    """把一轮产物转成前端契约。三条规则都由产品决定，改动请连同测试一起改：
 
     1. **横幅只跟模型的判断**：`emergency` = 模型这一轮给出 `urgency="emergency"`
-       且**该结论真的出自模型**（`degraded` 为空）。`urgency` 由模型判出的
-       `red_flags` 推出，关键词表不参与。
+       且 `degraded` 为空。`urgency` 由模型判出的 `red_flags` 推出，关键词表不参与。
     2. **关键词命中只作为不一致留痕**：命中而模型未判急重症时，往对话正文追加一句
        风险提示，并回传 `keyword_hit_conflict=true`（不弹横幅）。
     3. **结构化结论不下发到界面**：`departments` / `differentials` / `exams` /
        `medications` / `patient_summary` / `red_flags` 仍然出现在 JSON 里
        （后端留档、契约校验、运维排查都要用），但**前端只渲染 `message`**——
-       也就是 `patient_summary`。提示词已要求模型把科室、可能方向、检查、用药、
-       以及急重症都写进那段话里（见 `system.md` 三之二）。
+       也就是 `patient_summary`；提示词已要求模型把科室、可能方向、检查、用药以及
+       急重症都写进那段话里。
     """
     assessment = turn.assessment
     degraded = bool(turn.degraded)
@@ -428,8 +411,8 @@ def build_consult_router(
 ) -> APIRouter:
     """构造 `/consult` 路由。
 
-    `runtime_provider` 由 `create_app` 注入（返回 clinic 域的运行时对象），
-    这样本模块既不 import `app`（避免循环导入），又能复用同一份 store/embedder。
+    `runtime_provider` 由 `create_app` 注入（返回 clinic 域的运行时对象），这样本模块
+    既不 import `app`（避免循环导入），又能复用同一份 store/embedder。
     `pipeline` 是测试接缝：传了就直接用，不装配真管线（见 `ConsultRuntime.__init__`）。
     """
     router = APIRouter(tags=["consult"])

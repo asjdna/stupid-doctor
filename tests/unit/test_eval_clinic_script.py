@@ -1,18 +1,12 @@
 """`scripts/eval_clinic.py` 的 CLI 契约测试：退出码与输出分流。
 
-为什么要单独测这个脚本（而不是只测 `gate_failures()`）：闸门的**用户可见形态**是
-退出码。曾经这里有一条缺陷链：
+闸门的用户可见形态是退出码，本文件走真实的 `main()` 钉住三件事：
+1. 分诊 0 分 ⇒ 退出码 2、打印「闸门：不通过」；
+2. 分诊达标 ⇒ 退出码 0、打印「闸门：通过」；
+3. `--gate --json` 的退出码与不带 `--json` 逐位相同，且 stdout 是纯 JSON
+   （旁白走 stderr），与 harness 的 `emit()` 同一约定。
 
-- `gate_failures()` 不看分诊 ⇒ 分诊 0 分也退出 0；
-- `--json` 曾（在 harness 里）抢在闸门之前返回，于是"退出码 0"与"质量达标"脱钩。
-
-所以本文件钉住三件事，全部走**真实的 `main()`**、且**不加载卡片语料**
-（`_triage_candidates` 被打桩，所以干净克隆上也能跑，且只花毫秒级）：
-
-1. 分诊 0 分 ⇒ 退出码 **2**、打印「闸门：不通过」；
-2. 分诊达标 ⇒ 退出码 **0**、打印「闸门：通过」；
-3. `--gate --json` 的退出码与不带 `--json` **逐位相同**，且 stdout 是**纯 JSON**
-   （旁白走 stderr）——与 `evaluation/harness.run_eval` 的 `emit()` 同一约定。
+`_triage_candidates` 被打桩：不加载卡片语料，干净克隆上也能毫秒级跑完。
 """
 
 from __future__ import annotations
@@ -48,10 +42,7 @@ def script() -> ModuleType:
 def gold(tmp_path: Path) -> Path:
     """最小金标集：一条红线正例 + 一条正常话 + 一条分诊用例。
 
-    只用三条，是为了把被验证的东西锁在"闸门判据"上，而不是语料规模上。
-    **红线正例必须存在**：分红线的召回是安全属性（容差 0），
-    一个没有正例的用例集根本没检验它——`gate_failures()` 因此把"红线未评测"
-    也判为失败（见 `TestRedLineMustBeEvaluated`）。
+    只验证闸门判据、不涉及语料规模；红线正例必须存在，否则召回无从检验。
     """
     path = tmp_path / "gold.jsonl"
     path.write_text(
@@ -84,7 +75,7 @@ def _run(script: ModuleType, gold: Path, tmp_path: Path, *extra: str) -> int:
 
 class TestTriageDrivesTheExitCode:
     def test_zero_triage_accuracy_fails_the_gate(self, script, gold, tmp_path, monkeypatch, capsys):
-        """分诊一条都不中 ⇒ 退出码 2（缺陷回归：修复前是 0）。"""
+        """分诊一条都不中 ⇒ 退出码 2（分诊指标必须真的参与闸门）。"""
         _stub_triage(script, monkeypatch, top="骨科")  # 期望科室命中不了
         code = _run(script, gold, tmp_path, "--gate")
 
@@ -92,7 +83,9 @@ class TestTriageDrivesTheExitCode:
         out = capsys.readouterr().out
         assert "闸门：不通过" in out
         assert "分诊准确率" in out
-        assert "为什么分诊现在是红的" in out, "红的时候必须说明原因，否则会被当成新回归"
+        # 断言"脚本登记的那段说明被原样打印出来"，而不是某个固定措辞：
+        # 变红时必须自解释，否则读者无从判断是数据问题还是实现问题。
+        assert script.TRIAGE_RED_NOTE in out
 
     def test_meeting_the_threshold_passes(self, script, gold, tmp_path, monkeypatch, capsys):
         """分诊达标（1/1 = 100%）⇒ 退出码 0：闸门不是"永远红"。"""
@@ -141,11 +134,9 @@ class TestJsonDoesNotBypassTheGate:
 
 
 class TestRedLineMustBeEvaluated:
-    """**空集不得满足安全闸门**（缺陷回归）。
+    """空集不得满足安全闸门：没有红线正例的运行必须判为未评测并失败。
 
-    缺陷形态：`redline_recall` 在分母为 0 时返回 **1.0**，于是删掉用例集里
-    全部 `expect_red_line=true` 的用例之后，输出是
-    「红线召回 100.00% (TP=0 FN=0)」——一个"没有检验任何红线"的运行拿到了安全通过。
+    召回在分母为 0 时不许返回 1.0，否则"删光正例"就成了让闸门变绿的手段。
     """
 
     def _negative_only_gold(self, tmp_path: Path) -> Path:
@@ -175,7 +166,7 @@ class TestRedLineMustBeEvaluated:
 
 
 class TestBaselineIsBoundToTheGoldSet:
-    """clinic 基线也必须绑定金标指纹（此前只存指标，换尺子无人察觉）。"""
+    """clinic 基线必须绑定金标指纹：只存指标的话，换尺子无人察觉。"""
 
     def test_baseline_records_the_gold_hash_and_case_count(self, script, gold, tmp_path):
         code = int(

@@ -1,24 +1,13 @@
 """结构化路由：让模型**填表**，而不是让它的自由文本来决定分支。
 
-## 反面案例
+候选域由代码给出（`build_candidates` 从域包的 `name`/`description` 构造），模型只能在这份
+清单里选；回答必须落进 `RouteDecision`（pydantic 模型：域名、置信度、理由都有类型与范围
+约束），实现方负责把它绑到 `with_structured_output(RouteDecision)`。
 
-最省事的写法是 `if "travel_advisor" in content:`——把模型输出的一句话拿去做子串匹配，
-再据此选分支。它有三个硬伤：
-
-1. **脆**：模型换个措辞、多一个空格、把名字包进 markdown 反引号里，匹配就落空；
-2. **不可枚举**：模型可以编出一个根本不存在的域。子串匹配要么静默落空，
-   要么把整条链路带到一个没人实现的分支上，然后崩在离这里很远的地方；
-3. **不可审计**：没有 schema、没有置信度，事后无法回答"为什么走了这条路"。
-
-## 这里怎么做
-
-1. 候选域由**代码**给出（`build_candidates` 从域包的 `name`/`description` 构造），
-   模型只能在这份清单里选；
-2. 模型的回答必须落进 `RouteDecision`（pydantic v2 模型）：域、置信度、理由都有
-   类型与范围约束。实现方负责把它绑到 `with_structured_output(RouteDecision)`；
-3. 出口**永远**是一个合法的域：非法值、调用异常、没配模型，一律回退到 `default`
-   并把原因写进 `reason`。路由选错一个域，后面的检索、工具、提示词、引用全都白做，
-   所以这里宁可带记录地降级，也不放行一个非法值。
+出口**永远**是一个合法域：非法值、调用异常、没配模型，一律回退 `default`（confidence=0.0）
+并把原因写进 `reason`。子串匹配式的自由文本路由会在措辞变化时失配、允许模型编出不存在的
+域、事后无从审计；而路由选错一个域，后面的检索、工具、提示词、引用全都白做，
+所以这里宁可带记录地降级。内核不硬编码域知识，加域不用改本模块。
 """
 
 from __future__ import annotations
@@ -29,7 +18,7 @@ from typing import Any, Protocol
 from pydantic import BaseModel, Field
 
 _REASON_MAX = 200
-"""`reason` 的字符上限；兜底路径自己也得守这个界，否则降级会因为超长而抛校验错。"""
+"""`reason` 的字符上限；兜底路径也必须守这个界，否则降级会因超长而抛校验错。"""
 
 
 class RouteDecision(BaseModel):
@@ -47,10 +36,9 @@ class Router(Protocol):
 
 
 def _text(value: object) -> str:
-    """把属性安全地取成 str。
+    """把属性安全地取成 str：`None` 变空串而不是 `"None"`。
 
-    刻意把 `None` 变成空串而不是 `"None"`：后者是个**真值**，会让"没有 name 的域包"
-    一路混进候选清单，最后表现为一个永远选不中的神秘候选。
+    后者是个**真值**，会让"没有 name 的域包"混进候选清单，表现为一个永远选不中的候选。
     """
     return "" if value is None else str(value)
 
@@ -58,12 +46,9 @@ def _text(value: object) -> str:
 def build_candidates(domains: Sequence[object]) -> list[dict[str, Any]]:
     """从域包构造候选描述（模型能看到的唯一一份"可选域"清单）。
 
-    只取 `name` 与 `description`：`description` 是域包自己声明的"我能回答什么"，
-    内核不硬编码任何域知识——加第三个域时这里一个字都不用改。
-
-    同时接受 `DomainRegistry.describe()` 那种 `dict` 形状：同一份清单不该因为
-    承载它的容器不同就被丢掉。缺少 `name` 的域包视为**编程错误**并抛 `ValueError`，
-    而不是静默跳过——静默跳过会让一个注册失败的域以"总是选不中"的形式失踪。
+    只取 `name` 与 `description`，并同时接受 `DomainRegistry.describe()` 那种 `dict` 形状。
+    缺少 `name` 的域包视为**编程错误**并抛 `ValueError`：静默跳过会让注册失败的域以
+    "总是选不中"的形式失踪。加第三个域时这里一个字都不用改。
     """
     candidates: list[dict[str, Any]] = []
     for domain in domains:
@@ -84,7 +69,7 @@ def build_candidates(domains: Sequence[object]) -> list[dict[str, Any]]:
 def _make(domain: str, confidence: float, reason: str) -> RouteDecision:
     """统一出口：理由截断到 schema 上限。
 
-    兜底路径是为了"不崩"而存在的，如果它自己因为理由超长触发 pydantic 校验错，
+    兜底路径存在的意义是"不崩"，若它自己因理由超长触发 pydantic 校验错，
     就把降级变成了崩溃——那是最不该出错的地方出错。
     """
     return RouteDecision(domain=domain, confidence=confidence, reason=reason[:_REASON_MAX])
@@ -93,9 +78,9 @@ def _make(domain: str, confidence: float, reason: str) -> RouteDecision:
 def _degrade(default: str, names: Sequence[str], why: str) -> RouteDecision:
     """降级到 `default`，置信度固定 0.0。
 
-    0.0 是给调用方的信号：这次选择**没有模型背书**，是兜底值，可以据此决定要不要
-    追问用户或记录指标。若 `default` 自己也不在候选里，额外点出来——那是配置错误，
-    但它比"整个请求失败"轻，所以照常返回并让人看得见。
+    0.0 是给调用方的信号：这次选择**没有模型背书**，可据此决定是否追问用户或记指标。
+    若 `default` 自己也不在候选里，额外点出来——那是配置错误，但比"整个请求失败"轻，
+    所以照常返回并让人看得见。
     """
     if default not in names:
         why += f"；且默认域 {default!r} 不在候选 {list(names)} 里（配置错误，请修）"
@@ -105,17 +90,15 @@ def _degrade(default: str, names: Sequence[str], why: str) -> RouteDecision:
 def route(
     query: str, *, llm: Router | None, candidates: Sequence[dict[str, Any]], default: str
 ) -> RouteDecision:
-    """返回最终决定。
+    """返回最终决定。规则按顺序生效：
 
-    规则（顺序即优先级）：
-
-    1. 没有任何候选 -> 抛 `ValueError`。这是"域包没注册"的编程错误，
-       让模型或默认值把它糊过去，只会把错误推到更远的地方；
-    2. 只有一个候选 -> 直接返回它，confidence=1.0，**不走 LLM**。此时"路由"
-       没有任何信息量，调用一次模型只是多花钱、多一次把唯一合法值答错的机会；
-    3. llm 为 `None` 或抛异常 -> 返回 `default`，confidence=0.0，reason 写明降级原因；
-    4. llm 返回的 domain 不在候选里 -> **拒绝并回退 default**，reason 说明模型给了
-       非法域。模型编域名是常见失败模式，静默接受它会让后面全员崩掉。
+    1. 没有任何候选 -> 抛 `ValueError`：这是"域包没注册"的编程错误，
+       让模型或默认值把它糊过去只会把错误推到更远的地方；
+    2. 只有一个候选 -> 直接返回它，confidence=1.0，**不走 LLM**：此时路由没有信息量，
+       调用一次模型只是多花钱、多一次把唯一合法值答错的机会；
+    3. `llm` 为 `None` 或抛异常 -> 返回 `default`，confidence=0.0，`reason` 写明降级原因；
+    4. 模型给出的 domain 不在候选里 -> **拒绝并回退 default**。模型编域名是常见失败模式，
+       静默接受它会让后面全员崩掉。
     """
     if not candidates:
         raise ValueError("路由候选为空：没有任何域包注册，这是编程错误，不该由模型或默认值兜底")
@@ -130,8 +113,8 @@ def route(
 
     try:
         decision = llm.decide(query, candidates)
-        # 这三行留在 try 里：实现方若用鸭子类型的替身对象，字段缺失/类型不对
-        # 同样属于"路由不可用"，应当降级而不是把异常抛给上层。
+        # 这三行留在 try 里：替身对象字段缺失/类型不对同样属于"路由不可用"，
+        # 应当降级而不是把异常抛给上层。
         chosen = _text(decision.domain)
         confidence = min(1.0, max(0.0, float(decision.confidence)))
         reason = _text(decision.reason)

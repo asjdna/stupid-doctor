@@ -1,7 +1,6 @@
-"""Agent 内核测试：红线强制边、中断挂起与续跑、有界追问、挂号分支。
+"""Agent 内核测试：强制边、中断续跑、有界追问、挂号分支与回答/图结构。
 
-全部用**打桩依赖**（`ClinicDeps` 的每个字段都可注入）：不调模型、不起库、
-秒级完成。内核的价值在于控制流正确，而这些断言恰好就是控制流。
+依赖全部打桩注入（`ClinicDeps` 每个字段都可替换）：不调模型、不起库，断言的就是控制流。
 """
 
 from __future__ import annotations
@@ -13,11 +12,8 @@ import pytest
 from kubedocs.agent.kernel import ClinicAgent, ClinicDeps
 from kubedocs.agent.state import EvidenceSource, SymptomEvidence
 
-# 挂号意图词表：**必须列变体**，不能只匹配「挂号」。
-# 实测教训：`"挂号" in "帮我挂个号"` 是 False —— 中文里"挂个号"中间插了"个"，
-# 朴素子串匹配直接失效。这正是源项目 BOOK_WORDS 要写成
-# ["挂号","预约","取号","挂个号","预约挂号","挂号看"] 的原因，
-# 也是"多智能体用关键词路由"这类做法的真实脆弱点。
+# 挂号意图词表必须列变体：`"挂号" in "帮我挂个号"` 是 False（中间插了"个"），
+# 朴素子串匹配直接失效——这正是意图判定放在域包词表里、而不是内核写死的原因。
 BOOK_WORDS = ("挂号", "挂个号", "预约", "取号", "约号")
 
 
@@ -26,10 +22,9 @@ def _book_intent(text: str) -> bool:
 
 
 def _confirm_intent(text: str) -> bool:
-    """打桩的"用户确认了挂号"判定。
+    """打桩的"用户确认了挂号"判定：一个"同意/不同意"的最小实现。
 
-    内核测试刻意不 import 域包（域包有自己的词表与否定判定），所以这里只要
-    一个"同意/不同意"的最小实现，用来验证**控制流**：
+    内核测试刻意不 import 域包（域包有自己的词表与否定判定），这里只验证控制流：
     没有确认就绝不能走到 `book` 节点。
     """
     return any(w in text for w in ("确认", "是", "好", "嗯"))
@@ -71,9 +66,7 @@ class _FakeHit:
     temporality = "present"
 
 
-# ===========================================================================
 # 红线：LLM 不可绕过的强制边
-# ===========================================================================
 class TestRedLineForcedEdge:
     def test_red_line_goes_straight_to_emergency(self):
         agent = ClinicAgent(_deps(check_red_line=lambda text: _FakeHit()))
@@ -107,11 +100,9 @@ class TestRedLineForcedEdge:
         assert state["status"] != "emergency"
 
     def test_red_line_is_checked_again_on_resume_turns(self):
-        """**续答轮也要过红线**：用户完全可能在回答追问时才说出胸痛。
+        """**续答轮也要过红线**：红线症状可能出现在回答追问的那一轮。
 
-        缺陷形态（修复前）：`node_redline` 只看首轮的 `question`，而 resume 轮
-        被直接送回 `observe`——于是"我现在胸痛，喘不上气"写在追问的回答里
-        永远不会触发急诊分支，而文档宣称"红线在两条路径里都是进循环之前的确定性判定"。
+        resume 轮同样要在进循环之前做确定性判定，否则写在回答里的"我现在胸痛"不会触发急诊。
         """
         agent = ClinicAgent(
             _deps(
@@ -147,9 +138,6 @@ class TestRedLineForcedEdge:
         assert seen[-1] == "胸痛", "红线命中时 observe 用的是首轮原话，而不是这一轮的输入"
 
 
-# ===========================================================================
-# 中断：真挂起 + 可续跑
-# ===========================================================================
 class TestInterruptAndResume:
     def test_ask_suspends_and_reports_pending_question(self):
         agent = ClinicAgent(_deps(next_question=lambda s, st: "有没有发热？"))
@@ -186,9 +174,6 @@ class TestInterruptAndResume:
         assert agent.snapshot(thread_id="A")["question"] == "患者A"
 
 
-# ===========================================================================
-# 有界追问
-# ===========================================================================
 class TestBoundedQuestioning:
     def test_stops_when_should_stop_says_so(self):
         agent = ClinicAgent(
@@ -225,15 +210,12 @@ class TestBoundedQuestioning:
         assert "没有更有鉴别力" in state["stop_reason"]
 
 
-# ===========================================================================
-# 挂号分支：**意图成立不等于可以下单**
-# ===========================================================================
+# 挂号分支：意图成立不等于可以下单
 class TestBookingBranch:
     def test_booking_requires_an_explicit_confirmation(self):
         """关键词命中只证明"提到了挂号"，占号还要一次独立确认。
 
-        缺陷形态（修复前）：`wants_booking` 命中就直接进 `book`，
-        于是"我不想挂号"也会占掉一个真实号源。
+        `wants_booking` 命中不等于用户真要挂号："我不想挂号"同样会命中词表。
         """
         agent = ClinicAgent(_deps())
         state = agent.start("帮我挂个号", thread_id="t1")
@@ -286,8 +268,7 @@ class TestBookingBranch:
     def test_booking_intent_variants_all_trigger(self, text):
         """**中文意图识别必须列变体**：`"挂号" in "帮我挂个号"` 是 False。
 
-        这是关键词式路由的真实脆弱点，也是内核把意图判定**放在域包里**
-        （`BOOK_WORDS` 那样的变体词表）而不是内核自己写死的原因。
+        这是关键词式路由的脆弱点，所以意图判定放在域包（`BOOK_WORDS` 那样的变体词表）里。
         """
         assert _book_intent(text) is True
         agent = ClinicAgent(_deps())
@@ -301,9 +282,6 @@ class TestBookingBranch:
         assert _book_intent("帮我挂个号") is True
 
 
-# ===========================================================================
-# 回答路径（self-ask 走这里）
-# ===========================================================================
 class TestAnswerPath:
     def test_answer_node_is_reached_and_carries_citations(self):
         agent = ClinicAgent(_deps())
@@ -326,9 +304,6 @@ class TestAnswerPath:
         assert any("第 2 轮" in d for d in state["diagnostics"])
 
 
-# ===========================================================================
-# 图结构本身
-# ===========================================================================
 class TestGraphShape:
     def test_graph_compiles_with_memory_checkpointer(self):
         agent = ClinicAgent(_deps())

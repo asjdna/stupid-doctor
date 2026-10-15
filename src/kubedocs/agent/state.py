@@ -1,24 +1,12 @@
-"""会话状态：图上流动的唯一数据结构。
+"""会话状态：clinic 域在 LangGraph 图上流动的唯一数据结构。
 
-## 为什么状态里必须带"证据来源"
+每条症状证据都带 `source`（`EvidenceSource`）：系统抛出的试探性假设会引入建议性偏倚，
+用户答"是"未必是自发症状，所以打分按来源降权（权重由 `hypothesis.weight_of` 计算）。
+否认同样要记——鉴别诊断里"排除"与"命中"同等重要，但口语否认可能是没说准，故降权计入。
 
-医疗问诊里，系统**主动抛出试探性假设**（"我猜您可能是胸口发闷、像压着东西？"）能显著
-提高症状采集效率，但会引入**建议性偏倚**：用户倾向于答"是"，即使本来没有。
-于是采集到的症状可能是被问题"问出来"的，而不是患者自己想说的。
-
-若不区分来源，这两者会等量齐观，分诊被假症状带偏。所以每条证据都记 `source`，
-打分时按来源降权（权重表见 `hypothesis.py`），病历里也标注出来。
-
-## 为什么否定证据也要记
-
-鉴别诊断里"排除"与"命中"同等重要：用户否认某个候选的关键症状，是该候选的强反证。
-只累加阳性症状的系统无法收敛。但口语里的否认可能是"没说准"（患者对症状学不熟），
-所以否定证据**降权**计入，而不是满权。
-
-## reducer 约定
-
-`evidence` 用 `operator.add` 累加：一轮问答可能同时产生"新症状"与"否认旧症状"两类证据，
-后写的节点不该覆盖先写的。其余字段默认覆盖语义（`total=False` 允许部分更新）。
+reducer 约定：`evidence` / `asked` / `diagnostics` 用 `operator.add` 累加（一轮问答可能
+同时产生新症状与否认旧症状，后写的节点不该覆盖先写的）；其余字段是覆盖语义，
+`total=False` 允许节点只更新自己关心的字段。
 """
 
 from __future__ import annotations
@@ -108,9 +96,8 @@ class ClinicState(TypedDict, total=False):
     patient_id: str
     turn: int
     resume_text: str
-    """`interrupt()` 挂起后，用户回答被 `Command(resume=...)` 送回图里，
-    内核把它放在这里供 `observe` 节点消费。不用 messages 是因为本项目不做
-    通用对话，只需要"这一轮用户说了什么"。"""
+    """`interrupt()` 挂起后用户的回答，由 `Command(resume=...)` 送回图里供 `observe` 消费。
+    只承载"这一轮用户说了什么"，不需要通用对话历史，所以不复用 messages。"""
 
     # ---- 证据与推理 ----
     evidence: Annotated[list[SymptomEvidence], operator.add]

@@ -1,43 +1,32 @@
 """本地嵌入式索引：SQLite（FTS5 全文） + numpy 向量矩阵。
 
-## 现状（2026-09 之后）：这是**旧实现**，保留作对照与回退
-
-同一 Store 协议下现在有三个实现，`KUBEDOCS_STORE` 选择（见 `store/__init__.py`）：
+同一 Store 协议下有多个实现，由 `KUBEDOCS_STORE` 选择（见 `store/__init__.py`）：
 
 | 取值 | 实现 | 定位 |
 |---|---|---|
 | `sqlite-vec` | `sqlite_vec_store.SqliteVecStore` | **默认**：FTS5 + sqlite-vec 向量索引 |
-| `sqlite` | 本文件 | 旧实现：FTS5 + numpy 暴力内积 + `.npy` 侧车矩阵 |
+| `sqlite` | 本文件 | FTS5 + numpy 暴力内积 + `.npy` 侧车矩阵 |
 | `pgvector` | `pgvector_store.PgVectorStore` | 生产：Postgres + pgvector HNSW |
 
-**为什么保留本文件而不是删掉**：它是唯一"零扩展、纯 numpy"的实现，
-既能在 sqlite-vec 扩展装不上/加载失败时当回退，也是性能对照的基线
-（ADR-0004 里的 p50/p95 三方对照就以它为一列）。删掉它，那条对照数字
-就再也无法复现——而"凭记忆比较性能"是没有价值的。
+本实现是唯一"零扩展、纯 numpy"的一个：全部由标准库 + numpy 提供，
+**零外部进程、零镜像、零网络**，因此可作 sqlite-vec 扩展装不上时的回退，
+以及性能对照的基线。检索与生成代码完全相同，切换后端只改配置。
 
-## 为什么当初是这套组合而不是 Postgres+pgvector
+边界与代价：
 
-先把"业务逻辑跑通"和"可一键部署"拆成两件事。前者只需要一个能落盘、
-能全文检索、能做向量近邻的存储；这套组合全部由标准库 + numpy 提供，
-**零外部进程、零镜像、零网络**，本机立刻可跑。
+- 单写者：SQLite 并发写入有限，只适合单进程摄取；多实例写要走 `pgvector`；
+- 全量向量常驻内存（`dim` 越大占用越高），语料再大两个数量级就该换 ANN 索引；
+- 删除一篇文档要**重建整个矩阵**（`finalize` 压实 `vector_row`），
+  语料频繁增删时这一步是纯开销；`sqlite-vec` 版没有它，向量随块行增删。
 
-代价与边界（写清楚，免得日后误判）：
-- 单写者：SQLite 并发写入有限，只适合单进程摄取；线上多实例写要走 pgvector 版；
-- 全量向量常驻内存：18861×384 float32 ≈ 29MB，可接受；再大两个数量级就该换索引；
-- 删除一篇文档要**重建整个矩阵**（`finalize` 压实 `vector_row`）：18861 块约 29MB
-  的重写，语料频繁增删时这是纯浪费——`sqlite-vec` 版没有这一步，向量随块行增删。
+两个必须规避的坑：
 
-架构上这不算"降级实现"，而是同一 Store 协议下的**另一种实现**——
-检索与生成代码一行都不用改，切换只改配置。
-
-## 两个容易踩的坑，这里直接规避
-
-1. **FTS5 外内容表（external content）的删除**：外内容表不能用普通
-   `DELETE`，必须先用 FTS5 的 `'delete'` 指令把索引项摘掉，再删内容行；
-   且顺序反了索引会永久不一致（后续查询报 malformed）。见 `_drop_doc_chunks`。
-2. **向量矩阵与 rowid 的对应**：`chunks` 的 rowid 在删除后会**被回收**，
-   新插入的块可能拿到比现存块更小的 rowid。所以不能假设"rowid 单调递增"，
-   `finalize()` 每次按当前 rowid 顺序**重建**矩阵并回写 `vector_row`。
+1. **FTS5 外内容表（external content）的删除**：不能直接用普通 `DELETE`，必须先用
+   FTS5 的 `'delete'` 指令摘掉索引项，再删内容行；顺序反了索引会永久不一致
+   （后续查询报 malformed）。见 `_drop_doc_chunks`。
+2. **向量矩阵与 rowid 的对应**：`chunks` 的 rowid 在删除后会被回收，新插入的块可能
+   拿到比现存块更小的 rowid，所以不能假设"rowid 单调递增"。`finalize()` 每次按当前
+   rowid 顺序重建矩阵并回写 `vector_row`。
 """
 
 from __future__ import annotations
@@ -64,7 +53,7 @@ from kubedocs.store.base import (
     Vector,
 )
 
-# 词元抽取与 MATCH 表达式在 store/textquery.py 里（三个后端共用同一套词元规则，
+# 词元抽取与 MATCH 表达式在 store/textquery.py 里（各后端共用同一套词元规则，
 # 只在表达式语法上分叉）。这里转出 `build_match_expr` 保持既有导入路径可用。
 from kubedocs.store.textquery import build_match_expr
 
@@ -81,10 +70,9 @@ SCHEMA_VERSION = 2
 
 # FTS5 外内容表：正文只存一份（在 chunks 里），FTS 只存倒排索引。
 #
-# 为什么索引列是 `body_normalized` 而不是 `body`：
-# 索引形态与展示形态必须分开。英文两者相同；中文必须先 jieba 预分词才能被 FTS5
-# 正确切词（详见 normalize.py）。`body` 保留原文用于展示与引用，
-# `body_normalized` 只服务于倒排索引。
+# 索引列是 `body_normalized` 而不是 `body`：索引形态与展示形态必须分开。
+# 英文两者相同；中文必须先 jieba 预分词才能被 FTS5 正确切词（详见 normalize.py）。
+# `body` 保留原文用于展示与引用，`body_normalized` 只服务于倒排索引。
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS meta (
     key   TEXT PRIMARY KEY,
@@ -154,7 +142,7 @@ class SqliteStore:
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
 
         # check_same_thread=False + 全库访问加锁：FastAPI 的同步端点跑在线程池里，
-        # 一个连接跨线程使用本身是安全的，前提是同一时刻只有一处在用（这里用锁保证）。
+        # 一个连接跨线程使用本身安全，前提是同一时刻只有一处在用（由锁保证）。
         self._lock = threading.RLock()
         self._con = sqlite3.connect(str(self.db_path), check_same_thread=False, isolation_level=None)
         self._con.row_factory = sqlite3.Row
@@ -228,8 +216,8 @@ class SqliteStore:
                 )
             old_norm = rows.get("normalizer", "")
             if old_norm and old_norm != self.normalizer.name:
-                # 归一化器变了 = 倒排索引里的词元变了 = 旧索引对新查询基本不可用。
-                # 这种不一致只会表现为"搜不到"，所以必须显式拒绝。
+                # 归一化器变了 = 倒排索引里的词元变了，旧索引对新查询基本不可用；
+                # 这种不一致只会表现为"搜不到"，必须显式拒绝。
                 raise StoreError(
                     f"索引归一化器不符：库里是 {old_norm!r}，当前配置 "
                     f"{self.normalizer.name!r}；请用 `ingest --rebuild` 重建索引"
@@ -246,16 +234,14 @@ class SqliteStore:
     def _reload_index(self) -> None:
         """把矩阵与 rowid 映射读进内存。向量矩阵按 vector_row 升序排列。
 
-        ## 为什么在这里校验 `vector_row` 的连续性（不是可选的防御性代码）
+        `vector_row` 的连续性必须在这里校验：`dense_search` 用矩阵行号 `i` 去查
+        `self._row_index[i]`，即"矩阵第 i 行的向量属于哪个 chunk"完全由 `vector_row`
+        决定。一旦 `vector_row` 出现空洞（例如调了 `delete_docs()` 之后没有
+        `finalize()`），`_row_index` 会比矩阵短、标签整体前移——轻则**静默返回错误
+        内容**（查询 A 的向量，返回 B 的正文），重则 `IndexError` 越界。
 
-        `dense_search` 用矩阵行号 `i` 去查 `self._row_index[i]`：**"矩阵第 i 行的
-        向量属于哪个 chunk"完全由 `vector_row` 决定**。一旦 `vector_row` 出现空洞
-        （例如调了 `delete_docs()` 之后没有 `finalize()`），`_row_index` 会比矩阵短，
-        标签整体前移——轻则**静默返回错误内容**（查询 A 的向量，返回 B 的正文），
-        重则 `IndexError` 越界。
-
-        这两种都不是"服务降级"，而是**给出了错误的答案**，所以加载时就大声失败，
-        而不是带着错位继续服务。修复办法只有一个：重建索引。
+        这两种结果都是给出错误答案，不是服务降级，所以加载时就失败；修复办法只有
+        重建索引。
         """
         with self._lock:
             rows = [int(r["vector_row"]) for r in self._con.execute("SELECT vector_row FROM chunks")]
@@ -385,14 +371,9 @@ class SqliteStore:
             return []
         w = ", ".join(str(x) for x in _BM25_WEIGHTS)
 
-        # 分两步取，不要在 FTS 上直接 JOIN chunks。
-        #
-        # 实测（18861 块，4 词元 OR 查询命中 9062 行）：
-        #   纯 MATCH                       0.04ms
-        #   MATCH + ORDER BY bm25          6.60ms
-        #   MATCH + bm25 + JOIN chunks    57.50ms   ← JOIN 让计划变成"先连全部命中行再排序"
-        # 两步走只需要对最终 50 行做一次 rowid 查表，省掉 9000 次随机读。
-        # 名次完全一致（仍由 FTS 的 bm25 顺序决定），只是取回方式变了。
+        # 分两步取，不要在 FTS 上直接 JOIN chunks：JOIN 会让查询计划变成
+        # "先连上全部命中行再排序"，命中上万行时明显变慢。两步走只需要对最终 limit
+        # 行做一次 rowid 查表，名次仍由 FTS 的 bm25 顺序决定，与一步式完全一致。
         with self._lock:
             fts_sql = f"SELECT rowid FROM chunks_fts WHERE chunks_fts MATCH ? ORDER BY bm25(chunks_fts, {w}) LIMIT ?"  # noqa: S608
             ids = [r[0] for r in self._con.execute(fts_sql, (expr, limit))]
@@ -423,7 +404,9 @@ class SqliteStore:
 
     # ------------------------------------------------------------------ 写入
     def _drop_doc_chunks(self, con: sqlite3.Connection, doc_id: str) -> int:
-        """删掉一篇文档的所有块。**顺序不能反**，见模块文档第 1 条。"""
+        """删掉一篇文档的所有块。**顺序不能反**：先摘 FTS 索引项，再删内容行，
+        否则索引会永久不一致（见模块文档第 1 条）。
+        """
         n = con.execute("SELECT COUNT(*) FROM chunks WHERE doc_id = ?", (doc_id,)).fetchone()[0]
         con.execute(
             "INSERT INTO chunks_fts(chunks_fts, rowid, body_normalized, title, breadcrumb) "
@@ -507,16 +490,16 @@ class SqliteStore:
         所以基类只把向量暂存在 `_pending`。这个钩子因此是空实现。
 
         `SqliteVecStore` 覆写它，把向量写进 `vec0` 虚表——与块行**同一事务**提交，
-        不存在"重排"这一步，也不会出现"块写了、向量没写"的中间态。
+        不需要"重排"这一步，也不会有"块写了、向量没写"的中间态。
         """
         return
 
     def finalize(self) -> None:
         """把本轮新增向量并入矩阵、压实 vector_row 并落盘。
 
-        重排是必须的：rowid 会被回收，删掉最大 rowid 的块后新块可能拿到更小的
-        rowid，于是"按 rowid 顺序"与"按矩阵行号顺序"不再一致。这里一律以当前
-        rowid 顺序重建，映射关系由 vector_row 落库固化。
+        重排是必须的：rowid 会被回收，删掉最大 rowid 的块后新块可能拿到更小的 rowid，
+        于是"按 rowid 顺序"与"按矩阵行号顺序"不再一致。这里一律以当前 rowid 顺序重建，
+        映射由 vector_row 落库固化；本批未重编码的块复用旧矩阵中的向量。
         """
         with self._lock:
             rows = self._con.execute("SELECT rowid, chunk_id FROM chunks ORDER BY rowid").fetchall()

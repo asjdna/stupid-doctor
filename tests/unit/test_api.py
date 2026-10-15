@@ -1,14 +1,11 @@
 """API 层测试：路由形状、降级路径、SSE 事件格式。
 
-## 三条硬约束
-
-1. **绝不联网、绝不加载真实模型**：索引一律建在 `tmp_path`，
-   `embedding_provider="hashing"`（conftest 的 autouse 夹具还会清掉所有供应商密钥）；
-2. **不依赖磁盘语料**：需要数据时直接构造 store 灌块——这里要验证的是 HTTP 层的
-   协议转换，不是切块与摄取；
-3. **空索引是重点用例**：`/healthz` `/domains` `/tools` `/search` `/ask` `/chat`
-   在**没有任何索引**时都必须能返回，而且不能是 500。这条"部署中间态"是最容易
-   被写崩的地方（例如 `cli.open_store(require_data=True)` 那种前置检查直接抛错）。
+三条硬约束：
+1. 绝不联网、绝不加载真实模型：索引建在 `tmp_path`、嵌入用 `hashing`，
+   conftest 的 autouse 夹具还会清掉所有供应商密钥；
+2. 不依赖磁盘语料：直接构造 store 灌块——这里验证的是 HTTP 层的协议转换；
+3. 空索引是重点用例：`/healthz` `/domains` `/tools` `/search` `/ask` `/chat`
+   在没有索引时都必须能返回而不是 500，这是部署中间态。
 """
 
 from __future__ import annotations
@@ -32,7 +29,7 @@ from kubedocs.store import from_settings
 from kubedocs.store.base import ChunkInput, DocInput
 
 DIM = 32
-"""与 `Settings.embedding_dim` 一致；hashing 维度只影响向量空间大小，不影响管道正确性。"""
+"""必须与 `Settings.embedding_dim` 一致；hashing 的维度只影响向量空间大小。"""
 
 LONG_BODY = "kubelet eviction 硬阈值说明，这一段刻意写得很长用来验证截断。" * 40
 """明显超过 600 字符的正文，用于验证 `/search` 的截断行为。"""
@@ -51,9 +48,8 @@ class _StubLLM:
 def _seed_index(settings: Settings, bodies: list[str], *, title: str = "Pod 驱逐") -> None:
     """直接构造 store 灌入 1~2 个块（等价于 ingest 的后半段）。
 
-    为什么不用 CLI 的 ingest：那需要磁盘上的 markdown 语料，而本文件要验证的是
-    HTTP 层——索引里有块就够了。写完就 `close()`，随后 `create_app` 会自己再开一次
-    （这也顺带验证了"索引文件是持久的、不靠进程内状态"）。
+    不走 CLI 的 ingest：那需要磁盘语料，而这里验证的是 HTTP 层。写完即 `close()`，
+    随后 `create_app` 自己再开一次，顺带验证了索引文件持久、不靠进程内状态。
     """
     store = from_settings(settings)
     try:
@@ -129,16 +125,14 @@ def api_settings(tmp_path: Path) -> Settings:
 def client(api_settings: Settings) -> Iterator[TestClient]:
     """空索引的客户端。
 
-    用 `with` 进入 lifespan：测试结束会关掉 SQLite 连接，
-    否则 Windows 上 tmp_path 会因为文件被占用而删不掉（表现为 teardown 报错）。
+    用 `with` 进入 lifespan：测试结束会关掉 SQLite 连接，否则 Windows 上 tmp_path
+    因文件被占用而删不掉（teardown 报错）。
     """
     with TestClient(create_app(api_settings)) as c:
         yield c
 
 
-# ===========================================================================
-# 没有索引时的探针与自省
-# ===========================================================================
+# --------------------------------------------------------------------------- 没有索引时的探针与自省
 class TestWithoutIndex:
     def test_healthz_returns_200_even_without_index(self, client: TestClient) -> None:
         """没有索引时 /healthz 仍然 200：判活探针关心"进程活着"，不关心有没有语料。"""
@@ -164,8 +158,7 @@ class TestWithoutIndex:
         all_tools = client.get("/tools").json()["tools"]
         filtered = client.get("/tools", params={"domain": "clinic"}).json()["tools"]
         assert "book_appointment" in {t["name"] for t in filtered}, filtered
-        # 按域过滤 = 只保留声明为 clinic 的工具（比对全量清单自己算出的期望值，
-        # 这样断言不依赖"哪个工具被归属到哪个域"的实现细节）
+        # 期望值由全量清单自己算出，这样断言不依赖"哪个工具属于哪个域"的实现细节
         assert filtered == [t for t in all_tools if t["domain"] == "clinic"]
 
         bad = client.get("/tools", params={"domain": "no_such_domain"})
@@ -174,9 +167,7 @@ class TestWithoutIndex:
         assert "k8s_docs" in detail and "clinic" in detail, detail
 
 
-# ===========================================================================
-# /search
-# ===========================================================================
+# --------------------------------------------------------------------------- /search
 class TestSearch:
     def test_empty_index_returns_200_with_empty_hits(self, client: TestClient) -> None:
         """空索引 → 200 + 空 hits + 一句说明（绝不是 500）。"""
@@ -226,15 +217,10 @@ class TestSearch:
         assert client.post("/search", json={"q": "k" * 301}).status_code == 422
 
 
-# ===========================================================================
-# /ask
-# ===========================================================================
+# --------------------------------------------------------------------------- /ask
 class TestAsk:
     def test_without_llm_key_degrades_instead_of_500(self, api_settings: Settings) -> None:
-        """没有 LLM 密钥 → 200 + degraded 说明 + 引用照常返回（**不是** 500）。
-
-        conftest 的 autouse 夹具清掉了所有供应商密钥，所以这条分支是确定性的。
-        """
+        """没有 LLM 密钥 → 200 + `degraded` 说明 + 引用照常返回，不是 500；autouse 夹具清掉了所有密钥，分支确定性。"""
         _seed_index(api_settings, [LONG_BODY])
         with TestClient(create_app(api_settings)) as client:
             resp = client.post("/ask", json={"q": "kubelet"})
@@ -259,11 +245,10 @@ class TestAsk:
     def test_answer_and_citations_are_passed_through(
         self, api_settings: Settings, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """ "有可用 LLM"时 /ask 把生成层的答案与引用原样透出（用打桩 LLM，绝不联网）。
+        """有可用 LLM 时，`/ask` 把生成层的答案与引用原样透出（打桩 LLM，绝不联网）。
 
-        打桩打在**装配点** `build_answerer` 而不是 litellm 内部：只要有一处没打中，
-        真调用就会发到供应商，而测试不允许存在这种可能。这一条覆盖的是
-        "检索 -> 生成 -> 响应映射"这段胶水，生成层自身由 `test_generate.py` 覆盖。
+        打桩打在装配点 `build_answerer`：只要漏一处，真调用就会发到供应商。
+        这一条覆盖"检索 → 生成 → 响应映射"的胶水，生成层自身由 `test_generate.py` 覆盖。
         """
         _seed_index(api_settings, [LONG_BODY])
         monkeypatch.setattr("kubedocs.api.app.has_api_key", lambda _model: True)
@@ -282,9 +267,7 @@ class TestAsk:
         assert body["n_hits"] >= 1
 
 
-# ===========================================================================
-# /chat（SSE）
-# ===========================================================================
+# --------------------------------------------------------------------------- /chat（SSE）
 class TestChat:
     def test_returns_sse_stream_with_expected_events(self, client: TestClient) -> None:
         """/chat 返回 SSE：content-type 是 text/event-stream，事件序列是 thread→message→done。"""
@@ -313,10 +296,10 @@ class TestChat:
         assert message["text"]
 
     def test_chat_works_without_index_or_corpus(self, api_settings: Settings) -> None:
-        """无索引/无语料也要能返回：clinic 的规则轨（红线）不依赖索引，这是设计目标。
+        """无索引/无语料也要能返回：clinic 的规则轨（红线）不依赖索引。
 
-        「胸痛」是急诊红线词，所以这一轮必定走 emergency 分支并给出急诊建议；
-        同时它以 `tool` 事件的形式可见——即"agent 真的做了这件事"，而不是只在文本里提一句。
+        「胸痛」是急诊红线词，所以这一轮必走 emergency 分支；它以 `tool` 事件可见，
+        即"agent 真的做了这件事"，而不只是在文本里提一句。
         """
         settings = api_settings.model_copy(update={"domain": "clinic"})
         with TestClient(create_app(settings)) as client:
@@ -336,10 +319,9 @@ class TestChat:
         self, api_settings: Settings, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """被 `interrupt` 挂起的追问以 message 事件送出（`awaiting_user=true`），
-        同一个 `thread_id` 再来一次即 `resumed=true`——这是"真挂起"而不是"内存里记个标志位"。
+        同一 `thread_id` 再来一次即 `resumed=true`——是"真挂起"，不是内存里记标志位。
 
-        症状关联表用打桩：真实卡片语料不入库（`data/clinic/cards.json` 是派生文件），
-        靠它会让这条用例在干净克隆里变成"永远只走兜底回答"，失去验证价值。
+        症状关联表用打桩：真实卡片语料不入库，靠它这条用例在干净克隆里只会走兜底回答。
         """
         monkeypatch.setattr(
             "kubedocs.api.app._clinic_links",
@@ -363,15 +345,12 @@ class TestChat:
         assert _event(_sse_events(resp.text), "message")["unpriced_llm_calls"] == 0
 
 
-# ===========================================================================
-# /chat 的 thread_id 属主校验（缺陷回归）
-#
-# 缺陷形态：端点直接拿客户端传来的 `thread_id` 当 `app.state.clinic_history` 的键，
-# 没有任何属主校验 ⇒ 猜到/拿到别人的 thread_id 就能续聊别人的会话（SECURITY.md S-3）。
-# 现在的契约：thread_id 首见即绑定 patient_id；换属主 ⇒ **409**（不静默当新会话、
-# 也不静默接到别人的历史上）；**一直用同一个 patient_id + thread_id 的行为完全不变**。
-# ===========================================================================
 class TestChatThreadOwnership:
+    """`/chat` 的 thread_id 属主校验：首见即绑定 patient_id，换属主 ⇒ 409 + 可读原因。
+
+    既不静默当成新会话，也不静默接到别人的历史上；既有行为与被拒后的属主都不变。
+    """
+
     def test_same_patient_can_continue_its_own_thread(self, client: TestClient) -> None:
         """兼容性钉子：同一属主沿用同一个 thread_id 必须完全正常。"""
         for message in ("我最近咳嗽", "还有点发热"):
@@ -416,7 +395,7 @@ class TestChatThreadOwnership:
         assert store.owner_of("t-own-3") == "p1", "被拒的请求改写了属主"
 
     def test_thread_store_is_bounded(self, client: TestClient) -> None:
-        """会话表有上界：超过上限的旧线程会被淘汰（缺陷回归：原先是无界 dict）。"""
+        """会话表有上界：超过上限的旧线程按 LRU 被淘汰，表不会无界增长。"""
         store = client.app.state.clinic_threads  # type: ignore[attr-defined]
         store.max_threads = 3
         for i in range(5):
@@ -426,14 +405,12 @@ class TestChatThreadOwnership:
         assert store.n_evicted == 2
 
 
-# ===========================================================================
-# /chat 的成本上限（缺陷回归）
-#
-# 缺陷形态：`DailyBudget` 只在 `Answerer.answer()` 里 check()，而 `/chat` 走
-# `LiteLLMToolCaller`，它只累加 `self.cost`、从不与预算比较（SECURITY.md S-2）。
-# 现在的契约：超限时**一次模型调用都不发生**，并把原因如实送到流上。
-# ===========================================================================
 class TestChatBudget:
+    """`/chat` 同样受当日成本上限约束：超限时一次模型调用都不发生，原因如实送到流上。
+
+    这条路径走 `LiteLLMToolCaller`（只累加 `self.cost`、不与预算比较），由本层把关。
+    """
+
     def _exhaust(self, settings: Settings) -> None:
         """把当日花费写成远超上限：模拟"今天已经花完了"。"""
         path = settings.llm_spend_path
@@ -466,9 +443,7 @@ class TestChatBudget:
         assert calls == [], "超预算后仍然调用了模型：账单没被挡住"
 
 
-# ===========================================================================
-# 首页
-# ===========================================================================
+# --------------------------------------------------------------------------- 首页
 class TestIndexPage:
     def test_missing_html_returns_200_explanation(self, api_settings: Settings, tmp_path: Path) -> None:
         """`data/web/index.html` 不存在时返回 200 说明页（404 会被当成"服务没起来"）。"""
@@ -497,12 +472,8 @@ class TestIndexPage:
 class TestStatsCache:
     """`_DomainRuntime.stats()` 的短 TTL 缓存。
 
-    回归的是一个**实测出来的性能缺陷**：`stats()` 里那条
-    `COUNT(*) FROM chunks WHERE body LIKE '%```%'` 是 18822 行大文本列的全表扫描
-    （本机实测 17.3 ms，占 `stats()` 的 24.4 ms 里的绝大部分），而 `/healthz`
-    **每个请求**都走它、`/search` 也会走（`_index_note`），且全程持 store 锁。
-    实测后果：本地直跑 `/healthz` 吞吐被硬卡在 ≈19.6 req/s，并发 1→16 时
-    p50 从 54.6 ms 线性涨到 802 ms（并发毫无收益）。
+    `stats()` 要在正文大文本列上全表扫描，而 `/healthz` 每请求都走它、`/search` 也走
+    （`_index_note`），且全程持锁：没有缓存时吞吐被卡住、并发毫无收益。`max_age_s=0` 可绕过。
     """
 
     def _runtime_with_counting_store(self, api_settings: Settings) -> tuple[object, list[int]]:
@@ -517,7 +488,7 @@ class TestStatsCache:
                 return SimpleNamespace(n_chunks=18822, n_docs=1722)
 
             def close(self) -> None:
-                """lifespan 关闭时会调用它 —— 桩少了这个会让测试在 teardown 炸。"""
+                """lifespan 关闭时会调用它；桩缺了它 teardown 会炸。"""
 
         runtime.store = _CountingStore()  # type: ignore[assignment]
         return runtime, calls
@@ -566,15 +537,10 @@ class TestStatsCache:
 
 
 class TestClinicStatePersistence:
-    """图状态的持久化 checkpointer（借用参考项目的"外部记忆"做法）。
-
-    原先图状态只在 `InMemorySaver` 里：**进程一重启，问到一半的会话就没了**。
-    `build_clinic_graph` 早就留了 `checkpointer` 参数，只是没有任何调用点传它。
-    下面三条把"接上之后"的行为锁住。
-    """
+    """图状态的持久化 checkpointer：不配路径时行为不变（内存态），配了就落盘且新实例能读同一 thread。"""
 
     def test_unset_means_in_memory(self, api_settings: Settings) -> None:
-        """留空 = 与以前逐字相同的行为（不落盘、不建文件）。"""
+        """留空 = 不落盘、不建文件（纯内存态，行为不变）。"""
         from kubedocs.api.app import _make_checkpointer
 
         assert _make_checkpointer(api_settings) is None
@@ -630,11 +596,9 @@ class TestClinicStatePersistence:
 
 
 class TestConsolePage:
-    """`/console` 控制台页。
+    """`/console` 控制台页：与演示页共用 `_serve_page`。
 
-    和演示页共用 `_serve_page`，所以这里既测"缺文件时的降级"，也测"仓库里的
-    真文件真的被端到端送达"——后者是防路径写错的那一道闸：路由里写的是
-    `("data", "web", "console.html")`，拼错了在浏览器里才发现就太晚了。
+    既测缺文件时的降级，也测仓库里的真文件端到端送达（防路由里的路径拼错）。
     """
 
     def test_missing_html_returns_200_explanation(self, api_settings: Settings, tmp_path: Path) -> None:
@@ -673,13 +637,7 @@ class TestConsolePage:
 
 
 class TestPatientPage:
-    """`/patient` 患者端：**只**保留问诊 agent。
-
-    这个页面的关键约束不是"能打开"，而是**"不该有的东西一个都没有"**——
-    `/` 与 `/console` 上的域名选择、API 地址、`top_k`、指标、工具清单对患者
-    是纯认知负担，而且能改到不该改的东西。所以下面有一组**否定断言**，
-    它们的作用是防止以后有人"顺手"把开发向控件加回来。
-    """
+    """`/patient` 患者端：只保留问诊 agent；开发/运维向的控件（域选择、`top_k`、指标、工具清单）不许出现。"""
 
     def test_missing_html_returns_200_explanation(self, api_settings: Settings, tmp_path: Path) -> None:
         app = create_app(api_settings)
@@ -730,7 +688,7 @@ class TestPatientPage:
     def test_keeps_the_safety_critical_parts(self, api_settings: Settings) -> None:
         """**肯定断言**：安全关键的东西必须在。
 
-        急诊红线是这个域的安全底线——患者端把它做丢，比多几个控件严重得多。
+        急诊红线是这个域的安全底线，把它做丢比多几个控件严重得多。
         """
         with TestClient(create_app(api_settings)) as client:
             text = client.get("/patient").text

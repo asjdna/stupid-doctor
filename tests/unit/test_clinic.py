@@ -1,8 +1,7 @@
 """clinic 域 P1 测试：急诊红线安全门控 + 号源并发不超卖。
 
-这两组是**安全相关**的，所以断言写得比一般单测更死：
-- 红线误报 → 把患者本人送进急诊（或反过来漏掉急诊）
-- 号源超卖 → 两个人拿到同一个号
+两组都是安全相关的，断言写得比一般单测更死：红线误报会把家属、既往或否认的症状
+当成患者本人的急诊，号源超卖会让两个人拿到同一个号。
 """
 
 from __future__ import annotations
@@ -33,9 +32,7 @@ from kubedocs.domains.clinic.redline import (
 from kubedocs.domains.clinic.sqlite_provider import SqliteAppointmentProvider
 
 
-# ===========================================================================
-# 一、ConText 三维（急诊红线安全性的根基）
-# ===========================================================================
+# 一、ConText 三维：急诊红线安全性的根基
 class TestPolarity:
     def test_plain_negation(self):
         assert is_negated("我没有胸痛", "胸痛") is True
@@ -71,15 +68,11 @@ class TestPolarity:
         assert is_negated("没有胸痛；胸痛", "胸痛") is False
 
     def test_comma_does_not_end_negation_scope(self):
-        """**已知局限**（移植自源项目并原样保留）：逗号不截断否定作用域。
+        """已知局限：逗号不截断否定作用域。
 
-        逗号不截断是有意的——「无发热、咳嗽」这类**列举**里，截断会把咳嗽误判成现症。
-        代价是「我以前没有胸痛，现在胸痛」也会被判成否认：`现在` 这类**时间重启词**
-        不在 `REVERSAL_WORDS` 里，所以没能把作用域截断。
-
-        源项目把这条记为已知局限（reportable 召回 90.48%，2 条 known-limitation
-        金标用例刻意保留）。本测试固定这个行为，避免它被无声改掉——
-        要修就必须同时更新那份召回率与金标。
+        逗号不截断是有意的——「无发热、咳嗽」这类**列举**里截断会把咳嗽误判成现症；
+        代价是「我以前没有胸痛，现在胸痛」也被判成否认，因为 `现在` 这类时间重启词
+        不在 `REVERSAL_WORDS` 里。本测试固定这个行为，避免它被无声改掉。
         """
         assert is_negated("无发热、咳嗽", "咳嗽") is True  # 列举：不该截断
         assert is_negated("我以前没有胸痛，现在胸痛", "胸痛") is True  # 已知局限
@@ -93,15 +86,10 @@ class TestPolarity:
         ],
     )
     def test_reversal_words_cut_the_scope(self, text, phrase):
-        """**用原型用例实测补上的两个转折词**（`其实` / `仅`）。
+        """转折词 `其实` / `仅` 必须截断否定作用域。
 
-        这两条来自 `data/eval/prototype/symptom_status_gold.jsonl`（原型标 `comma-scope`
-        与 `known-limitation`）：缺这两个词时，否定作用域会越过逗号盖住后半句，
-        把"肚子疼""头晕"判成**否认**。补词后该文件的 status 一致率 43/45 → **45/45**
-        （`scripts/eval_prototype_cases.py`）。
-
-        注意与上一条的关系：上面「我以前没有胸痛，现在胸痛」依赖的是**时间重启词 `现在`**，
-        那是另一类线索，本次没有动——所以那条已知局限**依然存在**，没有被顺手"修好"。
+        缺这两个词时作用域会越过逗号盖住后半句，把"肚子疼""头晕"判成**否认**；
+        注意 `现在` 这类时间重启词不在此列，上面那条已知局限依然存在。
         """
         assert polarity(text, phrase) == "present"
         assert is_reportable(text, phrase) is True
@@ -133,10 +121,9 @@ class TestPolaritySafetyGate:
         assert is_reportable("如果胸痛怎么办", "胸痛") is False
 
     def test_own_symptom_after_relative_is_kept(self):
-        """「我父亲得过心梗，我胸闷」——患者自己的胸闷不能被前文带成家属的或既往的。
+        """「我父亲得过心梗，我胸闷」：患者自己的胸闷不能被前文带成家属的或既往的。
 
-        注意：`is_reportable` 要求短语**字面出现在文本里**（`_find_all` 找不到就返回
-        absent）。所以这里用含「胸闷」的句子，而不是"胸口有点闷"这类改述。
+        `is_reportable` 要求短语字面出现在文本里，所以这里不能改述成"胸口有点闷"。
         """
         text = "我父亲得过心梗，我胸闷"
         assert assertion(text, "胸闷")["experiencer"] == "self"
@@ -150,9 +137,7 @@ class TestPolaritySafetyGate:
         assert is_reportable("我胸口有点闷", "胸闷") is False
 
 
-# ===========================================================================
 # 二、急诊红线
-# ===========================================================================
 class TestRiskGuard:
     def setup_method(self):
         self.guard = RiskGuard()
@@ -216,9 +201,7 @@ class TestEmergencyCopy:
         assert wants_emergency_care(text) is False
 
 
-# ===========================================================================
 # 三、挂号：契约 + Mock 替身
-# ===========================================================================
 class TestMockProviderContract:
     def test_departments_have_code_name_fee(self):
         deps = MockAppointmentProvider().list_departments()
@@ -290,9 +273,7 @@ class TestBookingService:
         assert "挂号成功" in text and "排队号" in text
 
 
-# ===========================================================================
-# 四、SQLite 号源库（真实持久化 + 并发安全）
-# ===========================================================================
+# 四、SQLite 号源库：真实持久化 + 并发安全
 @pytest.fixture
 def sqlite_provider(tmp_path: Path):
     p = SqliteAppointmentProvider(tmp_path / "clinic.db")
@@ -386,8 +367,7 @@ class TestSqliteProvider:
 class TestNoOversellUnderConcurrency:
     """号源系统唯一不能妥协的性质：并发下不超卖。
 
-    构造：余号恰好 1，8 个线程同时抢。断言**恰好一个**成功，
-    且余号归零、不会变负（否则说明原子性没守住）。
+    余号恰好 1 时 8 个线程同抢：恰好一个成功，余号归零且不会变负。
     """
 
     def test_exactly_one_winner_with_one_slot_left(self, tmp_path: Path):

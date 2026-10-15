@@ -1,14 +1,8 @@
 """观测面测试：日志级别、预算 gauge、`/metrics` 的暴露文本与标签口径。
 
-## 为什么这个文件此前缺失是个真问题
-
-`configure_logging` / `setup_tracing` / `publish_config_gauges` 与 `/metrics`
-在 README 与 SECURITY 里都被当作**已实现的**能力对外声明（"开关不再是假开关"），
-但全仓没有任何一行测试碰过它们——声明的证据只有"我手工 curl 过一次"。
-手工 curl 证明不了回归：把中间件的标签从路由模板改回原始 URL，页面照样出数，
-只有 Prometheus 侧的聚合会悄悄碎掉。所以这里把口径**写死成断言**。
-
-不联网、不起真实服务：一律走 `TestClient` + `hashing` 嵌入。
+不联网、不起真实服务，一律走 `TestClient` + `hashing` 嵌入。守护的契约：级别拼错退到
+INFO 而不是抛异常；预算上限在从未调用过 LLM 时也已可见，且 0 的约定是"不限"；指标标签
+必须用**路由模板**而不是原始 URL。
 """
 
 from __future__ import annotations
@@ -35,9 +29,8 @@ DIM = 32
 def _sample(name: str, text: str) -> float | None:
     """从 Prometheus 暴露文本里取一个无标签样本的值。
 
-    刻意解析**暴露文本**而不是读 `LLM_BUDGET._value`：前者是 Prometheus 真正抓到的
-    东西（也就是外部唯一能看到的东西），后者是内部状态。测内部状态会放过
-    "值设对了但没被 expose" 这类问题。
+    必须解析暴露文本而不是读 `LLM_BUDGET._value`：只有前者是 Prometheus 真正抓到的、
+    也就是外部唯一能看到的东西。
     """
     pattern = re.compile(rf"^{re.escape(name)}\s+([0-9.eE+-]+)\s*$", re.MULTILINE)
     match = pattern.search(text)
@@ -84,12 +77,9 @@ class TestConfigureLogging:
 # --------------------------------------------------------------------- 预算 gauge
 class TestPublishConfigGauges:
     def test_budget_is_published_without_any_llm_call(self, tmp_path: Path) -> None:
-        """**核心回归**：一次 LLM 都没调用过时，上限也必须已经在指标里。
+        """一次 LLM 都没调用过时，上限也必须已经在指标里。
 
-        修之前 `LLM_BUDGET` 只在 `observe_llm_call()` 里被设值，于是"配了 $2.00、
-        但还没调用过"的进程暴露的是 gauge 默认值 0——而 0 的约定是"不限"，
-        控制台就会把一个真实存在的花费上限显示成"不限"。这是显示假信息，
-        比少一个字段严重。
+        若只在 `observe_llm_call()` 里设值，配了 $2.00 但没调用过的进程会暴露默认值 0，而 0 的约定是"不限"。
         """
         publish_config_gauges(_settings(tmp_path, llm_daily_budget_usd=2.0))
         text = metrics_payload()[0].decode("utf-8")
@@ -108,7 +98,7 @@ class TestPublishConfigGauges:
         assert _sample("kubedocs_llm_budget_usd", text) == 7.5
 
     def test_gauge_object_reflects_value(self, tmp_path: Path) -> None:
-        """顺带钉住对象本身，避免"文本里有、对象里没有"这种诡异不一致。"""
+        """暴露文本与 gauge 对象必须一致——两处不同是最难查的那种不一致。"""
         publish_config_gauges(_settings(tmp_path, llm_daily_budget_usd=1.25))
         assert LLM_BUDGET._value.get() == 1.25  # noqa: SLF001 - 就是要读这个内部量做交叉验证
 
@@ -122,7 +112,7 @@ class TestMetricsEndpoint:
         assert "text/plain" in resp.headers["content-type"]
 
     def test_exposes_the_documented_metric_names(self, tmp_path: Path) -> None:
-        """README/模块文档列出的名字必须真的出现在暴露文本里——名字就是对外契约。"""
+        """对外承诺的指标名必须真的出现在暴露文本里——名字就是契约。"""
         with TestClient(create_app(_settings(tmp_path))) as client:
             resp = client.get("/metrics")
         for name in (
@@ -138,9 +128,7 @@ class TestMetricsEndpoint:
     def test_request_counter_labels_by_route_template(self, tmp_path: Path) -> None:
         """端点标签必须是**路由模板**而不是原始 URL。
 
-        用原始 URL 的话 `/search?q=...` 每次查询都会造出一个新时间序列——
-        Prometheus 侧的基数和聚合会一起碎掉，而页面看上去一切正常。
-        这里用一个带查询串/带路径参数的请求来钉住这条口径。
+        用原始 URL 时 `/search?q=...` 每次查询都会造出一条新时间序列，Prometheus 侧的基数与聚合会悄悄碎掉。
         """
         with TestClient(create_app(_settings(tmp_path))) as client:
             client.get("/healthz")
@@ -157,10 +145,7 @@ class TestMetricsEndpoint:
         assert float(counts[0]) >= 2
 
     def test_status_label_separates_failures(self, tmp_path: Path) -> None:
-        """状态码必须进标签：否则 404 会混进"正常流量"，仪表盘看不出异常。
-
-        控制台的"非 2xx 响应"那一行完全依赖这条口径。
-        """
+        """状态码必须进标签：否则 404 会混进"正常流量"，仪表盘看不出异常。"""
         with TestClient(create_app(_settings(tmp_path))) as client:
             client.get("/no-such-route")
             resp = client.get("/metrics")

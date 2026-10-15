@@ -1,30 +1,23 @@
 """可观测性：结构化日志级别、OTel 追踪、Prometheus 指标。
 
-## 为什么这个模块是"接上"而不是"声明"
+三块配置都在这里落到真实代码路径上：
 
-`config.py` 里曾有 6 个**没有人读**的观测字段（`redis_url`、`otel_*`、`langfuse_*`），
-而 `config.py` 自己在另一处注释里立过规矩：**"假开关比缺配置更糟"**。
-所以这里把其中真正该有的三个接上真实分支：
-
-| 配置 | 现在的行为 |
+| 配置 | 作用 |
 |---|---|
-| `log_level` | `configure_logging()` 真正设 root logger 级别（此前 `KUBEDOCS_LOG_LEVEL` 无任何效果） |
-| `otel_enable` / `otel_exporter` | `setup_tracing()` 真的建 `TracerProvider` 并导出（console / otlp），检索与 LLM 调用真的开 span |
+| `log_level` | `configure_logging()` 设置 root logger 级别 |
+| `otel_enable` / `otel_exporter` | `setup_tracing()` 建 `TracerProvider` 并导出（console / otlp），检索与 LLM 调用真的开 span |
 | `/metrics` | Prometheus 文本格式端点，计数器与直方图在真实请求路径上被 +1 / observe |
 
-**没用上的那两个（`redis_url` 与 `langfuse_*`）已被删除**，连同 `redis` 依赖与
-compose 里那个没人连的 redis 服务——而不是留着它们继续假装生效。
-
-## 指标口径
+指标口径：
 
 - `kubedocs_http_requests_total{endpoint,status}`：按端点与状态码计数
 - `kubedocs_http_request_seconds{endpoint}`：请求耗时直方图
 - `kubedocs_retrieve_seconds{channel}`：检索单路耗时（`search --explain` 里那个数字的指标版）
-- `kubedocs_llm_calls_total{priced}`：LLM 调用次数，按"能否定价"分解
+- `kubedocs_llm_calls_total{priced}`：LLM 调用次数，按能否定价分解
 - `kubedocs_llm_cost_usd_total`：累计花费（与 `llm_spend.json` 同一口径，便于对账）
-- `kubedocs_llm_budget_usd`：当前日上限（gauge，便于算余量）
+- `kubedocs_llm_budget_usd`：当前日上限（gauge，**0 表示不限**）
 
-不引第三方 instrumentation 包：手工 span + 手工计数，依赖少、可读、离线可跑。
+不引第三方 instrumentation 包：手工 span + 手工计数，依赖少、离线可跑。
 """
 
 from __future__ import annotations
@@ -75,12 +68,11 @@ LLM_BUDGET = Gauge(
 
 
 def configure_logging(settings: Settings) -> None:
-    """把 `settings.log_level` 真正应用到 root logger。
+    """把 `settings.log_level` 应用到 root logger。
 
-    此前 `--log-level` 只进了 `Settings`（并只被 `uvicorn.run(log_level=...)` 用来设
-    uvicorn 自己的级别），`KUBEDOCS_LOG_LEVEL=DEBUG` 对本项目自己的 logger 没有任何效果。
-    `force=False`：已经配置过就**不覆盖**——库代码不该抢宿主程序的日志配置，
-    但作为进程入口（CLI / create_app）调用时它就是那份配置。
+    root logger 已经有 handler 时只改级别、不动已有格式（`force=False`）：
+    库代码不该抢宿主程序（例如 uvicorn）的日志配置；作为进程入口（CLI /
+    `create_app`）调用时它就是那份配置。级别名无法解析时退回 `INFO`。
     """
     level = getattr(logging, str(settings.log_level).upper(), logging.INFO)
     root = logging.getLogger()
@@ -120,7 +112,7 @@ def setup_tracing(settings: Settings) -> Any | None:
     if settings.otel_exporter == "otlp":
         from opentelemetry.exporter.otlp.proto.http.trace_exporter import OTLPSpanExporter
 
-        # 端点走标准环境变量 OTEL_EXPORTER_OTLP_ENDPOINT（不在这里再发明一个配置项）
+        # OTLP 端点由标准环境变量 OTEL_EXPORTER_OTLP_ENDPOINT 提供
         provider.add_span_processor(BatchSpanProcessor(OTLPSpanExporter()))
     else:
         provider.add_span_processor(BatchSpanProcessor(ConsoleSpanExporter()))
@@ -132,11 +124,10 @@ def setup_tracing(settings: Settings) -> Any | None:
 
 @contextmanager
 def span(name: str, **attributes: object) -> Iterator[Any]:
-    """开一个 span；未启用追踪时是**零开销的空操作**。
+    """开一个 span 并写入属性；未启用追踪时是**零开销的空操作**。
 
-    用法一律是 `with span("retrieve", channel="bm25"):`——调用方不需要知道
-    追踪有没有开，也就不需要写 `if tracing_enabled` 这类分支（那种分支最终
-    会有一半的路径忘了加）。
+    用法一律是 `with span("retrieve", channel="bm25"):`——调用方不需要知道追踪
+    有没有开，也就不必写 `if tracing_enabled` 这类容易漏路径的分支。
     """
     if _TRACER is None:
         yield None
@@ -153,11 +144,11 @@ def metrics_payload() -> tuple[bytes, str]:
 
 
 def observe_llm_call(*, cost_usd: float, priced: bool, budget_usd: float | None = None) -> None:
-    """记一次 LLM 调用（两条 LLM 路径共用）。
+    """记一次 LLM 调用（纯文本与工具循环两条路径共用）。
 
-    与 `DailyBudget.record()` 是**互补**关系，不是替代：账本是"花费的事实来源"，
-    指标是"可被 Prometheus 抓取的视图"。两者都在真实调用路径上被触达。
-    `budget_usd` 只有调用方知道时才设 gauge（工具循环不持有配置，就不设）。
+    与 `DailyBudget.record()` 是**互补**关系：账本是"花费的事实来源"，指标是
+    "可被 Prometheus 抓取的视图"。`budget_usd` 只有调用方知道时才设 gauge
+    （工具循环不持有配置，就不设）。
     """
     LLM_CALLS.labels(priced="yes" if priced else "no").inc()
     if cost_usd:
@@ -169,12 +160,9 @@ def observe_llm_call(*, cost_usd: float, priced: bool, budget_usd: float | None 
 def publish_config_gauges(settings: Settings) -> None:
     """把配置里"应当可见"的值在**启动时**发布成 gauge。
 
-    为什么必须补这一步：`LLM_BUDGET` 原先只在真有 LLM 调用时才被 `observe_llm_call`
-    设值。于是"配了 $2.00 上限、但一次都还没调用过"的进程里它是 **0**，而这个
-    gauge 的约定恰恰是"**0 表示不限**"——控制台如实读指标，就会把一个真实存在的
-    上限显示成"不限"。这不是"少显示一个字段"，是显示**错的**金额控制，
-    所以要在装配点补一次，而不是等第一次调用。
-
+    `LLM_BUDGET` 若只在真有 LLM 调用时才被 `observe_llm_call` 设值，那么"配了上限
+    但一次都还没调用过"的进程里它是 0，而 0 的约定是"不限"——控制台会把真实存在的
+    上限显示成"不限"，这是显示错的金额控制，所以在装配点补一次，而不是等第一次调用。
     没密钥、纯检索的部署同样受益：预算上限与有没有密钥无关。
     """
     LLM_BUDGET.set(float(settings.llm_daily_budget_usd or 0.0))

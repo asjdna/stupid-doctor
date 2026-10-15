@@ -1,26 +1,11 @@
 """提示词承诺的工具集合 == 实际注册的工具集合。
 
-## 这条测试钉的是哪个真实缺陷
+`ClinicReactRuntime` 在 `/chat` 路径上不注入检索器，于是 `search_docs` 不注册；若系统
+提示仍承诺"知识库检索"，模型每一步都会拿回"没有这个工具"，白烧一轮预算。
 
-`ClinicReactRuntime` 在 `/chat` 路径上是 `ClinicReactRuntime(settings, service)` 构造的
-（`api/app.py` 刻意不注入检索器：注入就要在启动时加载嵌入模型，与"资源惰性构造"冲突），
-于是 `bootstrap.register_domain_tools` 里的 `if retriever is not None` 不成立、
-**`search_docs` 根本没注册**（`GET /tools` 里也看不到它）。
-
-而系统提示当时是一段**写死的常量**，第 2 条对模型说：
-"需要资料时用工具查（科室列表、号源余量、**知识库检索**）"——
-**模型被告知有一个它根本调不到的工具**。它会照做，然后每一步都拿回
-"没有名为 search_docs 的工具"，白白烧掉一轮预算。
-
-## 为什么用"集合相等"而不是"包含"来钉
-
-两个方向都是缺陷：
-
-* 提示**多做**了（承诺了没注册的）→ 模型空转，就是上面这个 bug；
-* 提示**少做**了（注册了没承诺）→ 工具白注册，模型不知道自己能查号源。
-
-所以断言的是相等，而提示词里那份清单由 `build_system_prompt(tools)` 从注册表生成，
-两边是同一个数据源的两种视图——任何一侧被改回写死的文本，这里立刻红。
+两个方向都是缺陷：提示多做（承诺未注册的）让模型空转，提示少做（注册了没承诺）让模型
+不知道自己能查什么。所以断言集合相等——清单由 `build_system_prompt(tools)` 从注册表
+生成，两边是同一数据源的两种视图；任何一侧退回写死的文本，这里立刻红。
 """
 
 from __future__ import annotations
@@ -43,9 +28,8 @@ from kubedocs.domains.clinic.mock import MockAppointmentProvider
 def promised_tools(prompt: str) -> set[str]:
     """从系统提示里抠出「被承诺可用的工具名」集合。
 
-    约定：`TOOL_LIST_HEADER` 那行之后、连续的 `- 名字` 行就是清单。
-    找不到标记就返回**空集**而不是抛异常——这样"提示词退回写死的常量"表现为一次
-    干净的断言失败（`set() != {…}`），而不是一个 `StopIteration` 让人以为是测试写坏了。
+    约定：`TOOL_LIST_HEADER` 那行之后连续的 `- 名字` 行就是清单；找不到标记返回空集
+    而不是抛异常，让"提示词退回写死的常量"表现为一次干净的集合断言失败。
     """
     lines = prompt.splitlines()
     if TOOL_LIST_HEADER not in lines:
@@ -82,10 +66,9 @@ def make_runtime(settings: Settings, retriever: Any = None) -> ClinicReactRuntim
 
 
 class _StubRetriever:
-    """只为"装配时传了 retriever"这条路径提供一个鸭子类型的检索器。
+    """为"装配时传了 retriever"这条路径提供鸭子类型的检索器。
 
-    注册工具**不会**碰它（`make_search_tool` 只在执行时才 `getattr(retriever, 'search')`），
-    所以这里不必实现真实检索——真的被调用就说明装配把不该跑的东西跑了。
+    注册工具不会碰它，所以不必实现真实检索——真被调用就说明装配跑了不该跑的东西。
     """
 
     def search(self, query: str, top_k: int = 5) -> Any:
@@ -109,14 +92,9 @@ class TestChatPathParity:
         )
 
     def test_prompt_does_not_promise_the_unregistered_search_tool(self, settings):
-        """**这条直接对应缺陷本身**：`search_docs` 没注册，提示词就不许提它。
-
-        只看集合相等还不够直观：这个断言把"模型被告知有一个它没有的工具"写成了
-        一句能被读懂的失败信息。
-        """
+        """`search_docs` 没注册，提示词就不许提它（含中文能力名的等价说法）。"""
         rt = make_runtime(settings)
         assert "search_docs" not in rt.system_prompt
-        # 老提示词用的是中文能力名而不是工具名，一并钉住，防止"换个说法继续承诺"
         assert "知识库检索" not in rt.system_prompt
         assert "search_docs" not in ToolRegistry.names()
 

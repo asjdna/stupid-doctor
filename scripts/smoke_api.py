@@ -1,21 +1,16 @@
 """端到端验收：把服务层每个端点真的打一遍，并检查工具链路是活的。
 
-## 为什么单独写这个脚本，而不是只靠单测
-
-子 agent 各自跑通了各自的单测，但**"两边分别测试通过"不等于"接在一起能用"**——
-本项目已经栽过一次：工具协议写了 35 项测试全绿，却从来没有人调用过 `register`。
-所以这里做的是**跨模块的冒烟**：真的构造 app、真的发请求、真的看响应体。
-
-它检查三件单测容易漏的事：
-1. 每个端点都返回 200（含**索引为空**时也不能 500）；
-2. `/tools` 里**真的能看到工具**（这是"接线是否生效"的直接证据）；
-3. `/` 真的返回前端页面（而不是说明性兜底页）。
+这是跨模块的冒烟：真的构造 app、真的发请求、真的看响应体。单测容易漏的三件事——
+每个端点都返回 200（含索引为空）、`/tools` 里真的能看到工具、`/` 与 `/console` 是真的页面。
 
 用法：
     python scripts/smoke_api.py                 # 用真实索引
     python scripts/smoke_api.py --empty-index   # 故意用空索引，验证降级路径
 
-退出码：0 全部通过 / 1 有失败项 / 3 服务层不可用。
+前置条件：服务层依赖可导入，否则退出码 3；不需要任何模型密钥。
+
+输出：每项检查一行 `[PASS]`/`[FAIL]` 与详情，末行是「通过数/总数」。
+退出码：0 全部通过；1 有失败项；3 服务层不可用。
 """
 
 from __future__ import annotations
@@ -74,7 +69,6 @@ def main(argv: list[str] | None = None) -> int:
         if r.status_code == 200:
             names = [t.get("name", "") for t in r.json().get("tools", [])]
         check("GET /tools 200", r.status_code == 200, f"{r.status_code}")
-        # 这条是"接线是否真的生效"的直接证据
         check("工具链路是活的（至少 2 个工具）", len(names) >= 2, f"tools={names}")
 
         r = client.get(f"/tools?domain={args.domain}")
@@ -118,9 +112,7 @@ def main(argv: list[str] | None = None) -> int:
             f"{len(r.text)} 字节",
         )
 
-        # `/console` 控制台页：与 `/` 同一套送达逻辑，但它**直接对同源发请求**
-        # （API 没开 CORS），所以"能不能 200"之外还要检查它没有外链依赖 ——
-        # 容器里没有外网，挂一个 CDN 就是白板。
+        # 容器里没有外网：`/console` 必须自带样式与脚本、不挂任何外链。
         r = client.get("/console")
         check("GET /console 200", r.status_code == 200, f"{r.status_code}")
         check(
@@ -129,8 +121,7 @@ def main(argv: list[str] | None = None) -> int:
             f"{len(r.text)} 字节",
         )
 
-        # 患者端：面向真实使用者的那一页。除了"能打开"，还要确认它**没有**
-        # 混进开发/运维向的控件（患者改到 API 地址/域/top_k 是纯粹的坏事）。
+        # 患者端不该混进开发/运维控件：改 API 地址、域、top_k 对患者是纯粹的坏事。
         r = client.get("/patient")
         check("GET /patient 200", r.status_code == 200, f"{r.status_code}")
         check(

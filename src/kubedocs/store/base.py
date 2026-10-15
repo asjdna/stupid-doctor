@@ -1,14 +1,12 @@
 """存储层的数据契约与接口。
 
-分两层写（接口 + 实现）的理由：检索与生成代码只依赖这里的**窄接口**，
-将来把本地 SQLite 换成生产 Postgres+pgvector 时，改动被关在这一个目录里，
-而不是散落到 ingest / retrieve / api 各处。
+检索与生成代码只依赖这里的**窄接口**，所以把本地 SQLite 换成生产
+Postgres+pgvector 时，改动被关在这一个目录里，而不是散落到
+ingest / retrieve / api 各处。
 
-接口刻意保持"窄"，但**窄不等于缺**：摄取（`ingest`）与索引体检（CLI `stats`、
-评测的语料指纹）真正需要的运维操作（重建、全文索引自检、元信息、文档清单）
-同样写在这里——不写进来，pgvector 版就得靠 `cast` 或 `getattr` 绕过类型检查，
-那等于把"可替换"这件事作废。判断标准是"调用方是否真的需要"，
-而不是"这个操作听起来像不像运维"。
+接口窄但不缺：摄取（`ingest`）与索引体检（CLI `stats`、评测的语料指纹）需要的
+运维操作（重建、全文索引自检、元信息、文档清单）同样写在这里——不写进来，
+别的实现就得靠 `cast` 或 `getattr` 绕过类型检查，"可替换"也就作废了。
 """
 
 from __future__ import annotations
@@ -100,8 +98,7 @@ class Store(Protocol):
     三个实现：`sqlite_store.SqliteStore`（numpy 暴力内积）、
     `sqlite_vec_store.SqliteVecStore`（sqlite-vec，本地默认）、
     `pgvector_store.PgVectorStore`（Postgres + pgvector HNSW，生产）。
-    三者必须给出**同构的返回形态与排序语义**，差异只允许出现在"近似检索"上，
-    且必须在 ADR-0004 里写明——否则后端一换，指标就变，而没人知道为什么。
+    三者必须给出**同构的返回形态与排序语义**，差异只允许出现在近似检索上。
     """
 
     def existing_doc_hashes(self) -> dict[str, str]:

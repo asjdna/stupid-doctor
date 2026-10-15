@@ -1,11 +1,9 @@
-"""在真实 Kubernetes 文档上体检切块质量（不依赖 Postgres，可离线跑）。
+"""在真实 Kubernetes 文档上体检切块质量（离线，不依赖 Postgres）。
 
-为什么先做这一步：切块是检索质量的上游，**在灌库之前就用真实语料量化它**，
-比灌完库再回头怀疑"是不是切得不好"便宜得多。这里产出的是可用于 README 的实测数字。
-
-    python scripts/chunk_stats.py            # 全量
-    python scripts/chunk_stats.py --limit 50 # 抽样（快速）
-    python scripts/chunk_stats.py --samples 3
+用法：`python scripts/chunk_stats.py [--limit N] [--samples N]`（`--limit 0` 为全量）。
+前置条件：`Settings.corpus_dir` 下有 markdown 语料（先跑 scripts/fetch_corpus.py）。
+输出：文件/块数、块长均值与 p95、代码块占比、链接与非法 URL 数、重复块数、耗时、目录分布、样例块；末行 `RESULT ...` 是机器可读摘要。
+退出码：0 正常；2 语料目录不存在；3 没切出任何块。
 """
 
 from __future__ import annotations
@@ -116,7 +114,6 @@ def main() -> int:
             if len([1 for _ in range(1)]) and i > step * args.samples:
                 break
 
-    # 体检结论：给机器可读摘要，便于 CI/README 引用
     print(
         f"\n  RESULT files={len(files)} chunks={len(chunks)} "
         f"avg={statistics.mean(sizes):.0f} bad_urls={bad_urls} dup={dup}"

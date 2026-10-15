@@ -1,10 +1,6 @@
-"""共享测试夹具。
+"""共享测试夹具：单测一律用离线的 `HashingEmbedder`，不加载真实模型。
 
-## 为什么默认用 HashingEmbedder 而不是真实模型
-
-单测要快、要离线、要确定性。加载 bge-small 每个测试会话要多花 20 秒以上，
-还会因为模型版本变化导致结果抖动。真实模型的检索质量由 `cli eval` 在
-真实语料上评测（那才是它的位置），单测只验证**管道正确性**。
+真实模型的检索质量由 `cli eval` 在真实语料上评测，单测只验证**管道正确性**。
 """
 
 from __future__ import annotations
@@ -37,13 +33,9 @@ _PROVIDER_KEY_VARS = (
 def _no_real_llm(monkeypatch: pytest.MonkeyPatch) -> None:
     """测试**绝不**调用真实模型，也绝不花钱。
 
-    两道闸门：
-    1. 清掉所有供应商密钥——即使开发机的 shell 里 export 了密钥，
-       测试也只会走"无密钥降级"分支；
-    2. 阻断 `.env` 导入——仓库根一旦有带真实密钥的 `.env`（本地开发常见），
-       `cli.main()` 会把它导出到 os.environ，于是一个本该断言"降级"的用例
-       就真的去打 API 了。这个坑在本项目里真实发生过：加上 `.env` 之后
-       `test_pipeline_runs_end_to_end` 立刻开始发真实请求。
+    两道闸门：清掉所有供应商密钥，让测试只走"无密钥降级"分支；再阻断 `.env` 导入——
+    `cli.main()` 会把仓库根的 `.env` 导进 os.environ，密钥因而绕过降级分支，
+    本该断言"降级"的用例会真的去发请求。
     """
     for var in _PROVIDER_KEY_VARS:
         monkeypatch.delenv(var, raising=False)

@@ -1,20 +1,15 @@
-"""标注集预检：在跑评测之前，用原始语料核对标注是否站得住。
+"""标注集预检：跑评测之前用原始 markdown 核对标注是否站得住。
 
-## 为什么需要它（而不是只靠 `cli eval` 的自检）
-
-`cli eval` 的自检用的是**已建好的索引**，必须先等摄取跑完才能发现问题。
-这个脚本直接读原始 markdown，秒级给出结果，适合在**写标注的过程中**反复跑：
-路径写错了、关键词记错了，立刻就能看到。
-
-两者互补：
-    写标注时  -> scripts/check_gold.py      （快，查路径与关键词）
-    正式评测  -> python -m kubedocs.cli eval（慢，查索引一致性并产出分数）
+`cli eval` 用的是已建好的索引，要等摄取跑完才发现问题；本脚本直读语料，秒级返回，
+适合写标注时反复跑（路径写错、`must_contain` 关键词记错立刻可见）。
 
 用法：
     python scripts/check_gold.py
     python scripts/check_gold.py --gold data/eval/retrieval_gold.jsonl --corpus data/raw/k8s-docs
 
-退出码：0 全部通过；1 有标注站不住；3 找不到文件。
+输出：标注条数、`kind` 分布、目标文档篇数、重复 `id`、`<corpus>/<doc>.md` 不存在的
+路径、关键词找不到的位置，末行是"通过 / 不通过"。
+退出码：0 通过；1 有标注站不住（JSON 非法、id 重复、无标注行、路径或关键词对不上）；3 找不到标注集或语料目录。
 """
 
 from __future__ import annotations

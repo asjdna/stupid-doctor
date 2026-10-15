@@ -1,14 +1,11 @@
 """集成测试：把域资产与 agent 内核接起来，跑通问诊 / 挂号 / 紧急三条流程。
 
-与 `test_kernel.py` 的区别：那里测**控制流**（全打桩），这里测**装配**——
-真实用上迁移过来的症状词典、三维极性判定、红线、号源库与假设打分器。
-打桩测试抓不到的错（接口对不上、来源归因写反、词表漏变体）在这里会露出来。
+与 `test_kernel.py` 测控制流不同，这里测**装配**：真实用上症状词典、三维极性判定、
+红线、号源库与假设打分器，接口对不上、来源归因写反、词表漏变体都会在这里露出来。
 
-## 测试输入为什么不能用「胸痛」
-
-「胸痛」是急诊红线词：一出现就走 emergency 分支，**观测节点根本不执行**，
-候选自然为空。早期版本的本文件就在这里踩过坑——它不是 bug，是红线在正常工作。
-所以问诊流程一律用非红线症状（咳嗽 / 发热 / 头痛…），红线只用来测紧急流程。
+前置条件：问诊流程一律用非红线症状（咳嗽 / 发热 / 头痛…）。「胸痛」是急诊红线词，
+一出现就走 emergency 分支、观测节点不执行、候选自然为空——那是红线在正常工作，
+所以只有紧急流程用红线词。
 """
 
 from __future__ import annotations
@@ -41,9 +38,7 @@ def _agent(**kw):
     return ClinicAgent(wiring.deps, max_turns=kw.get("max_turns", 4)), wiring
 
 
-# ===========================================================================
 # 证据抽取与来源归因
-# ===========================================================================
 class TestExtractEvidence:
     def test_volunteered_symptom_gets_full_weight(self):
         ev = extract_evidence("我最近咳嗽", 1)
@@ -82,9 +77,7 @@ class TestLinkInversion:
         assert invert_links({}) == {}
 
 
-# ===========================================================================
 # 装配完整性
-# ===========================================================================
 class TestWiring:
     def test_missing_corpus_is_reported_not_fatal(self):
         """语料缺失是**正常情况**（受限语料不入库），必须只记一条说明而不报错。"""
@@ -114,19 +107,14 @@ class TestWiring:
         ],
     )
     def test_negated_booking_intent_is_not_a_request(self, text):
-        """**挂号意图必须判否定**（缺陷回归）。
-
-        缺陷形态：`any(w in text for w in BOOK_WORDS)` 让"我不想挂号"命中「挂号」，
-        于是用户在**明确否认**的情况下被占掉一个号源（图路径实测出过票）。
-        """
+        """挂号意图必须判否定，否则"我不想挂号"会命中「挂号」并占掉一个号源。"""
         assert wants_booking(text) is False, f"{text!r} 被判成了挂号请求"
 
     @pytest.mark.parametrize("text", ["特别疼想挂号", "别的科能不能挂号"])
     def test_imperative_negation_does_not_break_normal_phrases(self, text):
-        """补祈使否定「别」时不能误伤复合词：「特别」「别的」不是否定。
+        """祈使否定「别」不能误伤复合词：「特别」「别的」不是否定。
 
-        （注意用例必须**真的含挂号词**：`别的科的号能挂吗` 里没有「挂号」，
-        判 False 是对的，拿它当反例会得到一个假失败。）
+        反例必须真的含挂号词：`别的科的号能挂吗` 里没有「挂号」，判 False 是对的。
         """
         assert wants_booking(text) is True, f"{text!r} 被误判为否定"
 
@@ -151,9 +139,7 @@ class TestWiring:
         assert confirm_booking(text) is expected
 
 
-# ===========================================================================
 # 紧急流程
-# ===========================================================================
 class TestEmergencyFlowEndToEnd:
     def test_red_line_forces_emergency_without_questioning(self):
         agent, _ = _agent()
@@ -189,9 +175,7 @@ class TestEmergencyFlowEndToEnd:
             assert hypothesis.is_safe_to_suggest(word) is False
 
 
-# ===========================================================================
 # 问诊流程
-# ===========================================================================
 class TestConsultationFlowEndToEnd:
     def test_symptoms_accumulate_across_turns(self):
         agent, _ = _agent()
@@ -232,8 +216,7 @@ class TestConsultationFlowEndToEnd:
     def test_answer_lists_directions_not_a_diagnosis(self):
         """只给方向、不给诊断结论——这是医疗域刻意的边界。
 
-        `max_turns=1` 强制第一轮就结束追问进入作答：有候选时 agent 默认会先追问，
-        不能直接断言 answer（那不是 bug，是追问策略）。
+        `max_turns=1` 强制第一轮就作答；有候选时 agent 默认先追问，不能直接断言 answer。
         """
         agent, _ = _agent(max_turns=1)
         state = agent.start("我咳嗽", thread_id="c6")
@@ -241,15 +224,12 @@ class TestConsultationFlowEndToEnd:
         assert "不能替代医生诊断" in text
 
 
-# ===========================================================================
 # 挂号流程
-# ===========================================================================
 class TestBookingFlowEndToEnd:
     def test_booking_picks_a_real_department_not_a_disease(self):
-        """候选集里疾病名与科室名混在一起，挂号必须挑出**真的可挂号科室**。
+        """候选集里疾病名与科室名混在一起，挂号必须挑出真的可挂号科室。
 
-        这是集成测试抓到的真实缺陷：直接取 Top1 会拿到「支气管炎」这种疾病名，
-        `resolve_department` 会失败。
+        直接取 Top1 会拿到「支气管炎」这种疾病名，`resolve_department` 会失败。
         """
         agent, wiring = _agent()
         agent.start("我咳嗽", thread_id="b1")
@@ -278,7 +258,7 @@ class TestBookingFlowEndToEnd:
         assert ticket["error"], "错误信息不能为空"
 
     def test_declining_booking_intent_books_nothing(self):
-        """否认挂号时不该占号——本次修的真实缺陷（"我不想挂号"曾经也会下单）。"""
+        """否认挂号的话不得占号（"我不想挂号"这类否定意图不是下单）。"""
         agent, wiring = _agent()
         agent.start("我咳嗽", thread_id="b4")
         state = agent.resume("我不想挂号", thread_id="b4")

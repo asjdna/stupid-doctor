@@ -1,11 +1,7 @@
-"""clinic 评测测试：闸门必须**能失败**。
+"""clinic 评测测试：闸门必须**能失败**——永远通过的闸门等于没有闸门。
 
-一个永远通过的闸门等于没有闸门。这里除了验证真实金标集的指标，还专门构造
-"该失败"的场景（漏报一条红线、误报率超限、**分诊 0 分或未评测**），断言闸门真的会红。
-
-分诊那一组是补一次真实缺陷：`gate_failures()` 原先只查红线，于是
-`clinic_baseline.json` 里 `triage.accuracy = 0.0`（hit 0 / total 5）也照样通过。
-"质量闸门不看质量指标"正是这组用例要钉死的形态。
+除真实金标集的指标外，这里构造"该失败"的场景（漏报红线、误报超限、
+分诊 0 分或未评测），断言闸门真的变红。
 """
 
 from __future__ import annotations
@@ -97,12 +93,7 @@ class TestRedlineMetrics:
 
 
 class TestTriageIsInTheGate:
-    """分诊必须真的能挡住闸门——这是缺陷回归组（原先 `gate_failures` 只看红线）。
-
-    真实证据（复核过）：`data/eval/clinic_baseline.json` 的 `triage.accuracy = 0.0`
-    （hit 0 / total 5、`evaluated=true`），修复前 `scripts/eval_clinic.py --gate`
-    仍然退出 0 并打印「闸门：通过」。
-    """
+    """分诊指标必须参与闸门判定：只查红线时 accuracy=0.0 也算通过。"""
 
     def test_zero_triage_accuracy_fails_the_gate(self):
         """分诊 0 分（且评测过）⇒ 闸门必须红。"""

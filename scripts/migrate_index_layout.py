@@ -1,25 +1,17 @@
 """索引迁移：单域平铺布局 -> 多域布局，并把 schema v1 升到 v2。
 
-## 这次迁移**不重新编码任何向量**
-
-v2 的唯一结构变化是：全文索引从 `chunks.body` 改为 `chunks.body_normalized`
-（为中文预分词让路，见 `normalize.py`）。英文域的归一化是原样透传，
-所以迁移只是：
-
-    ALTER TABLE chunks ADD COLUMN body_normalized ...
-    UPDATE chunks SET body_normalized = body          -- 原样，不涉及模型
-    DROP/CREATE chunks_fts（列名改了）
-    INSERT INTO chunks_fts(chunks_fts) VALUES('rebuild')   -- 从内容表重建倒排索引
-
-全程不碰 `chunk_vectors.npy`，也就**不需要跑 34 分钟的嵌入**。
-这是把"索引形态"与"展示形态"分开之后的直接好处。
+v2 的唯一结构变化是全文索引从 `chunks.body` 改为 `chunks.body_normalized`（为中文预分词让路）：
+新列原样拷贝 `body` 并重建 `chunks_fts`，全程不碰 `chunk_vectors.npy`，**不重新编码任何向量**。
 
 用法：
     python scripts/migrate_index_layout.py --dry-run     # 只看会做什么
     python scripts/migrate_index_layout.py               # 真正执行
     python scripts/migrate_index_layout.py --verify-only # 只做一致性体检
 
-退出码：0 成功 / 1 迁移失败 / 3 前置条件不满足。
+前置条件：默认索引根取自配置，`--index-dir` 可覆盖；目标域目录名由 `--domain` 给出。
+副作用：会把索引文件 move 进域目录（同名同大小则跳过），不自动备份。
+幂等：已是 v2 且结构正确则不做任何改动；空索引拒绝迁移。
+退出码：0 成功 / 1 迁移失败或体检不通过 / 3 前置条件不满足（索引缺失、版本不支持）。
 """
 
 from __future__ import annotations
@@ -52,7 +44,7 @@ def _columns(con: sqlite3.Connection, table: str) -> set[str]:
 
 
 def _fts_columns(con: sqlite3.Connection, table: str) -> set[str]:
-    # FTS5 虚表的列可用 table_info 读到
+    # FTS5 虚表的列同样能用 table_info 读到
     return {r[1] for r in con.execute(f"PRAGMA table_info({table})")}
 
 
@@ -117,7 +109,7 @@ def _upgrade_schema(db: Path, dry_run: bool) -> int:
         con.execute("UPDATE chunks SET body_normalized = body WHERE body_normalized = ''")
         con.execute("DROP TABLE IF EXISTS chunks_fts")
         con.execute(_V2_FTS)
-        # FTS5 外内容表的官方重建指令：从内容表重新生成倒排索引
+        # FTS5 外内容表的官方重建指令
         con.execute("INSERT INTO chunks_fts(chunks_fts) VALUES('rebuild')")
         con.execute(
             "INSERT INTO meta(key, value) VALUES('normalizer', 'identity') "
@@ -183,8 +175,7 @@ def main(argv: list[str] | None = None) -> int:
         print("\n[1/2] 布局迁移（平铺 -> 域目录）")
         _layout(base, dst, args.dry_run)
     if not db.exists():
-        # dry-run 下文件当然还没搬过去：退回源位置继续演练后续步骤，
-        # 否则 dry-run 会在第一步就断掉、看不到 schema 升级会做什么。
+        # dry-run 下文件尚未搬运：退回源位置继续演练 schema 升级步骤
         legacy = base / "kubedocs.db"
         if args.dry_run and legacy.exists():
             print(f"  （dry-run：尚未搬运，改用源位置 {legacy} 演练 schema 步骤）")

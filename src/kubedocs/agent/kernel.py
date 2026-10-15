@@ -1,6 +1,6 @@
-"""Agent 内核：图 + 持久化 + 中断 + 有界追问。
+"""Agent 内核：clinic 域的 LangGraph 图、状态持久化与人在环路的追问。
 
-## 图的形状（clinic 域）
+## 图的形状
 
 ```
 START → redline(确定性红线) ─命中→ emergency(给建议) → END
@@ -15,28 +15,18 @@ START → redline(确定性红线) ─命中→ emergency(给建议) → END
                                                      └─不同意→ answer → END
 ```
 
-**每一轮的输入都要重新过 `redline`**（首轮是 `question`，续答轮是 `resume_text`）：
-只在首轮判红线，会让"用户在回答追问时才说出胸痛/呼吸困难"绕过急诊分支——
-那是安全属性上的漏判，不是体验问题。同理，`book` 之前必须有 `confirm`：
-**一个关键词命中就占用号源，不是"用户要求挂号"的充分证据**（"我不想挂号"也含关键词）。
+不变量：
 
-## 三个刻意的设计
+- **每一轮输入都要重新过 `redline`**（首轮 `question`，续答轮 `resume_text`），
+  否则用户在回答追问时才说出胸痛/呼吸困难，就会绕过急诊分支。
+- **`book` 之前必须有 `confirm`**：`wants_booking` 是关键词判定，只证明"用户提到了挂号"，
+  不是"用户同意占用号源"（"我不想挂号"同样含关键词）。
+- **红线走 LLM 不可达的强制边**：`redline` 之后由确定性函数决定是否转急诊，
+  没有任何工具或模型输出能改道；急诊识别是安全属性。
+- **轮次有硬上限**（`max_turns`）兜底：无上限的追问会变成不肯结束的对话。
 
-1. **红线走 LLM 不可达的强制边**：`redline` 节点之后由**确定性函数**决定是否转急诊，
-   没有任何工具或模型输出能让它改道。急诊识别是安全属性，不是可协商的判断。
-   该节点在**每一轮**都会被进入，所以"续答轮说到红线症状"同样会被拦下。
-
-2. **追问用 `interrupt()` 真挂起**，而不是"在内存里记个标志位等下一轮"。
-   区别在于：挂起的状态由 checkpointer 保存，换实例/进程重启后能原地续跑；
-   标志位方案一旦进程重启就丢上下文（源项目就是标志位方案）。
-
-3. **轮次有硬上限**：`decide` 里除了"候选领先度达标"还有 `max_turns` 兜底。
-   无上限的追问会变成一个不肯结束的对话——这是 agent 最常见的失败模式之一。
-
-## 依赖注入
-
-节点用闭包捕获 `ClinicDeps`，所以测试可以注入打桩的红线/号源/检索，
-不需要起模型也不需要起库。
+追问用 `interrupt()` 真挂起：挂起状态由 checkpointer 保存，进程重启后可原地续跑。
+节点用闭包捕获 `ClinicDeps`，测试可注入打桩的红线/号源/检索，无需起模型或起库。
 """
 
 from __future__ import annotations
@@ -193,10 +183,8 @@ def _make_nodes(deps: ClinicDeps, max_turns: int) -> dict[str, Callable[..., Any
     def node_confirm(state: ClinicState) -> dict[str, Any]:
         """挂号前的**显式确认**：真挂起，等用户回答。
 
-        为什么要这一步：`wants_booking` 是关键词判定，它证明的是"用户提到了挂号"，
-        不是"用户同意占用一个号源"。占号是**有副作用**的动作（会扣掉别人的号），
-        所以必须有一次独立的确认，而不是靠一次关键词命中就下单。
-        与工具循环路径的 `_confirm_side_effect` 是同一原则，只是这里确定性实现。
+        占号是有副作用的动作（会扣掉别人的号），而 `wants_booking` 只是关键词判定，
+        所以下单前必须有一次独立确认；与工具循环的 `_confirm_side_effect` 同一原则。
         """
         reply = interrupt(
             {
@@ -243,13 +231,10 @@ def _after_confirm(state: ClinicState) -> str:
 def _after_ask(state: ClinicState) -> str:
     """追问之后分两路。
 
-    - `answering`：**没有更有鉴别力的问题可问了** —— 必须直接去作答。
-      若这里无条件回到 `observe`，就会形成一个"问不出来→再看一遍→还是问不出来"
-      的空转循环，最终靠递归上限才停下（错误信息还很难懂）。
-    - 其余（含 `interrupt` 被 resume 回来的情况）：**回 `redline`**，把用户的回答
-      先过一遍确定性红线，再变成新证据。
-      回到 `observe` 也"能跑"，但那会让续答轮绕开急诊判定——
-      而用户完全可能在回答追问时才说出胸痛/呼吸困难。
+    - `answering`：没有更有鉴别力的问题可问了，直接去作答；无条件回 `observe`
+      会形成"问不出来→再看一遍"的空转循环。
+    - 其余（含 `interrupt` 被 resume 回来）：回 `redline`，让用户的回答先过确定性红线
+      再变成新证据——续答轮同样可能说出胸痛/呼吸困难。
     """
     return "answer" if state.get("status") == "answering" else "redline"
 
@@ -290,8 +275,7 @@ def build_clinic_graph(
 class ClinicAgent:
     """对图的薄封装：把"启动 / 续跑 / 查状态"变成三个方法。
 
-    存在意义是**不让调用方碰 LangGraph 的细节**（config、thread_id、Command），
-    CLI 与 HTTP 层只认这三个方法。
+    调用方（CLI、HTTP 层）不必接触 LangGraph 的 config、thread_id、Command。
     """
 
     def __init__(

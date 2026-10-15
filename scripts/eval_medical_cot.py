@@ -1,36 +1,29 @@
-"""用他人开源的中文医疗 CoT 数据集，给「可能病症 / 检查建议 / 用药建议」建**第一份**评测。
+"""用仓库外的中文医疗 CoT 数据集，评「可能病症 / 检查建议 / 用药建议」的输出质量。
 
-## 数据与用途边界（先读这段）
+数据集在 `SOURCE`（未复制进本仓库，约 62 MB），20,171 条 `{prompt, response}`、
+`response` 含 `<think>…</think>`；来源 Apache-2.0 的 `FreedomIntelligence/medical-o1-reasoning-SFT`，
+上游声明仅供科研与模型训练、不得用于诊疗。**不入语料**，只当评测题：抽样 N 条跑产品链路，
+看输出与参考答的术语是否重合。
 
-参考数据在 `E:\\Users\\86189\\Agent_In_Action-main` 里（**没有复制进本仓库**）：
-
-- `medical_o1_sft_Chinese_alpaca_cot.jsonl`，20,171 条 `{prompt, response}`，
-  `response` 含 `<think>…</think>` 链式推理；
-- 来源 **Apache-2.0** 的 `FreedomIntelligence/medical-o1-reasoning-SFT`（+ HuatuoGPT-o1）；
-- 上游 README 明写"**仅供科研与模型训练，不得用于诊断/治疗**"。
-
-**我们不把它当语料**（不 ingest），只用它当**评测题**：抽样 N 条，跑我们的产品链路，
-看输出与"参考答"的术语是否重合。这与本仓库对 clinic 卡片语料的处置一致（仅内部测试）。
-
-## 指标是什么、**不是什么**（这条比数字重要）
-
-**是**：
+指标（口径比数字重要）：
 
 | 指标 | 含义 |
 |---|---|
-| `有依据作答` | 检索到了知识依据 ⇒ 契约允许给检查/用药建议 |
-| **`无依据拒答`** | 没检索到依据 ⇒ **按契约不给**检查/用药。**这个比例是最有价值的发现**：它衡量我们的 clinic 语料能不能覆盖这类问题 |
-| `术语重合率` | 我们的输出里是否出现了参考答里的中文长词（≥3 字，逐字匹配） |
-| `最长重合词` | 重合词的长度，越长越可能是真正的临床术语 |
+| `有依据作答` | 检索到知识依据 ⇒ 契约允许给检查/用药建议 |
+| `无依据拒答` | 没检索到依据 ⇒ 按契约不给；衡量 clinic 语料对这类问题的覆盖率 |
+| `术语重合率` | 输出里是否出现参考答的中文长词（≥3 字，逐字匹配，不做同义词归一） |
+| `最长重合词` | 重合词长度，越长越可能是真正的临床术语 |
 
-**不是**：医学正确性。参考答是**考试标准答案（单一）**，而我们是"多轮问诊 + 证据约束 +
-不给剂量"的产品；两者口径不同。**任何"我们答对了 X%"的说法都必须带上这句限定。**
+**不是医学正确性**：参考答是单一标准答案，我们是"多轮问诊 + 证据约束 + 不给剂量"，引用这些数字时必须带上这句限定。
 
-## 用法
+前置条件：`SOURCE` 文件存在、clinic 索引已建好、`.env` 里配好模型密钥（缺密钥会拒绝运行）。
 
+用法：
     python scripts/eval_medical_cot.py --dry-run          # 只加载并抽样，不调模型（免费）
     python scripts/eval_medical_cot.py --limit 20         # 真跑 20 条（会花钱）
     python scripts/eval_medical_cot.py --limit 20 --json out.json
+
+退出码：0 正常 / 1 全部用例走降级路径（指标无效，不予报告）。
 """
 
 from __future__ import annotations
@@ -57,8 +50,7 @@ SEED = 42
 """抽样种子。固定种子 = 同样的样本、可比的数字；换样本必须显式改这个数并说明。"""
 
 MIN_TERM_LEN = 3
-"""判定"术语重合"的最短中文词长。取 3 是有意的：2 字词（"患者""治疗"）太普遍，
-命中不代表任何东西，会把指标变成噪声。"""
+"""判定"术语重合"的最短中文词长。取 3 而非 2：2 字词（"患者""治疗"）太普遍，命中即噪声。"""
 
 _CJK_RUN = re.compile(rf"[\u4e00-\u9fa5]{{{MIN_TERM_LEN},}}")
 
@@ -84,8 +76,6 @@ def load_cases(limit: int) -> list[dict[str, str]]:
                 rows.append({"prompt": prompt, "answer": answer})
     if not rows:
         raise SystemExit(f"没能从 {SOURCE} 解析出任何用例")
-    # S311：这里**要的就是确定性伪随机**——固定种子保证"同一批样本、可比的数字"，
-    # 与密码学用途无关；换成真随机会让两次评测不可比。
     return random.Random(SEED).sample(rows, min(limit, len(rows)))  # noqa: S311
 
 
@@ -151,9 +141,8 @@ def main(argv: list[str] | None = None) -> int:
     cases = load_cases(args.limit)
     print(f"抽样 {len(cases)} 条（种子 {SEED}）；示例：{cases[0]['prompt'][:60]}…")
 
-    # **先把 .env 导进 os.environ**：`has_api_key()` 与 litellm 读的都是 os.environ，
-    # 而 pydantic-settings 只把 .env 填进 Settings 对象。漏了这一步，整轮评测会
-    # **全部走降级路径**，花费 0、指标还照样打印出来——实测踩过，20/20 全降级。
+    # 先把 .env 导进 os.environ：`has_api_key()` 与 litellm 读的都是它，而 pydantic-settings
+    # 只填 Settings 对象；漏了这步整轮评测会全走降级路径，却照样打印指标。
     from kubedocs.config import load_env_file
 
     load_env_file()
@@ -168,8 +157,6 @@ def main(argv: list[str] | None = None) -> int:
     from kubedocs.generate import has_api_key
 
     if not has_api_key(settings.llm_model):
-        # 快速失败：没有密钥时"跑完 20 条"得到的是**降级产物的分数**，
-        # 而那与模型能力无关。宁可拒绝运行，也不要产出一个会被误读的数字。
         raise SystemExit(
             f"未配置 {settings.llm_model} 所需密钥 ⇒ 本次评测会全部走降级路径，数字没有意义。\n"
             "请在 .env 里填好密钥（见 .env.example），或先用 --dry-run 验证数据与后端。"
@@ -251,8 +238,7 @@ def main(argv: list[str] | None = None) -> int:
     answered = max(1, stats["answered_with_evidence"])
 
     if stats["degraded"] == stats["n"]:
-        # 全部降级 ⇒ 分数来自降级产物，与模型能力无关。**不打印指标**，
-        # 否则它会被当成"模型表现"记进文档（实测踩过：20/20 全降级仍打印了表格）。
+        # 全部降级 ⇒ 分数来自降级产物，与模型能力无关，不打印指标以免被当成"模型表现"。
         print(f"\n全部 {stats['n']} 条都走了降级路径 ⇒ 指标无效，不予报告。")
         print("最常见原因：密钥没进 os.environ（漏调 load_env_file）或密钥无效。")
         return 1
@@ -268,8 +254,7 @@ def main(argv: list[str] | None = None) -> int:
         print(f"{'最长重合词长度 中位/最大':<22}{sorted(terms)[len(terms) // 2]:>6} / {max(terms)}")
     print(f"{'降级次数':<22}{stats['degraded']:>6}")
     if stats["degraded"]:
-        # **降级原因必须分类打印**：只报"35% 降级"是不可行动的数字，
-        # 而原因分类直接指向该修什么（截断 / 解析 / 网络 / 契约）。
+        # 降级原因分类打印：只报比例不可行动，分类才指向该修什么（截断/解析/网络/契约）。
         reasons: dict[str, int] = {}
         for c in stats["cases"]:
             key = str(c.get("**degraded**") or "")

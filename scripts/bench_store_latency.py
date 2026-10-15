@@ -1,26 +1,21 @@
-"""检索延迟对照：在**真实索引**上测三个存储后端的 p50/p95（只测存储层）。
+"""存储层检索延迟对照：在**真实索引**上测各后端的 p50/p95，只测存储层。
 
-## 为什么单独一个脚本，而不是用 `cli eval` 的延迟
+只计 `store.dense_search()` / `store.keyword_search()` 本身；端到端口径里的查询编码
+占 30~45ms，会把后端之间的差异淹掉。
 
-`eval` 报的是**端到端检索**延迟（含 bge 查询编码 30~45ms），那个数字对
-"换了向量索引到底快没快"没有任何分辨力——编码把差异完全淹没了。
-所以这里只测 `store.dense_search()` / `store.keyword_search()` 本身。
-
-## 方法
-
-- 查询文本来自金标集（真实用户问法），用与建索引相同的嵌入器编码成查询向量，
-  编码只做一次、不计入延迟；
-- 每个后端跑满 `--repeats` 轮 × 全部查询，取 p50/p95；
-- 同时记录**跨后端 top-k 一致性**：换后端不许改变检索结果，这一点比延迟更重要。
-  一致性分两个口径报（见 `_agreement`）：**名次逐个相同**与**命中集合相同**——
-  `ts_rank`（Postgres）与 BM25（FTS5）天然只可能满足后者，混为一谈会误判召回；
-- `--top-k` 默认 10（与评测口径一致）。
-
-## 用法
-
+用法：
     python scripts/bench_store_latency.py                      # sqlite + sqlite-vec
     python scripts/bench_store_latency.py --backends all       # 加上 pgvector（需已灌数据）
     python scripts/bench_store_latency.py --provider hashing   # 不加载真实模型（仅冒烟）
+
+前置条件：`--index-dir` / `--domain` 下已按 `--provider` 建好索引（块数或维度不符的后端会被
+跳过），`--gold` 提供查询文本；查询编码只做一次、不计入延迟。
+
+输出：每后端一行块数与 dense/keyword 的 p50/p95/样本数，随后是相对第一个后端的 top-k 一致性（向量路、全文路各一行）；`--json-out` 落盘，不含逐查询明细。
+
+数字怎么读：一致性比延迟更重要——换后端不该改检索结果。`identical_topk`（名次逐个相同）最强；
+`same_hit_set`（集合相同、只是排序不同）是 `ts_rank` 与 BM25 的正常差异，只看前者会把
+"排序变了"误读成"召回坏了"。退出码：0 正常结束；1 无后端跑出结果。
 """
 
 from __future__ import annotations
@@ -75,12 +70,8 @@ class BenchResult:
 def bench_backend(
     name: str, store: Store, queries: list[str], qvecs: np.ndarray, top_k: int, repeats: int
 ) -> BenchResult:
-    """分别测两路，**不做交错**。
-
-    为什么分开：实测交错跑时向量路的 p50 会从 13ms 涨到 21ms（同一份数据、
-    同一台机器）——FTS 的页访问与向量表的页访问互相挤占 SQLite 页缓存。
-    交错测出来的数字既不是"向量检索延迟"也不是"全文检索延迟"，
-    而是两者的混合，没法用来判断某个索引快不快。所以一个 pass 只测一件事。
+    """分别测两路，**不做交错**：交错跑时两路的页访问会互相挤占 SQLite 页缓存，
+    测出的既不是向量检索延迟也不是全文检索延迟。一个 pass 只测一件事。
     """
     res = BenchResult(backend=name, n_queries=len(queries))
     # 预热一轮（不计入）：第一次查询要走过冷页缓存，把它算进分位数会污染结果
@@ -118,13 +109,10 @@ def _summary(values: list[float]) -> dict[str, float]:
 
 
 def _agreement(base: list[list[str]], other: list[list[str]], top_k: int) -> dict[str, str]:
-    """跨后端 top-k 一致性的**两个口径**（都必须报，因为它们说的不是一回事）。
+    """跨后端 top-k 一致性的两个口径（都要报，它们说的不是一回事）。
 
-    - `identical_topk`：名次逐个相同。换后端不该改结果，这是最强的一档；
-    - `same_hit_set`：命中**集合**相同、只是排序不同。`ts_rank` 与 BM25 的差异
-      正好长这样（Postgres 核心没有 BM25，见 `pgvector_store` 模块文档第 1 条）。
-      只报第一个口径，会把"排序变了"误读成"召回坏了"。
-    - `mean_set_overlap`：平均集合重合率，用来量化"变了多少"，避免只有 是/否。
+    `identical_topk` 是名次逐个相同（最强）；`same_hit_set` 是集合相同、只是排序不同，
+    正是 `ts_rank` 与 BM25 的差异，只看前一个会把"排序变了"误读成"召回坏了"。
     """
     total = len(base)
     identical = sum(1 for a, b in zip(base, other, strict=True) if a == b)
@@ -180,11 +168,8 @@ def main(argv: list[str] | None = None) -> int:
     stores: dict[str, Store] = {}
     try:
         for name in backends:
-            # ⚠️ `# type: ignore` 必须与 mypy 报错的那一行同**物理行**：这里 `name`
-            # 来自命令行（这里就是后端名），静态上不是 `store` 字段的 Literal 之一，
-            # 所以 arg-type 落在 `store=name` 上。`ruff format` 会拆参数，注释挂在
-            # 闭括号那行就失效了（实测：格式化后 mypy 从 0 issues 变成 2 errors）。
-            # 因此把参数逐行展开，把 ignore 钉在出错的那个参数上。
+            # `# type: ignore` 必须与 mypy 报错的参数同物理行，所以参数逐行展开、
+            # 把 ignore 钉在 store=name 上；ruff format 拆行会让它失效。
             cfg = Settings(
                 index_dir=args.index_dir,
                 domain=args.domain,

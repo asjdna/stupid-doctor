@@ -1,23 +1,15 @@
-"""把旧实现的 `.npy` 向量矩阵搬进 sqlite-vec 的 `chunks_vec` 虚表（**不重新编码**）。
+"""把旧实现的 `.npy` 向量矩阵搬进 sqlite-vec 的 `chunks_vec` 虚表，不重新编码。
 
-## 为什么需要这个脚本
+按 `chunks.vector_row` ↔ 矩阵行号的映射逐条搬运：向量一个字节都没变，只是换了存放位置，
+没必要重跑嵌入。搬完用公开读取路径 `existing_hash_to_vector` 抽样逐位校验。
 
-改默认后端之后，老索引里只有 `chunks`（块）+ `chunk_vectors.npy`（向量矩阵），
-没有 `chunks_vec` 虚表。而全量重编码在本机是 1.9 万块 × 约 9.4 块/秒 ≈ 33 分钟——
-**向量一个字节都没变，只是存放位置变了**，没必要重算。
-
-本脚本做的事：按 `chunks.vector_row` ↔ 矩阵行号的对应关系（旧实现 `finalize()`
-里写入的那个映射）把向量逐条搬进 `chunks_vec`，然后**逐位校验**抽样结果
-（用公开读取路径 `existing_hash_to_vector`，不是自己再写一条旁路查询）。
-校验不通过就退出码 1，不做"部分迁移也算成功"的假动作。
-
-## 用法
-
+用法：
     python scripts/migrate_to_sqlite_vec.py                    # 默认 data/index/k8s_docs
     python scripts/migrate_to_sqlite_vec.py --domain clinic
     python scripts/migrate_to_sqlite_vec.py --check-only       # 只校验，不写入
 
-迁移幂等：每次先清空 `chunks_vec` 再重建，重复跑不会产生重复行。
+前置条件：索引目录下存在 `chunk_vectors.npy`，缺失即报错、不做部分迁移；迁移幂等，每次先清空 `chunks_vec` 再重建。
+退出码：0 迁移并自检通过 / 1 矩阵缺失、StoreError 或抽样与向量自检不通过。
 """
 
 from __future__ import annotations
@@ -42,10 +34,9 @@ EXIT_USER = 1
 def _verify(
     store: SqliteVecStore, expected: dict[str, np.ndarray], hashes_of: dict[str, str], sample: int
 ) -> tuple[bool, str]:
-    """抽样核对：搬运结果必须与矩阵**逐位相等**，不是"差不多"。
+    """抽样核对：搬运结果必须与矩阵逐位相等，不接受近似。
 
-    走的是公开读取路径（`existing_hash_to_vector`）——顺便证明这条路径能用；
-    自己再写一条旁路查询只能证明"我写的另一条查询是对的"。
+    走公开读取路径（`existing_hash_to_vector`），顺便证明那条路径真的能用。
     """
     ids = sorted(expected)
     if not ids:
@@ -89,7 +80,7 @@ def main(argv: list[str] | None = None) -> int:
     try:
         mat = np.load(vec_path)
         rows = store.doc_summary(limit=10**9)
-        _ = rows  # 文档清单只是顺带确认库可读
+        _ = rows  # 顺带确认库可读
         with store._lock:  # noqa: SLF001 - 迁移脚本与实现同属存储层，用内部连接读映射
             pairs = [
                 (r["chunk_id"], int(r["vector_row"]), r["content_hash"])

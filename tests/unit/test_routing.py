@@ -1,10 +1,7 @@
-"""结构化路由与 RAG 工具的单元测试。
+"""结构化路由与 RAG 工具的单元测试（全部打桩：不联网、不调真实模型）。
 
-全部用打桩对象：不联网、不调真实模型、不加载嵌入模型（见 `tests/conftest.py` 的
-`_no_real_llm`）。这里真正要锁死的是两条**行为约定**：
-
-1. 单候选时不调模型——省钱，也少一次把唯一合法值答错的机会；
-2. 模型给出非法域时**拒绝并回退**，而不是把不存在的域放进下游。
+两条被守护的约定：单候选时不调模型（省钱，也少一次把唯一合法值答错的机会）；
+模型给出非法域时拒绝并回退，而不是把不存在的域放进下游。
 """
 
 from __future__ import annotations
@@ -31,10 +28,7 @@ from kubedocs.agent.tools import (
 
 # --------------------------------------------------------------------- 打桩
 class _StubRouter:
-    """记录调用次数的路由模型替身。
-
-    "被调用了几次"本身就是要断言的东西：单候选分支若仍然去问模型，测试必须立刻失败。
-    """
+    """记录调用次数的路由模型替身：单候选分支若仍去问模型，测试必须立刻失败。"""
 
     def __init__(self, decision: Any = None, raises: Exception | None = None) -> None:
         self.calls = 0
@@ -116,7 +110,6 @@ def _candidates() -> list[dict[str, Any]]:
     )
 
 
-# --------------------------------------------------------------------- 候选构造
 class TestBuildCandidates:
     def test_reads_name_and_description_from_domain_packs(self) -> None:
         """域包的 description 是路由提示的唯一来源：内核不硬编码任何域知识。"""
@@ -152,7 +145,6 @@ class TestBuildCandidates:
         assert build_candidates([]) == []
 
 
-# --------------------------------------------------------------------- 单候选
 class TestRouteSingleCandidate:
     def test_single_candidate_short_circuits_without_llm(self) -> None:
         """只有一个候选时模型没有选择空间：这一次调用纯属浪费。"""
@@ -177,10 +169,9 @@ class TestRouteSingleCandidate:
         assert decision.reason
 
 
-# --------------------------------------------------------------------- 非法域回退
 class TestRouteIllegalDomain:
     def test_hallucinated_domain_is_rejected_and_falls_back(self) -> None:
-        """最重要的一条：模型能编出不存在的域，静默接受会让下游全部崩掉。"""
+        """模型能编出不存在的域：静默接受会让下游全部崩掉。"""
         llm = _StubRouter(RouteDecision(domain="travel_advisor", confidence=0.97, reason="看起来像旅行"))
         decision = route("怎么挂号", llm=llm, candidates=_candidates(), default="k8s_docs")
         assert decision.domain == "k8s_docs"
@@ -206,7 +197,6 @@ class TestRouteIllegalDomain:
         assert decision.reason == "问的是症状"
 
 
-# --------------------------------------------------------------------- 降级
 class TestRouteDegradation:
     def test_llm_exception_falls_back_without_crashing(self) -> None:
         """供应商 429/超时不该让整轮对话崩掉：带记录地降级，并把异常类型写进理由。"""
@@ -239,7 +229,6 @@ class TestRouteDegradation:
         assert len(decision.reason) <= 200
 
 
-# --------------------------------------------------------------------- 空候选
 class TestRouteNoCandidates:
     def test_no_candidates_is_a_programming_error(self) -> None:
         """没有候选域说明域包没注册：不能悄悄返回一个域糊过去，也不能去问模型。"""
@@ -249,7 +238,6 @@ class TestRouteNoCandidates:
         assert llm.calls == 0
 
 
-# --------------------------------------------------------------------- 检索工具
 class TestSearchTool:
     def test_schema_and_when_not_are_declared(self) -> None:
         """when_not 必填（注册表会拒空），且它必须真的进到 function description 里。"""
@@ -339,7 +327,6 @@ class TestSearchTool:
             make_search_tool(_StubRetriever([]), top_k=0)
 
 
-# --------------------------------------------------------------------- 引用核对工具
 class TestCitationCheckTool:
     def test_when_not_and_schema_are_declared(self) -> None:
         """引用核对工具同样要写清楚"什么时候不要用"，否则会被当成万能复核器乱调。"""
@@ -350,7 +337,6 @@ class TestCitationCheckTool:
         assert set(schema["function"]["parameters"]["properties"]) == {"text", "n_available"}
 
     def test_valid_markers_pass(self) -> None:
-        """编号都在提供的范围内、且确实引用了：通过。"""
         payload = _handler(make_citation_check_tool())(
             CitationCheckParams(text="先 requests [1]，再 limits [2]", n_available=2)
         )
@@ -391,13 +377,9 @@ class TestCitationCheckTool:
             _handler(spec)(CitationCheckParams(text="   ", n_available=2))
 
 
-# --------------------------------------------------------------------- 注册表契约
 class TestRegistryContract:
     def test_register_rejects_empty_when_not(self) -> None:
-        """when_not 是提示词里约束模型的主要手段，注册表必须拒空。
-
-        注册表是类级共享状态：用 try/finally 清空，绝不污染其它测试。
-        """
+        """when_not 是约束模型的主要手段，注册表必须拒空；注册表是类级共享状态，用完清空。"""
         ToolRegistry.clear()
         try:
             with pytest.raises(ValueError, match="when_not"):

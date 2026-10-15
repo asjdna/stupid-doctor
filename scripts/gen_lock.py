@@ -1,49 +1,33 @@
 #!/usr/bin/env python
-"""生成 `requirements.lock.txt`：从 `pyproject.toml` 的依赖声明出发做**依赖闭包**遍历。
+"""生成 `requirements.lock.txt`：从 `pyproject.toml` 的依赖声明出发遍历**依赖闭包**。
 
 用法::
 
     python scripts/gen_lock.py            # 重新生成 requirements.lock.txt
     python scripts/gen_lock.py --check    # 只比对漂移，不写文件（有漂移 → 退出码 1）
-    python scripts/gen_lock.py -o /tmp/x.txt
-    python scripts/gen_lock.py --strict   # 有 optional 组没装时直接失败（而不是跳过）
+    python scripts/gen_lock.py --strict   # 有 optional 组没装时直接失败（默认跳过并注明）
+    python scripts/gen_lock.py -o /tmp/x.txt --groups dev
 
-为什么需要这个脚本（而不是人工维护锁文件）
-------------------------------------------
-`requirements.lock.txt` 是"实测跑通全量测试的那个环境"的冻结快照。dependabot 只看得懂
-`pyproject.toml`、**不维护锁文件**，于是依赖升级会**静默漂移**：`pyproject.toml` 里写
-`fastapi>=0.115`，锁文件却还钉着旧版本，没有任何东西会报警。把它做成仓库内可重复执行的
-脚本，漂移就变成一条随时能跑的命令（`make lock` / `--check`）。
+锁文件是"实测跑通全量测试的那个环境"的冻结快照。dependabot 只看 `pyproject.toml`、
+不维护锁文件，升级会静默漂移（声明写 `>=`、锁文件钉着旧版本，没人报警）；做成可重复
+执行的脚本后，漂移就是一条随时能跑的命令（`make lock` / `--check`）。
 
-算法（与"声明的唯一权威是 pyproject"这一点对齐）
-------------------------------------------------
-1. 读 `pyproject.toml` 的 `[project].dependencies`（运行时）与
-   `[project.optional-dependencies]` 各组（本项目是 `dev` / `eval`）作为**根**；
+算法（声明的唯一权威是 pyproject）：
+1. 取 `[project].dependencies` 与 `[project.optional-dependencies]` 各组作为根；
 2. 每个根用 `importlib.metadata` 找**当前解释器里已装**的发行版，并校验版本满足声明
-   （不满足就报错退出——那说明这个环境并不是"实测通过"的那套，硬写出来的锁文件是假的）；
-3. 读它的 `Requires-Dist`，按 PEP 508 marker 求值（`extras` 逐组展开，例如
-   `uvicorn[standard]` 的 watchfiles / httptools / websockets），递归遍历整棵依赖树；
-4. 输出 `name==version`：PEP 503 归一化去重、按名字排序。
+   （不满足直接报错：这个环境不是"实测通过"的那套，写出来的锁文件是假的）；
+3. 读 `Requires-Dist`，按 PEP 508 marker 求值（`extras` 逐组展开，例如
+   `uvicorn[standard]` 的 watchfiles / httptools / websockets），递归遍历依赖树；
+4. 输出 `name==version`，PEP 503 归一化去重后按名字排序。
 
-optional 组的处理（**不假装它装过**）
--------------------------------------
-某个 optional 组的直接依赖在当前解释器里没装时，**跳过该组**并把组名与缺哪些包写进
-生成的 header（同时打一条 stderr 警告）。理由：本脚本是"记录器"而不是"求解器"，
-凭空写出没装过的包和版本等于伪造锁文件。加了 `--strict` 则跳过变成错误，
-供"要求全组齐备"的场合（例如发版前）使用。
+optional 组：某组的直接依赖在当前解释器里没装时**跳过该组**，把组名与缺哪些包写进
+生成的 header 并打 stderr 警告——本脚本是"记录器"而不是"求解器"，凭空写出没装过的包
+等于伪造锁文件。`--strict` 让跳过变成错误（发版前要求全组齐备时用）。
 
-已知边界（如实写在这里，而不是假装它是 pip-compile）
-----------------------------------------------------
-* **不做版本求解**：版本取自当前环境。它复现的是"这台机器上跑通过"的那套版本，
-  而锁文件要的正是这个。换环境时先 `python -m pip install -e ".[dev]"` 再跑本脚本。
-* **不认** `-r` / `-e` 之类的 pip 指令（`pyproject.toml` 的依赖声明里也不该有）。
-* **不写哈希**：本项目没有需要校验包来源的场景，而哈希会让每次 diff 噪声极大。
-* 闭包**依赖解释器版本**（marker 求值，例如 `tomli` / `exceptiongroup` 只在 <3.11 装；
-  `uvloop` 在 Windows 上不进闭包）：header 里记录了生成时的 `major.minor`，
-  换大版本重跑即可。
-* 闭包也**依赖平台**（`uvicorn[standard]` 的 `uvloop` 带 `sys_platform != "win32"`），
-  所以 Windows 上生成的锁文件与 Linux CI 上生成的**不会逐字相同**。这一点必须知道：
-  在 Windows 生成、拿到 Linux 装，得到的是"少了 uvloop"的环境。
+已知边界：不做版本求解（版本取自当前环境，换环境先 `pip install -e ".[dev]"` 再跑）；
+不写哈希；闭包依赖解释器版本与平台——header 里记录了生成时的 `major.minor` 与平台标签，
+`uvicorn[standard]` 的 `uvloop` 带 `sys_platform != "win32"`，所以 Windows 与 Linux 上
+生成的锁文件不会逐字相同，换平台要重跑。
 """
 
 from __future__ import annotations
@@ -68,8 +52,7 @@ REPO_ROOT = pathlib.Path(__file__).resolve().parents[1]
 DEFAULT_PYPROJECT = REPO_ROOT / "pyproject.toml"
 DEFAULT_OUTPUT = REPO_ROOT / "requirements.lock.txt"
 
-#: 生成的 header。**不含任何本机绝对路径**（读者会照抄这些命令）。
-#: `make lock` 这句必须留在显眼处：锁文件的漂移只能靠"改完依赖就重跑"来防。
+#: 生成的 header，不含任何本机绝对路径（读者会照抄这些命令）。
 HEADER = """\
 # ===========================================================================
 # requirements.lock.txt —— 精确钉版本（锁文件），**不是**运行时依赖的声明处。
@@ -138,8 +121,7 @@ def _parse(text: str) -> Requirement:
 def _applies(req: Requirement, extras: set[str]) -> bool:
     """这条 Requires-Dist 在当前 extras 组合下是否需要（PEP 508 marker 求值）。
 
-    基础依赖的 marker 里 `extra` 是空串；`extra == "standard"` 这类只在
-    对应 extra 被请求时才成立。marker 为 None 表示无条件依赖。
+    marker 为 None 表示无条件依赖；基础依赖的 marker 里 `extra` 是空串。
     """
     if req.marker is None:
         return True
@@ -151,10 +133,9 @@ def _applies(req: Requirement, extras: set[str]) -> bool:
 def _roots(
     project: dict[str, Any], *, groups: list[str] | None = None
 ) -> tuple[list[Requirement], list[str], dict[str, list[str]]]:
-    """把 pyproject 声明的依赖解析成根 requirement。
+    """把 pyproject 声明的依赖解析成根 requirement，返回 `(根, 被跳过的组, {组: 缺哪些包})`。
 
-    返回 `(根列表, 被跳过的组名, {组名: 缺哪些包})`。跳过只发生在"该组的直接依赖
-    没装"时，且组名与缺失清单会写进锁文件 header——**不静默**。
+    跳过只发生在"该组的直接依赖没装"时，且组名与缺失清单会写进锁文件 header——不静默。
     """
     raw: list[str] = list(project.get("dependencies") or [])
     roots: list[Requirement] = []
@@ -180,8 +161,7 @@ def _roots(
         parsed = [_parse(text) for text in optional[group]]
         absent = [r.name for r in parsed if not _installed(r.name)]
         if absent:
-            # 这一组在当前解释器里不完整：跳过整组，但把缺什么记下来。
-            # 部分收进闭包会更糟——闭包遍历要求根存在，缺根时只能改写声明，那是伪造。
+            # 这一组在当前解释器里不完整：跳过整组，但把缺什么记下来（部分收进闭包得改写声明，那是伪造）。
             skipped.append(group)
             missing[group] = absent
             continue
@@ -200,10 +180,10 @@ def _installed(name: str) -> bool:
 def _closure(roots: list[Requirement]) -> dict[str, str]:
     """遍历依赖闭包，返回 {PEP 503 归一化名: 已装版本}。"""
     pins: dict[str, str] = {}
-    # name -> 已经展开过的 extras 集合（extras 是逐组累加的：后到的 [standard] 也要展开）
+    # name -> 已展开过的 extras 集合（extras 逐组累加：后到的 [standard] 也要展开）。
+    # 键用 `str(...)` 收窄：canonicalize_name 返回 NormalizedName（NewType of str），
+    # 直接当键 mypy 会认为 dict.get(str) 不匹配。
     expanded: dict[str, set[str]] = {}
-    # 键一律用 `str(...)` 收窄：packaging 的 canonicalize_name 返回 NormalizedName
-    # （NewType of str），直接用它当键会让 mypy 认为 dict.get(str) 不匹配。
     queue: list[tuple[str, set[str], str]] = [
         (str(canonicalize_name(req.name)), set(req.extras), str(req)) for req in roots
     ]

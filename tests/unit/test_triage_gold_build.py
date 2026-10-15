@@ -1,19 +1,13 @@
 """`scripts/build_triage_gold.py` 的质量闸回归测试。
 
-为什么单独测这个脚本：它的产物是**分诊评测的金标**。金标一旦被伪变体污染，
-所有引用"分诊准确率"的地方都会得到**看起来精确、实际是假**的数字——
-而且不会报错，只会安静地给出错答案。所以三道闸各钉一条真实错例：
+产物是分诊评测的金标，金标答案必须唯一：伪变体一旦混进去，"分诊准确率"会给出
+看起来精确、实际是假的数字且不报错。因此每道闸都配正反用例：
 
-| 闸 | 真实错例（都曾生成出来过） |
-|---|---|
-| 部位冲突 | `头痛 -> 乳头疼`（造出「乳头疼 -> 神经内科」） |
-| 起首总括/否定 | `头痛 -> 全部痛` |
-| 单字规范症状 | `眼 -> 干涩感`、`咽 -> 有异物`、`口腔 -> 溃疡面` |
-| 变体须对标准关键词成立 | `月经量少 -> 怕量少`（曾被记成「月经→妇产科」） |
-| 前缀匹配（非子串） | `绞痛` 子串匹配到 `心绞痛`，造出「心绞痛 -> 泌尿科」 |
-
-另外钉住"多科室归属 / 互为子串"的关键词一律丢弃（`胸痛`、`腹痛`、`下腹痛`）——
-金标答案必须唯一，否则测出来的错分不清是模型错还是题错。
+- 部位冲突：`乳头疼`、`腿疼` 不得挂到别的规范症状上；
+- 起首总括/否定：`全部痛`、`无痛` 不是 `头痛` 的口语说法；
+- 单字规范症状（`眼`、`咽`）语义太宽，其变体一律拒绝；
+- 变体必须对规范症状本身成立，匹配只认前缀：`绞痛` 不得命中 `心绞痛`；
+- 多科室归属或互为子串的关键词（`胸痛`、`腹痛`、`下腹痛`）一律丢弃。
 """
 
 from __future__ import annotations
@@ -41,7 +35,7 @@ def script() -> ModuleType:
 @pytest.mark.parametrize(
     ("variant", "canonical"),
     [
-        ("乳头疼", "头痛"),  # 部位冲突：乳 ≠ 头（这条曾造出「乳头疼 -> 神经内科」）
+        ("乳头疼", "头痛"),  # 部位冲突：乳 ≠ 头
         ("腿疼", "腰痛"),  # 部位冲突：腿 ≠ 腰
         ("胃热", "口臭"),  # 实义字零交集
         ("喉咙有痰", "口臭"),
@@ -61,7 +55,7 @@ def test_lead_stopwords_are_rejected(script: ModuleType, variant: str) -> None:
 
 @pytest.mark.parametrize("canonical", ["眼", "耳", "咽", "牙"])
 def test_single_char_canonicals_are_rejected(script: ModuleType, canonical: str) -> None:
-    """单字规范症状语义太宽：其变体曾造出文本里根本没提部位的假题。"""
+    """单字规范症状语义太宽：其变体容易造出根本没提部位的假题。"""
     assert script._plausible_variant("干涩感", canonical) is False
 
 
@@ -82,7 +76,7 @@ def test_plausible_variants_survive(script: ModuleType, variant: str, canonical:
 
 
 def test_canonical_matching_is_prefix_only(script: ModuleType) -> None:
-    """**核心回归**：子串包含匹配曾让 `绞痛` 命中 `心绞痛`，造出「心绞痛 -> 泌尿科」。"""
+    """匹配只认前缀：子串包含会让 `绞痛` 命中 `心绞痛`，挂到错误的科室上。"""
     only_suffix = {"心绞痛": ["胸口疼"]}
     assert script._match_canonical("绞痛", only_suffix) == []  # 只有"绞痛"结尾的 ⇒ 不建用例
     assert script._match_canonical("心绞痛", only_suffix) == ["心绞痛"]
@@ -90,10 +84,7 @@ def test_canonical_matching_is_prefix_only(script: ModuleType) -> None:
 
 
 def test_conflicting_keywords_are_dropped(script: ModuleType) -> None:
-    """`腹痛`(消化内科) 与 `下腹痛`(妇产科) 互为子串 ⇒ 两个都丢；`胸痛` 多科室 ⇒ 丢。
-
-    金标答案必须唯一，否则错分不清是模型错还是题错。
-    """
+    """互为子串（`腹痛`/`下腹痛`）或多科室归属（`胸痛`）的关键词都必须丢弃。"""
     bad = script._conflicting_keywords()
     assert {"腹痛", "下腹痛"} <= bad
     # 同一科室内部互为子串不算冲突（牙 / 牙龈 都归口腔科）

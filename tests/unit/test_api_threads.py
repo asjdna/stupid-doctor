@@ -1,14 +1,8 @@
 """`api/threads.ThreadStore` 的单测：属主绑定 + 有界淘汰。
 
-这一层是 `/chat` 会话状态的唯一入口，所以两条性质都在这里钉死：
-
-1. **属主绑定**：`thread_id` 首见即绑定属主；换属主抛 `ThreadOwnershipError`
-   （不是"当成新会话"，也不是"接到别人的历史上"）。
-2. **有界**：LRU 上界，且淘汰的是**最久未用**的那个（不是最早创建的那个）。
-
-为什么不用 HTTP 层测这两条：端到端用例只能覆盖"被拒"这一种表现，
-而"两个属主同时认领时只有一个赢"这类竞态必须在**同一个临界区**上验证。
-`/chat` 跑在线程池里，所以并发那条不是假想问题。
+属主绑定：`thread_id` 首见即绑定属主，换属主抛 `ThreadOwnershipError`，既不"当成新会话"
+也不"接到别人的历史上"；有界：LRU 上界，淘汰最久未用而非最早创建的那条。并发竞态
+必须在同一个临界区上验证（`/chat` 跑在线程池里），所以不走 HTTP 层。
 """
 
 from __future__ import annotations
@@ -44,7 +38,6 @@ class TestOwnership:
         store.claim("t1", "p1")
         with pytest.raises(ThreadOwnershipError, match="t1"):
             store.claim("t1", "p2")
-        # 被拒之后属主没有被改写（不是"后来者覆盖"）
         assert store.owner_of("t1") == "p1"
 
     def test_rejection_does_not_leak_the_owner(self) -> None:
@@ -72,7 +65,7 @@ class TestOwnership:
     def test_concurrent_claims_have_exactly_one_winner(self) -> None:
         """竞态：4 个属主同时认领同一个 thread_id ⇒ 只能有一个成功。
 
-        "先看属主、再建线程"必须是**一次**临界区，否则它们可以各自看到"还没有这个线程"。
+        "先看属主、再建线程"必须是一次临界区，否则它们可能各自看到"还没有这个线程"。
         """
         store = ThreadStore()
         barrier = threading.Barrier(4)
@@ -118,12 +111,12 @@ class TestBounded:
         assert store.owner_of("b") is None
 
     def test_evicted_thread_can_be_reclaimed_by_anyone(self) -> None:
-        """淘汰掉的线程不再有属主，所以新的 thread_id 出现时不会误伤（也算一次释放）。"""
+        """淘汰后不再有属主，所以重新认领它不会被拒（也等于一次释放）。"""
         store = ThreadStore(max_threads=1)
         store.claim("old", "p1")
         store.claim("new", "p2")
         assert store.owner_of("old") is None
-        store.claim("old", "p2")  # 现在它归 p2，不再被拒
+        store.claim("old", "p2")
         assert store.owner_of("old") == "p2"
 
     def test_messages_per_thread_are_capped(self) -> None:
@@ -135,7 +128,7 @@ class TestBounded:
         assert [m["content"] for m in kept] == ["第2句", "第3句", "第4句", "第5句"]
 
     def test_history_is_a_copy(self) -> None:
-        """返回的是副本：调用方改它不该影响表里的会话（否则淘汰/属主都没意义了）。"""
+        """返回副本：调用方改它不影响表里的会话。"""
         store = ThreadStore()
         store.append("t1", "p1", [{"role": "user", "content": "原文"}])
         got = store.history("t1", "p1")
@@ -143,7 +136,7 @@ class TestBounded:
         assert len(store.history("t1", "p1")) == 1
 
     def test_defaults_are_documented_constants(self) -> None:
-        """默认上界必须是**有限的**正数：这才是"无界增长"的修复。"""
+        """默认上界必须是有限正数，否则表会无界增长。"""
         assert MAX_THREADS > 0
         assert MAX_MESSAGES_PER_THREAD > 0
         assert ThreadStore().max_threads == MAX_THREADS

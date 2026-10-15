@@ -1,27 +1,19 @@
 """带引用回答与拒答。
 
-## 这个模块的三条硬规则
+三条硬规则：
 
 1. **只依据检索到的上下文回答**，并且每个论断都要带 `[n]` 引用标记；
-2. **上下文里没有就明说没有**——拒答是正确输出，不是失败。检索为空时**不调用 LLM**：
-   既省成本，也更诚实（让模型"凭印象答"正是幻觉的来源）；
-3. **引用标记必须可核对**：`[n]` 只能指向真实提供给模型的那 n 段上下文。
-   指向不存在的 `[99]` 会被剥掉并记入诊断——**一个指向不存在来源的引用，
-   比没有引用更糟**。
+2. **上下文里没有就明说没有**——拒答是正确输出，不是失败。检索为空时**不调用
+   LLM**：既省成本，也避免模型"凭印象答"带来的幻觉；
+3. **引用标记必须可核对**：`[n]` 只能指向真实提供给模型的那 n 段上下文。指向不
+   存在编号的标记会被剥掉并记入诊断——指向不存在来源的引用比没有引用更糟。
 
-## 为什么把"未配置密钥"也当成一种正常输出
+"未配置密钥"也是一种正常输出（**有记录的降级**）：检索结果与引用照常返回，只是
+`text` 为空、`refused=True` 并给出原因，没有密钥的环境（CI 等）依然能跑通整条链路。
 
-业务逻辑要能跑通，而"生成回答"是唯一需要外网密钥的一步。所以这里把它设计成
-**有记录的降级**：检索结果与引用照常返回，只是 `text` 为空、`refused=True`
-并给出原因。这样没有密钥的环境（CI、面试官本机）依然能完整跑通整条链路，
-而不是看到一坨 traceback。
-
-## 关于"逐字保留标识符"
-
-系统提示里专门有一条：参数名、字段名、命令行、错误码必须**原样保留**。
-这不是凑数的规则——LLM 很容易把 `--eviction-hard` 改写成"驱逐硬阈值"、
-把 `topologySpreadConstraints` 缩写成"拓扑约束"。对技术文档问答来说，
-**改写标识符等于答错**。
+系统提示里专门要求参数名、字段名、命令行、错误码**逐字保留**：LLM 很容易把
+`--eviction-hard` 改写成"驱逐硬阈值"、把 `topologySpreadConstraints` 缩写，
+对技术文档问答来说改写标识符等于答错。
 """
 
 from __future__ import annotations
@@ -56,10 +48,8 @@ SYSTEM_PROMPT = """你是一个 Kubernetes 官方文档助手。严格遵循以�
 5. 回答用与提问相同的语言，简洁分点，不要复述全部原文。"""
 
 _CONTEXT_HEADER_RE = re.compile(r"^\[[^\]]*\]\s*\n+")
-# 引用标记 `[n]`。位数**不设上限**：`\d{1,3}` 会漏掉 `[1234]`，
-# 而漏掉就意味着一个打不开的引用**静默留在回答里**（实测：`[1234]` 既不被剥除，
-# 也不触发"没有任何引用"的告警）。这里的判据只有"是否 ≤ 提供的段数"，
-# 所以正则不该替我们提前截断。
+# 引用标记 `[n]`。位数**不设上限**：判据只是"编号是否 ≤ 提供的段数"，
+# 写成 `\d{1,3}` 会漏掉 `[1234]`，让它既不被剥除、也不触发"没有引用"的告警。
 _MARKER_RE = re.compile(r"\[(\d+)\]")
 
 
@@ -140,8 +130,8 @@ class Answer:
 def context_text(body: str) -> str:
     """去掉块首的 `[标题 › 面包屑]` 上下文头。
 
-    这行是给**嵌入模型**用的（提高区分度，见 chunker 的说明）；放进提示词时
-    反而冗余——因为编号标签里已经写了同样的来源信息，重复会稀释注意力。
+    这一行是给**嵌入模型**提高区分度用的；放进提示词反而冗余——编号标签里已经写了
+    同样的来源信息，重复会稀释注意力。
     """
     return _CONTEXT_HEADER_RE.sub("", body, count=1).strip()
 
@@ -155,14 +145,13 @@ def build_context(
 ) -> tuple[str, list[Citation]]:
     """把检索结果编号成上下文，返回 (上下文文本, 实际收录的引用)。
 
-    两个刻意的约束：
+    两条约束：
 
-    - **超出 `max_chars` 的片段会被丢弃**，并且不会出现在引用列表里——
-      只给模型看了一部分片段，却允许它引用全部编号，是引用错位的常见来源。
-    - **同一文档最多收录 `max_per_doc` 段**。检索是按"块"打的，同一篇文档里
-      相邻小节的向量往往高度相似，会一起涌进前几名（实测一次查询的前 4 段里
-      有 3 段来自同一篇）。这些近重复片段既挤掉别的文档，也让上下文冗余。
-      限流后引用编号仍然连续（按收录顺序重编）。
+    - **超出 `max_chars` 的片段会被丢弃**，并且不出现在引用列表里——只给模型看了
+      一部分片段却允许它引用全部编号，是引用错位的常见来源。
+    - **同一文档最多收录 `max_per_doc` 段**。检索按块打分，同一篇文档里相邻小节的
+      向量往往高度相似，会一起涌进前几名，既挤掉别的文档又让上下文冗余。限流后
+      引用编号按收录顺序重编，仍然连续。
     """
     blocks: list[str] = []
     citations: list[Citation] = []
@@ -170,8 +159,7 @@ def build_context(
     used = 0
     for hit in hits:
         if per_doc.get(hit.doc_id, 0) >= max_per_doc and citations:
-            # citations 非空才允许跳过：第一段必须保留，
-            # 否则"有结果"会退化成"没结果"（宁可上下文冗余，不可空手）
+            # `citations` 非空才允许跳过：第一段必须保留，否则"有结果"会退化成"没结果"
             continue
         label = f"{hit.title} › {hit.breadcrumb}" if hit.breadcrumb else hit.title
         body = context_text(hit.body)
@@ -228,35 +216,17 @@ class BudgetExceeded(RuntimeError):
 UNPRICED_CALL_FALLBACK_USD = 0.25
 """litellm **算不出价**时，每次调用按这个金额保守计入当日花费。
 
-## 为什么不能按 0 记
+`completion_cost()` 对价格表里没有的模型会抛异常 / 返回 `None`。"算不出价"与
+"这次调用免费"是两件事：按 0 记等于预算闸门永远拦不住，所以取一个偏高的常数。
 
-`completion_cost()` 对未登记在价格表里的模型会抛异常（实测 litellm 1.102.1：
-`Exception: This model isn't mapped yet...`）。原先的实现把这个异常吞掉并**按 0 记**，
-后果是**闸门永远拦不住**：花了多少钱在账本上永远是 0，`check()` 也就永远不触发。
-"算不出价"与"这次调用免费"是两件完全不同的事，不能混成同一个数字。
-
-## 0.25 这个数怎么来的
-
-按本应用**单次调用的最坏情况**取上限，再留安全系数：
-
-- 输入上限 = `max_context_chars` 8000 字符 ≈ 2800 token（中英混排的粗略折算）；
-- 输出上限 = `llm_max_tokens`（**2026-10-15 起默认 2000**；此前 800 会把临床契约 JSON 截断，
-  实测 20 条里 7 条被截断，且报错形如"模型输出不符合契约"——指向了错误的方向）；
-- 主流供应商里最贵的一档（claude-3-opus 级别的 $15/1M 输入 + $75/1M 输出）
-  ≈ `2800×15e-6 + 2000×75e-6` ≈ **$0.19**。
-
-0.25 是它的 2.5 倍，所以按这个数计入时**欠计**的概率很低（宁可高估，不可漏计）。
-默认日预算 $5 时，它等价于"最多约 20 次无法定价的调用"。
-
-## 运营者可以调
+0.25 的来历：按单次调用最坏情况留安全系数——输入上限 `max_context_chars`
+8000 字符 ≈ 2800 token，输出上限 `llm_max_tokens`（默认 2000），主流供应商最贵的
+一档（$15/1M 输入 + $75/1M 输出）≈ $0.19，0.25 是它的 2.5 倍。默认日预算 $5 时，
+约等于"最多 20 次无法定价的调用"。
 
 `KUBEDOCS_LLM_UNPRICED_CALL_USD=0` 表示"我的模型确实免费，不要按上限计入"
-（此时仍会计数，只是不计金额）。默认**不假设免费**，这是刻意的默认方向。
-
-## 注意"真免费"与"算不出价"是分得开的
-
-litellm 对本地免费模型（实测 `ollama/llama3`）会**正常返回 0.0**，那是"定价为 0"，
-按 0 记是对的；只有"抛异常 / 返回 None"才走这条保守路径。两者不混。
+（仍会计数，只是不计金额）。真免费与算不出价分得开：litellm 对本地免费模型会正常
+返回 0.0，那按 0 记是对的，只有抛异常 / 返回 `None` 才走这条保守路径。
 """
 
 _SPEND_LOCKS: dict[str, threading.Lock] = {}
@@ -267,8 +237,8 @@ _UNPRICED_SUFFIX = ":unpriced_calls"
 def _lock_for(path: Path) -> threading.Lock:
     """取该花费文件**进程内**唯一的锁。
 
-    为什么按路径注册而不是每个 `DailyBudget` 一把锁：同一个花费文件会被多处构造
-    （`Answerer` 一份、`/chat` 的工具循环一份），各自一把锁等于没有锁。
+    同一个花费文件会被多处构造（`Answerer` 一份、`/chat` 的工具循环一份），
+    按路径注册才能让它们共用同一把锁。
     """
     key = str(path.resolve()) if path.is_absolute() else str(path)
     with _SPEND_LOCKS_GUARD:
@@ -298,12 +268,10 @@ def _add_pending(path: Path, delta: float) -> None:
 def _atomic_replace(tmp: Path, dest: Path) -> None:
     """`os.replace` 的 Windows 友好版本。
 
-    **为什么不能直接调 `os.replace`**：Windows 上若目标文件此刻正被**任何**其他
-    句柄打开（另一个进程在读、编辑器打开着、杀毒软件在扫描），替换会以
-    `PermissionError` 失败——POSIX 没有这个语义（那里 rename 对已打开文件是安全的）。
-    本项目的开发机是 Windows（`Makefile` 里专门处理过 cmd 与 venv 路径），
-    所以这里重试几次；仍然失败则退回"直接重写"，并在日志里说清楚
-    （退路不是原子的，但比让一次记账直接抛异常更好）。
+    Windows 上若目标文件此刻正被其他句柄打开（另一个进程在读、编辑器或杀毒软件
+    占用），替换会以 `PermissionError` 失败，POSIX 没有这个语义。所以这里重试几次；
+    仍然失败则退回"直接重写"并记一条 warning——退路不是原子的，但比让一次记账
+    直接抛异常更好。
     """
     for attempt in range(5):
         try:
@@ -319,27 +287,17 @@ def _atomic_replace(tmp: Path, dest: Path) -> None:
 class DailyBudget:
     """按天累计 LLM 花费，落盘成一个小 JSON 文件（可读、可手改、可审计）。
 
-    ## 并发边界（如实写清，别高估这个闸门）
+    并发边界（别高估这个闸门）：
 
-    - **进程内是原子的**：读-改-写整段持 `threading.Lock`（按文件路径注册）。
-      注意"读"也包括在内——只给写加锁是不够的：`record()` 曾经用
-      `write_text`（先截断再写），并发读者会读到空文件 ⇒ `JSONDecodeError`
-      ⇒ 当作"今天没花过" ⇒ **闸门放行**（fail-open）。现在写入是
-      `tmp` + `os.replace` 的原子替换，读取也在锁内，这条路走不通了。
+    - **进程内是原子的**：读-改-写整段持 `threading.Lock`（按文件路径注册），
+      "读"也在锁内——只给写加锁不够。写入用 `tmp` + `os.replace` 原子替换，否则
+      并发读者可能读到被截断的空文件，进而当作"今天没花过"而放行（fail-open）。
     - **`check()` 与 `record()` 之间的窗口要预留**：两个方法各是一个临界区，
       N 个并发请求会在 spent 还没变时全部通过 `check()`，然后各自 `record()`，
-      上限被冲过 N 倍。所以调用方应当用 `reserve()`（见它的说明），
-      它把"在途调用"按保守金额计入本次判断。
-    - **跨进程不是原子的**：多 worker / 多副本各持自己的锁、各写各的，
-      互相看不见 ⇒ 真实上限是 `副本数 × 日预算`。**没有修**，理由是取舍可核：
-      · 跨进程锁要按平台分叉导入（`fcntl.flock` / `msvcrt.locking`），或用
-        `O_EXCL` 锁文件——后者要处理崩溃残留，而"锁文件残留"的失败形态是
-        **闸门永久拒绝一切调用**（账本坏了，花钱的路径跟着不可用），
-        比它要防的"丢一次计费"严重得多；
-      · 换 SQLite 事务确实能跨进程原子，但要求放弃这个账本"人可读、可手改、
-        可审计"的设计，也放弃已落盘的 `llm_spend.json` 兼容性。
-      当前部署形态是**单进程**（`uvicorn kubedocs.api.app:app`，没有 `--workers`，
-      见 `Dockerfile`），所以这条限制现在不生效；真要多副本部署，必须换成共享账本。
+      上限被冲过 N 倍。调用方应当用 `reserve()`，它把"在途调用"按保守金额计入判断。
+    - **跨进程不是原子的**：多 worker / 多副本各持自己的锁、各写各的，真实上限是
+      `副本数 × 日预算`。当前部署形态是**单进程**（`uvicorn kubedocs.api.app:app`，
+      没有 `--workers`），这条限制不生效；真要多副本部署必须换成共享账本。
     - **金额精度**：文件里按 6 位小数累积，单次舍入误差可忽略。
     """
 
@@ -353,8 +311,8 @@ class DailyBudget:
         self.path = path
         self.limit = limit_usd
         self.unpriced_usd = unpriced_usd
-        # 预留金额默认取"算不出价"的保守上限：调用前不知道真实花费，
-        # 用一个偏高的常数比用 0 安全（用 0 预留等于没预留）。
+        # 预留金额默认取"算不出价"的保守上限：预留时不知道真实花费，
+        # 用偏高的常数比用 0 安全（用 0 预留等于没预留）。
         self.reserve_usd = unpriced_usd if reserve_usd is None else reserve_usd
 
     def _load(self) -> dict[str, float]:
@@ -364,8 +322,8 @@ class DailyBudget:
         try:
             data: dict[str, float] = json.loads(self.path.read_text(encoding="utf-8"))
         except (json.JSONDecodeError, OSError):
-            # 文件被外部改坏（不是并发写：并发写已由原子替换消除）不该让服务整体不可用；
-            # 保守做法是当作"今天没花过"，同时留下 warning 以便被发现。
+            # 文件被外部改坏不该让服务整体不可用：保守地当作"今天没花过"，
+            # 同时留下 warning 以便被发现。
             logger.warning("LLM 账本 %s 无法解析，本次按 0 计（请检查该文件）", self.path)
             return {}
         out: dict[str, float] = {}
@@ -423,12 +381,11 @@ class DailyBudget:
     def reserve(self, estimated_usd: float | None = None) -> Iterator[None]:
         """为一次模型调用**预留**额度：进入时检查并占住，退出时释放。
 
-        存在的理由：`check()` 与 `record()` 是两个独立的临界区。
-        实测反例——上限 1.0、3 个线程在 spent=0 时**全部**通过 `check()`，
-        随后两次 `record(0.6)` ⇒ spent=1.2，上限被冲过。
-        预留把"在途调用"也算作已用量，这条路径就堵住了。
+        `check()` 与 `record()` 是两个独立的临界区，并发请求会在 spent 还没变时
+        全部通过 `check()`，随后各自记账，把上限冲过 N 倍。预留把"在途调用"也算作
+        已用量，堵住这条路径。
 
-        预留额不知道真实花费，所以按 `reserve_usd`（默认 = 算不出价的上限）保守占额。
+        预留时不知道真实花费，所以按 `reserve_usd`（默认 = 算不出价的上限）保守占额。
         """
         amount = self.reserve_usd if estimated_usd is None else estimated_usd
         with _lock_for(self.path):
@@ -442,9 +399,9 @@ class DailyBudget:
     def record(self, usd: float, *, priced: bool = True) -> float:
         """记一次调用，返回今天新的累计值。
 
-        `priced=False` 表示**litellm 算不出这次调用的价**。此时**不许按 0 记**：
-        按 `unpriced_usd` 的上限保守计入，并单独计数（`unpriced_calls_today()`），
-        同时打一条 warning——三处都可见，因为"悄无声息地免费"正是原先的缺陷。
+        `priced=False` 表示**litellm 算不出这次调用的价**，此时不许按 0 记：
+        按 `unpriced_usd` 的上限保守计入，并单独计数（`unpriced_calls_today()`）、
+        打一条 warning——三处都可见，避免"悄无声息地免费"。
         """
         charge = float(usd)
         today = self._today()
@@ -464,8 +421,8 @@ class DailyBudget:
                 )
             payload[today] = new_total = round(data.get(today, 0.0) + charge, 6)
             self.path.parent.mkdir(parents=True, exist_ok=True)
-            # **原子替换**：`write_text` 会先截断，并发读者可能读到空文件，
-            # 而空文件被当作"今天没花过" ⇒ 闸门 fail-open（实测复现过）。
+            # 原子替换：`write_text` 会先截断，并发读者可能读到空文件，
+            # 而空文件被当作"今天没花过"，导致闸门 fail-open。
             tmp = self.path.with_name(self.path.name + ".tmp")
             tmp.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
             _atomic_replace(tmp, self.path)
@@ -486,7 +443,7 @@ class LLMResult:
     cost_priced: bool = True
     """`False` = **这次调用的价算不出来**（litellm 价格表里没有这个模型）。
 
-    与 `cost_usd == 0.0` 是两件事：真免费的本模型（例如走 ollama）会正常返回
+    与 `cost_usd == 0.0` 是两件事：真免费的本地模型（例如走 ollama）会正常返回
     0.0，那时 `cost_priced` 仍是 `True`。调用方据此决定是否让预算按保守上限计入。
     """
 
@@ -551,22 +508,17 @@ _PLACEHOLDER_MARKERS = (
 )
 """明显不是密钥的占位符片段（大小写不敏感）。
 
-为什么要专门挡这一手：`has_api_key` 原先只判断"非空"，于是 `.env` 里
-一段说明文字会让它返回 True。后果不是"少一个功能"，而是**更坏**——调用方
-会拿着它去发起一次注定失败的真实请求，然后把底层异常抛给用户，用户根本
-看不出真正的原因（配置没填对）。
-
-真正的判据有两条，词表只是其中一条：另一条是"**必须全是 ASCII**"
-（见 `has_api_key`，那条是实测逼出来的、也更强）。词表保留是因为它能把
-话说得更具体（"看起来是占位符" vs "含非 ASCII"），日志里更有指导性。
+`has_api_key` 判"不像占位符"用这张词表，另一条判据是"必须全是 ASCII"。
+词表保留是因为它能把话说得更具体（"看起来是占位符" vs "含非 ASCII"），
+日志里更有指导性。
 """
 
 
 def has_api_key(model: str) -> bool:
     """该模型所需的环境变量是否**真的**配了密钥。
 
-    "配了"= 非空 **且** 不像占位符 **且**全是 ASCII。后两条原先都没有，
-    于是 `.env` 里任何一段说明文字都会被当成密钥——见下面两条注释。
+    "配了"= 非空 **且** 不像占位符 **且**全是 ASCII。后两条缺一不可：把 `.env` 里
+    的说明文字当成密钥，会让调用方发起一次注定失败的请求，而用户只看到底层异常。
     """
     env = required_api_key_env(model)
     value = os.environ.get(env, "").strip()
@@ -577,12 +529,9 @@ def has_api_key(model: str) -> bool:
         logger.warning("%s 看起来是占位符（长度 %d），按未配置处理", env, len(value))
         return False
     if not value.isascii():
-        # 这一条是**实测逼出来的**，不是洁癖：密钥最终要进 HTTP 头
-        # （`Authorization: ...`），而非 ASCII 字符在头部无法编码。本机 `.env` 里
-        # 留了一句中文说明时，链路是"`has_api_key` 返回 True → litellm 拿着它发请求
-        # → 抛 `'ascii' codec can't encode characters in position 9-24`"，
-        # 用户看到的是"模型报错"，完全指不到真正的原因（配置里留了中文）。
-        # 反过来，任何真密钥都是可打印 ASCII，这条判据不会误伤。
+        # 这一条不是洁癖：密钥最终要进 HTTP 头（`Authorization: ...`），非 ASCII
+        # 字符在头部无法编码——配置里留一句中文说明，暴露出来的是 litellm 的
+        # 编码异常，看不出真正原因。任何真密钥都是可打印 ASCII，不会误伤。
         bad = sum(1 for c in value if not c.isascii())
         logger.warning("%s 含 %d 个非 ASCII 字符，不可能是密钥，按未配置处理", env, bad)
         return False
@@ -639,8 +588,8 @@ class LiteLLMClient:
             priced = raw_cost is not None
             cost = float(raw_cost) if priced else 0.0
         except Exception:  # noqa: BLE001 - 算不出价不该让请求失败，但**不许按 0 记**
-            # 未知模型（实测抛 `This model isn't mapped yet`）走这里。
-            # 具体金额由 `DailyBudget.record(priced=False)` 按保守上限计入并计数。
+            # 未知模型走这里；具体金额由 `DailyBudget.record(priced=False)`
+            # 按保守上限计入并计数。
             cost, priced = 0.0, False
         return LLMResult(
             text=text,
@@ -653,10 +602,9 @@ class LiteLLMClient:
     def complete_with_tools(self, messages: list[dict[str, Any]], tools: list[dict[str, Any]]) -> LLMToolTurn:
         """带 function calling 的一次调用（工具循环用）。
 
-        为什么单开一个方法而不是给 `complete()` 加参数：`complete()` 是**纯文本**契约，
-        被 CLI/eval/问诊三处共用；把 tools 混进去会让那三处都要处理"可能没有文本"的情况。
-        两个方法各自稳定，代价是这里要重复一段计费代码——重复**计费**比重复**契约**危险，
-        所以下面的价格计算与 `complete()` 逐行一致，改动时必须同步。
+        `complete()` 是**纯文本**契约，被 CLI / eval / 问诊三处共用；把 tools 混进去
+        会让那三处都要处理"可能没有文本"的情况，所以单开一个方法。代价是这里重复了
+        一段计费代码——下面的价格计算与 `complete()` 逐行一致，改动时必须同步。
         """
         if not has_api_key(self.model):
             raise LLMUnavailable(
@@ -764,13 +712,13 @@ class Answerer:
             f"【文档片段】\n{context}\n\n【问题】\n{question}\n\n请依据上面的片段作答，并带上 [编号] 引用。"
         )
         try:
-            # 用 `reserve()` 而不是 `check()`：预留把"这次在途调用"按保守金额算进已用量，
+            # 用 `reserve()` 而不是 `check()`：它把"这次在途调用"按保守金额算进已用量，
             # 否则并发请求会在 spent 还没变时一起通过检查、再各自记账，把上限冲过 N 倍。
             # 记账也放在预留区间内，让"预留 → 记账"之间没有新的空隙。
             with self.budget.reserve():
                 result = self.llm.complete(SYSTEM_PROMPT, user)
-                # 定价为 0 的调用不必写文件（没有账要记）；但**算不出价**的必须记——
-                # 否则"未知 = 免费"这条缺陷就从这个判断里溜回来了。
+                # 定价为 0 的调用不必写文件（没有账要记）；**算不出价**的必须记，
+                # 否则"未知 = 免费"会从这个判断里溜回来。
                 if result.cost_usd or not result.cost_priced:
                     self.budget.record(result.cost_usd, priced=result.cost_priced)
                 # 指标与账本同步更新：账本是事实来源，指标是可被抓取的视图。
@@ -790,8 +738,8 @@ class Answerer:
             return ans
         except Exception as e:  # noqa: BLE001
             # 供应商侧的失败（密钥无效 401、限流 429、超时、服务不可用）不该让整个请求崩掉：
-            # 检索结果本身是有价值的，用户应当拿到它 + 一句明确的失败原因。
-            # 但**必须把异常类型记进诊断**，否则就成了静默吞异常。
+            # 检索结果本身有价值，用户应当拿到它 + 一句明确的失败原因；但**异常类型
+            # 必须记进诊断**，否则就成了静默吞异常。
             ans.refused = True
             ans.refusal_reason = f"调用大模型失败：{type(e).__name__}: {e}"
             ans.degraded.append("仅返回检索结果（生成回答失败）")

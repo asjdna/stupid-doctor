@@ -1,35 +1,25 @@
-r"""用原型那套 **500 例分层金标**评 kubedocs 的分诊：`data/eval/prototype/patients.json`。
+r"""用原型那套 500 例分层金标评本项目分诊：`data/eval/prototype/patients.json`。
 
-## 这份金标是从哪来的、为什么可以直接用
+金标由原型（已冻结）用 LLM 生成，每条带 `severity` / `style` / `description` /
+`gold_department` / `gold_diseases`；严重度 mild 100 / risky 300 / severe 100，
+语言风格 formal / natural / vague / erroneous 各 125。17 个金标科室全部落在本项目
+科室词表内，可直接使用（`--check-vocab` 只验覆盖、不跑分诊）。
 
-原型（`E:\Users\86189\medical-agent`，已冻结）用 `scripts/generate_patients.py`
-让 LLM 生成 500 个"说不清病的人"的病例，**每个都带标签**：
+口径（**必须分层报，不许合并成一个总数**）：
 
-    {"id", "severity", "style", "description", "gold_department", "gold_diseases"}
-
-分布：严重度 mild 100 / risky 300 / severe 100；语言风格 formal / natural / vague / erroneous
-各 125。**17 个金标科室 100% 落在 kubedocs 的 42 科室词表内**，因此不需要归一化就能直接用
-（实测：`--check-vocab` 会把这个结论再验一遍）。
-
-## 为什么按 severity × style 分层报，而不是只报一个总数
-
-这是原型做得比我们好的地方：把所有病例混成一个数，会把两类完全不同的失败平均掉。
-实测过的例子：原型 severe 档 `dept_hit` 只有 **12%** 而 `emergency` 有 **98%**——
-因为它把重症患者的科室指到了专科（神经内科/心内科），而金标是**急诊科**（severe 档 90/100 是急诊科）。
-只看总数会得出"分诊不太行"，看分层才知道真正的问题是"**该转急诊时没给急诊科**"。
-
-## 两个口径
-
-- `dept top-1 / top-3`：期望科室是否出现在前 1 / 前 3
-- `emergency_as_dept`：对 **severe 档**，top-3 里有没有「急诊科」——重症患者该拿到的动作
-- `strict top-1`：只在**同一 severity 档**内比。原型 severe 金标是急诊科，
-  而我们的分诊器只看症状到科室的相似度；两者口径不同，所以**分开报，不合并**。
+| 口径 | 含义 |
+|---|---|
+| `dept top-1 / top-3` | 期望科室是否出现在前 1 / 前 3 |
+| `emergency_as_dept` | 对 severe 档，top-3 里有没有「急诊科」——重症患者该拿到的动作 |
+| `strict top-1` | 只在同一 severity 档内比；各档期望科室不同，合并会把两类失败平均掉 |
 
 用法::
 
-    python scripts/eval_prototype_patients.py                 # 离线、免费、确定
-    python scripts/eval_prototype_patients.py --check-vocab    # 只验词表覆盖
+    python scripts/eval_prototype_patients.py                # 离线、免费、确定
+    python scripts/eval_prototype_patients.py --check-vocab   # 只验词表覆盖
     python scripts/eval_prototype_patients.py --json out.json
+
+前置条件：金标与 `data/clinic/cards.json` 存在、clinic 索引已建好。退出码恒为 0。
 """
 
 from __future__ import annotations
@@ -95,9 +85,7 @@ def _triage_engine(department_map: dict[str, list[str]], precision_k: int) -> An
 def _run_one(engine: Any, backend: Any, text: str, *, coarse_k: int) -> tuple[list[str], list[str]]:
     """跑一条，返回 (粗排命中的标题, 分诊出的科室)。
 
-    `engine.rank(query, hits)` 收的是**整个检索结果对象**（不是 chunks 列表）——
-    这条约定照抄 `eval_triage.py` 的 `_evaluate`。自己猜成"传 chunks 列表"时，
-    500 条全部返回空科室、表里一片 0.0%（实测踩过）。
+    `engine.rank(query, hits)` 收的是整个检索结果对象而非 chunks 列表（同 `eval_triage.py`）。
     """
     hits = backend.search(text, top_k=coarse_k)
     ranked = engine.rank(text, hits)

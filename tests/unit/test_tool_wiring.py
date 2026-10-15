@@ -1,12 +1,7 @@
-"""clinic 工具装配测试：确认工具**真的注册进了注册表**、且语义正确。
+"""clinic 工具装配：工具必须真的注册进注册表，且语义正确。
 
-这组测试针对的是一类具体的历史缺陷：**写好了但从未接线**。
-在此之前 `ToolRegistry.register` 全仓库无人调用，工具链路是死的，而
-35 项测试仍然全绿——因为那些测试只测了 `schema()` 与 handler 本身，
-没有任何一条断言"它出现在注册表里"。
-
-所以本文件的第一条断言就是：注册之后，`ToolRegistry.for_domain("clinic")` 里
-必须能看到它们。
+只测 `schema()` 与 handler 本身不算接线，所以第一条断言就是注册之后
+`ToolRegistry.for_domain("clinic")` 里能看到它们。
 """
 
 from __future__ import annotations
@@ -34,7 +29,7 @@ def _clean_registry():
 
 class TestRegistrationActuallyHappens:
     def test_clinic_tools_are_visible_in_the_registry(self, service):
-        """**这条就是历史上缺失的那个断言**：注册之后必须在注册表里看得到。"""
+        """装配之后工具必须出现在注册表里：这是"接线生效"的直接证据。"""
         register_domain_tools("clinic", service=service)
         names = [s.name for s in ToolRegistry.for_domain("clinic")]
         assert "list_departments" in names
@@ -42,11 +37,7 @@ class TestRegistrationActuallyHappens:
         assert "book_appointment" in names
 
     def test_registration_is_idempotent_and_replaces_instances(self, service):
-        """反复装配不能抛"已注册"，而且要换成新实例。
-
-        工具是**闭包捕获具体 service** 的；若只做"已存在就跳过"，
-        第二装配会继续用旧号源库（可能已经关闭），这是很难查的错。
-        """
+        """反复装配不能抛"已注册"且必须换成新实例：工具闭包捕获具体 service，跳过就等于继续用旧号源库。"""
         register_domain_tools("clinic", service=service)
         first = ToolRegistry.get("list_departments")
         register_domain_tools("clinic", service=BookingService(MockAppointmentProvider()))

@@ -1,36 +1,28 @@
-r"""急诊判定评测：用原型 500 例自带的 `severity` 当急重症金标。
+r"""急诊判定评测：用 `data/eval/prototype/patients.json` 的 `severity` 当急重症金标。
 
-## 为什么需要它（这是本项目最该补的一块）
+`red_flags` / `emergency` 走模型路径，所以这里必须真调模型；按 severity 分档：
 
-"红线交给模型"是本项目最大的一次架构转向，但**一直没有系统评测**：
-500 例金标只测了**科室**（分诊器，离线免费），而 `red_flags` / `emergency` 走的是
-**模型路径**，此前只有 4 个用例的手工抽样。一个医疗产品的急诊判定不能只有手工抽样。
-
-原型 `data/eval/prototype/patients.json` 每个病例带 `severity`，可以直接当标签用：
-
-| severity | 期望 | 性质 |
+| severity | 期望 | 样本 |
 |---|---|---|
-| `severe` | **应当**判出急重症（漏判 = 危险） | 100 例 |
-| `mild` | **不应当**判急重症（误报 = 让人对提示麻木） | 100 例 |
-| `risky` | 不参与判定（介于两者之间，本来就该由模型酌情） | 300 例 |
+| `severe` | 应当判出急重症（漏判 = 危险） | 100 例 |
+| `mild` | 不应当判（误报 = 让人对提示麻木） | 100 例 |
+| `risky` | 不参与判定，本就该由模型酌情 | 300 例 |
 
-## 三个口径
+两个口径：**检出率**（severe 里 `emergency=true` 的比例，漏一个就是一次危险的失败）
+与**误报率**（mild 里 `emergency=true` 的比例）。返回 `action=ask`（先追问、本轮没判）
+算已判——`ask` 轮同样带完整结论，只是同时列了追问；只有 `action=error` 才计入解析失败。
+对 severe 案例，`ask` 不等于漏判，但也不等于安全：患者拿到的是追问而非急救指引。
 
-- **检出率（severe）**：`emergency=true` 的比例。**漏一个就是一次危险的失败**。
-- **误报率（mild）**：`emergency=true` 的比例。
-- **未给结论率**：返回 `action=ask`（先追问、本轮没判）。对 severe 案例这不等于漏判——
-  但也**不等于安全**：急症患者拿到的是一句追问而不是急救指引。所以单列，不混进检出率。
-
-## 花钱
-
-每个用例都会真调模型（含工具轮），所以默认**每类只跑 12 例**（24 次问诊）。
-要跑全量用 `--per-class 100`——那会明显花钱。
+前置条件：`--base` 上的服务在跑（默认 `http://127.0.0.1:8082`）、模型密钥可用。
+每个用例都会真调模型（含工具轮），默认每类只跑 12 例（24 次问诊）；`--per-class 100` 明显花钱。
 
 用法::
 
     python scripts/eval_emergency.py                    # 默认每类 12 例
     python scripts/eval_emergency.py --per-class 30 --json out.json
     python scripts/eval_emergency.py --dry-run          # 只列样本，不调模型
+
+退出码：0 正常结束 / 2 某例请求失败（服务不可用时立即中止，不当成"未检出"）。
 """
 
 from __future__ import annotations
@@ -56,7 +48,6 @@ def _load(per_class: int) -> list[dict[str, Any]]:
     if not GOLD.is_file():
         raise SystemExit(f"金标缺失：{GOLD}")
     rows: list[dict[str, Any]] = json.loads(GOLD.read_text(encoding="utf-8"))
-    # S311：要的是确定性抽样（固定种子 ⇒ 同一批样本、可比的数字），与密码学无关
     rng = random.Random(SEED)  # noqa: S311
     out: list[dict[str, Any]] = []
     for severity, _expect in CASES:
@@ -69,8 +60,7 @@ def _ask(base: str, text: str, sid: str) -> dict[str, Any]:
     import urllib.request
 
     body = json.dumps({"question": text, "session_id": sid}).encode("utf-8")
-    # S310：URL 由 `--base` 给出，默认是本地服务（127.0.0.1）——不是"用户可控的任意 scheme"。
-    # 本脚本只用于本地评测，不对外提供。
+    # S310：URL 由 `--base` 给出、默认是本地服务，本脚本只用于本地评测。
     req = urllib.request.Request(  # noqa: S310
         base + "/consult", data=body, headers={"Content-Type": "application/json"}
     )
@@ -132,10 +122,8 @@ def main(argv: list[str] | None = None) -> int:
     for severity, expect in CASES:
         sub = [r for r in results if r["severity"] == severity]
         n = len(sub)
-        # **判据是 `action != "error"`，不是 `action != "ask"`。**
-        # 实测踩过：`ask` 轮同样带着完整结论（`emergency`/`red_flags` 都在），
-        # 只是**同时**列了追问。把 `ask` 当成"未判"会凭空压低检出率——
-        # 第一版就是这么算的，12 例 mild 里 10 例被误记成"未判"。
+        # 判据是 `action != "error"` 而非 `action != "ask"`：`ask` 轮同样带完整结论
+        # （`emergency`/`red_flags` 都在），只是同时列了追问；当成"未判"会凭空压低检出率。
         broken = [r for r in sub if r["action"] == "error"]
         judged = [r for r in sub if r["action"] != "error"]
         hit = sum(1 for r in judged if r["emergency"] is expect)

@@ -1,8 +1,6 @@
-"""MCP server 测试：工具定义来自注册表、副作用边界在 MCP 边界上仍然成立。
+"""MCP server 测试：工具定义来自注册表，副作用边界在 MCP 边界上仍然成立。
 
-**不启 stdio**：直接调用 `build_server` 挂上去的 `list_tools` / `call_tool` 处理函数。
-理由是这几条要验的是**边界语义**（暴露了什么、拒绝什么），不是 MCP 的传输层——
-传输层是 `mcp` 包自己的事，测它等于测第三方库。
+不启 stdio，直接调 `build_server` 挂的 `list_tools` / `call_tool`——验的是边界语义，传输层归 `mcp` 包。
 """
 
 from __future__ import annotations
@@ -15,7 +13,6 @@ from kubedocs.mcp.server import build_server
 
 
 def _call(server: object, name: str, arguments: dict[str, object] | None = None) -> object:
-    """同步跑一次 `call_tool`。handler 挂在 server 的 request 表里，走公开入口拿它。"""
     from mcp.types import CallToolRequest, CallToolRequestParams
 
     async def run() -> object:
@@ -93,11 +90,7 @@ class TestMcpCalls:
         assert "副作用" in _text(result)
 
     def test_side_effect_missing_confirm_is_rejected_by_the_framework(self) -> None:
-        """`confirm` 是 schema 里的必填项 ⇒ **mcp 框架自己**就挡下来了（多一层防护）。
-
-        这里不去掉必填去换一句更好听的话：少一层校验，就少一层挡住误操作的东西。
-        提示语在 schema 的 `description` 里，合规的客户端看得到。
-        """
+        """`confirm` 是 schema 必填项，所以 mcp 框架自己就挡下了（多一层防护）；提示语在 schema 的 `description` 里。"""
         server = build_server("clinic", allow_side_effects=True)
         result = _call(server, "book_appointment", {"department": "内科"})
         assert result.root.isError is True  # type: ignore[attr-defined]

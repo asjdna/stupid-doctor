@@ -1,40 +1,22 @@
-"""本地默认索引：SQLite（FTS5 全文） + sqlite-vec 向量索引。
+"""本地默认索引：SQLite（FTS5 全文 + bm25 列权重） + sqlite-vec 向量索引。
 
-## 这个实现换掉的到底是什么（先说实话）
+向量路用 `sqlite-vec` 的 `vec0` 虚表。注意 `vec0` 是 **C 实现的暴力近邻扫描**
+（带 SIMD、按 chunk 分块），不是 HNSW/IVF 之类的 ANN 索引：它换来的是**向量数据的
+位置与生命周期**，而不是更低的延迟——向量存在 DB 内的虚表里、与块行同一事务写入、
+按 `chunk_id` 逐行删除、不常驻进程内存。
 
-它**不是**"用 ANN 索引替掉暴力扫描"。`sqlite-vec` 0.1.9 的 `vec0` 虚表
-是 **C 语言实现的暴力近邻扫描**（带 SIMD、按 chunk 分块），HNSW/IVF 只在其
-roadmap 上——本机实测 `EXPLAIN QUERY PLAN` 也确认是 `SCAN ... VIRTUAL TABLE`。
-所以"换 ANN"这个说法在本版本上不成立，必须写明（见 ADR-0004「未验证/被证否的假设」）。
+关键设计：
 
-它真正换掉的是**向量数据的位置与生命周期**：
+1. **向量表主键就是 `chunk_id`**（`vec0(chunk_id text primary key, ...)`），不绕道
+   `chunks.rowid`，因此删除/覆盖都按主键定位，不受 rowid 回收影响。
+2. **向量与块行同事务**：`upsert_docs` 在同一个 `BEGIN IMMEDIATE` 里写 `chunks`、
+   `chunks_fts`、`chunks_vec`，不存在"块在、向量不在"的中间态，`finalize()` 无需重建。
+3. **全文路与 `sqlite` 后端逐字节相同**（同一个外内容表、同一套 bm25 与列权重），
+   换后端时唯一的变量就是向量路，便于定位指标变化。
+4. **不一致就报错，不静默**：块表与向量表行数不一致时，向量路抛 `StoreError` 并给出
+   可执行的修复命令；全文路仍然可用。
 
-| 关注点 | 旧实现（numpy 矩阵） | 本实现（vec0 虚表） |
-|---|---|---|
-| 向量存放 | `.npy` 侧车文件，与 DB 不同步 | DB 内的虚表，与块行**同一事务** |
-| 删除一篇文档 | 建新矩阵再原子替换（18861×384 ≈ 29MB 重写） | 按 chunk_id 删对应行，O(删除量) |
-| 内存常驻 | 全量向量常驻内存 | 不常驻（由扩展管理） |
-| 一致性 | "块写了、矩阵没写"是可能状态 | 不存在这个中间态 |
-| 相似度语义 | 原始内积（要求向量已归一化） | 余弦距离（每行归一化后比较） |
-
-即：在 1.9 万块这个量级，它**不是延迟上的胜利**（实测见 ADR-0004 的对照表），
-而是**一致性、可增删、内存占用**上的胜利。把它设成默认是因为它删掉了
-"侧车文件"这个最容易失配的东西；性能结论按实测数字写，不按期待写。
-
-## 关键设计
-
-1. **向量表主键就是 `chunk_id`**（`vec0(chunk_id text primary key, ...)`），
-   不用 `chunks.rowid` 中转。旧实现必须绕道 rowid 并因此要处理"rowid 会被回收"
-   这个坑（见 `sqlite_store.py` 文档第 2 条）；直接用 chunk_id 后这个坑根本不存在，
-   删除/覆盖也只按主键定位，不受回收影响。
-2. **向量与块行同事务**：`upsert_docs` 在一个 `BEGIN IMMEDIATE` 里写 `chunks`、
-   `chunks_fts`、`chunks_vec`，因此不存在"块在、向量不在"的中间态，
-   `finalize()` 不再需要重建任何东西（旧实现要在那里重写整个矩阵）。
-3. **全文路完全继承旧实现**（同一个 `chunks_fts` 外内容表、同一个 bm25 与列权重），
-   所以 `sqlite` 与 `sqlite-vec` 两个后端的 `keyword_search` 结果**逐字节相同**——
-   换后端时唯一的变量就是向量路，这对定位指标变化是决定性的。
-4. **不一致就报错，不静默**：块表与向量表行数不一致时，向量路直接抛
-   `StoreError` 并给出可执行的修复命令；全文路仍然可用。
+`vector_path` 只是旧实现的侧车矩阵路径，本实现不读也不写，仅用于迁移旧索引时定位文件。
 """
 
 from __future__ import annotations
@@ -69,11 +51,9 @@ _MIGRATE_HINT = (
 def _sql(template: str, **parts: object) -> str:
     """本模块**唯一**的动态 SQL 拼装点。
 
-    动态部分只有两种，都不可能来自用户输入：
-    - 表名 `chunks_vec`（模块常量）；
-    - `IN (...)` 里的 `?` 占位符个数（由 `_marks(n)` 生成）。
-    值一律走 sqlite3 的参数绑定。集中到一个函数里，是为了让"哪些部分是动态的"
-    只有一处需要审阅——比在十几处分别论证"我这里拼得安全"可靠得多。
+    动态部分只有表名 `chunks_vec`（模块常量）与 `IN (...)` 里的 `?` 占位符个数
+    （由 `_marks(n)` 生成）；值一律走 sqlite3 的参数绑定。集中在一处，是为了让
+    "哪些部分是动态的"只需审阅一遍。
     """
     return template.format(**parts)
 
@@ -97,8 +77,7 @@ class SqliteVecStore(SqliteStore):
         domain: str = "",
         cache_kib: int = 131072,
     ) -> None:
-        # `vector_path` 只是**旧实现的侧车矩阵位置**，本实现不读也不写它；
-        # 仅用于"迁移旧索引"时定位那个文件，以及告诉用户它已经不需要了。
+        # `vector_path` 只用于定位旧实现的侧车矩阵文件，本实现不读也不写它。
         super().__init__(
             db_path,
             vector_path,
@@ -107,12 +86,10 @@ class SqliteVecStore(SqliteStore):
             normalizer=normalizer,
             domain=domain,
         )
-        # 页缓存必须按向量表大小调大。实测（18861×384，向量表 29MB，同一台机器）：
-        #   默认 2MB 缓存   KNN top10 p50 66~147ms   ← 每次查询都在穿透页缓存读盘
-        #   128MB 缓存      KNN top10 p50 12.0ms
-        #   256MB mmap      KNN top10 p50 20.5ms     ← mmap 反而更慢，所以不开
-        # 这是本实现相对基类唯一需要额外调的连接参数；调与不调差 5~12 倍，
-        # 而它完全不影响正确性——正是那种"不测就永远发现不了"的退化。
+        # 页缓存必须按向量表大小调大：默认 2MB 缓存下每次 KNN 查询都在穿透页缓存读盘
+        # （18861×384、29MB 向量表时 p50 约 66~147ms），调到 128MB 后约 12ms。
+        # 这是本实现相对基类唯一需要额外调的连接参数：它不影响正确性，只影响延迟。
+        # 页缓存优于 mmap（同场景下 mmap 反而更慢），所以不开 mmap。
         self._con.execute(f"PRAGMA cache_size=-{int(cache_kib)}")
         self._load_extension()
         self._create_vec_table()
@@ -123,8 +100,8 @@ class SqliteVecStore(SqliteStore):
     def _load_extension(self) -> None:
         """加载 sqlite-vec 扩展。
 
-        失败必须**硬报错**而不是退回暴力扫描：静默回退会让"我明明配了 sqlite-vec"
-        与"实际在跑什么"分离，而两者给出的排序可能不同，指标变化将无从解释。
+        失败必须**硬报错**而不是退回暴力扫描：静默回退会让"配置的后端"与"实际在跑
+        什么"分离，而两者的排序可能不同，指标变化将无从解释。
         """
         try:
             import sqlite_vec
@@ -149,9 +126,9 @@ class SqliteVecStore(SqliteStore):
     def _create_vec_table(self) -> None:
         """建向量表（幂等）并核对声明维度。
 
-        `CREATE VIRTUAL TABLE IF NOT EXISTS` 遇到已存在的表**不会**校验维度，
-        所以维度必须在建表后显式读回比较——否则"换了嵌入模型但忘了重建"会
-        表现为插入/查询报一个难懂的扩展错误，而不是一句可执行的提示。
+        `CREATE VIRTUAL TABLE IF NOT EXISTS` 遇到已存在的表**不会**校验维度，所以建表后
+        必须显式读回比较——否则"换了嵌入模型但忘了重建索引"会变成插入/查询时的难懂报错，
+        而不是一句可执行的提示。
         """
         ddl = _sql(
             "CREATE VIRTUAL TABLE IF NOT EXISTS {tbl} USING vec0("
@@ -207,10 +184,9 @@ class SqliteVecStore(SqliteStore):
     ) -> None:
         """把本批向量写进 vec0 表——与块行同一事务，不存在中间态。
 
-        为什么用 `ndarray.tobytes()` 而不是 `sqlite_vec.serialize_float32()`：
-        后者用 `struct.pack` 逐个 float 走 Python 层，18861×384 次调用是纯开销；
-        `.tobytes()` 是内存直拷。两者都产出 sqlite-vec 要求的**小端 float32**
-        原始字节（`<f4` 显式声明字节序，不依赖平台）。
+        用 `ndarray.tobytes()` 而不是 `sqlite_vec.serialize_float32()`：后者用
+        `struct.pack` 逐个 float 走 Python 层，纯属额外开销。两者都产出 sqlite-vec
+        要求的**小端 float32** 原始字节（`<f4` 显式声明字节序，不依赖平台）。
         """
         if not chunks:
             return
@@ -236,9 +212,8 @@ class SqliteVecStore(SqliteStore):
     def finalize(self) -> None:
         """收尾：本实现没有"待并入的矩阵"，只需盖时间戳并复核一致性。
 
-        旧实现在这里重建整份 `.npy`（18861×384 ≈ 29MB 重写）并回写每个块的
-        `vector_row`——那是"向量与块行不同步"的代价。这里向量在写入时就已经
-        和块行在同一事务里落库，所以 finalize 是真正的收尾，而不是一次重排。
+        向量在写入时就已经和块行在同一事务里落库，所以 finalize 是真正的收尾，
+        不需要重建任何东西。
         """
         with self._lock:
             self._set_meta("indexed_at", time.strftime("%Y-%m-%dT%H:%M:%S"))
@@ -311,9 +286,8 @@ class SqliteVecStore(SqliteStore):
     def dense_search(self, query_vector: Vector, limit: int) -> list[tuple[str, int]]:
         """向量路：vec0 的 KNN 查询，按余弦距离升序 = 余弦相似度降序。
 
-        与旧实现的排序语义对照：旧实现算的是**原始内积**，本实现算的是**余弦**。
-        向量已归一化（摄取层的 `_sanity_check` 保证）时二者严格同序——这正是
-        "换后端不该改指标"的前提，也是我在 ADR-0004 里用真实评测对照验证的那一点。
+        返回 `[(chunk_id, rank)]`，rank 从 1 起。摄取层保证向量已归一化，此时余弦序
+        与原始内积序严格一致——这是"换后端不该改指标"的前提。
         """
         if self._vec_error:
             raise StoreError(self._vec_error)
@@ -325,8 +299,8 @@ class SqliteVecStore(SqliteStore):
         blob = np.ascontiguousarray(q, dtype=_BLOB_DTYPE).tobytes()
         with self._lock:
             # 刻意**不**先 COUNT(*) 再 min(limit, n)：vec0 的 COUNT 本身就是一次全表扫描，
-            # 会让每次查询的开销翻倍（实测 p50 从 12ms 涨到 31ms）。
-            # 而 k 大于行数时 vec0 只返回现有的行、不报错——把上限交给它更省一次扫描。
+            # 会让每次查询的开销翻倍。k 大于行数时 vec0 只返回现有的行、不报错，
+            # 把上限交给它更省一次扫描。
             rows = self._con.execute(
                 _sql(
                     "SELECT chunk_id FROM {tbl} WHERE embedding MATCH ? AND k = ? ORDER BY distance",
@@ -355,10 +329,9 @@ class SqliteVecStore(SqliteStore):
     def adopt_legacy_matrix(self) -> int:
         """把旧实现的 `.npy` 矩阵搬进 `chunks_vec`（**不重新编码**）。
 
-        为什么这条路径值得存在：全量重编码是 1.9 万块 × 本机 9.4 块/秒 ≈ 33 分钟，
-        而向量本身一个字节都没变——只是存放位置变了。迁移的正确性由
-        `vector_row` 与矩阵行号的对应关系保证（旧实现 `finalize` 里写入的那个映射），
-        越界即报错，不做任何猜测。
+        向量本身一个字节都没变，只是存放位置变了，因此比全量重编码快得多。正确性依赖
+        块表 `vector_row` 与矩阵行号的对应关系；行数不符或 `vector_row` 越界即报错，
+        不做任何猜测。返回写入的行数。
         """
         path = Path(self.vector_path)
         if not path.exists():
@@ -393,8 +366,8 @@ class SqliteVecStore(SqliteStore):
     def _reload_index(self) -> None:
         """覆写基类：本实现不需要把向量读进内存，只需要空的占位。
 
-        基类在这里 `np.load` 整个 `.npy`（18861×384 ≈ 29MB 常驻内存）——
-        本实现的向量由扩展管理，这一步正是要省掉的东西。
+        向量由 sqlite-vec 扩展管理，基类那一步会把整个矩阵 `np.load` 进内存，正是这里
+        要省掉的。
         """
         with self._lock:
             self._row_index: list[str] = []

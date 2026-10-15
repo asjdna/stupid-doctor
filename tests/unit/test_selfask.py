@@ -1,9 +1,4 @@
-"""self-ask 的单测：确定性分解决策、引用重编、降级与有界性。
-
-全部离线：假检索器 + 假 Decomposer，不联网、不加载模型、不花一分钱。
-重点用例是引用重编号（见 `test_citations_are_renumbered_deduped_and_markers_rewritten`）：
-两个子答案各有局部编号，合并后正文标记必须跟着新编号一起改。
-"""
+"""self-ask 的单测：确定性分解决策、引用重编、降级与有界性；全程离线（假检索器 + 假 Decomposer）。"""
 
 from __future__ import annotations
 
@@ -75,8 +70,7 @@ class FakeSearch:
 class FakeDecomposer:
     """假 Decomposer：只回放预置结果，绝不调模型。
 
-    `decompose` **故意不按 max_sub 截断**（模拟不守规矩的实现），
-    这样 `self_ask` 自己的截断逻辑才会真的被测到。
+    `decompose` 故意不按 max_sub 截断，这样 `self_ask` 自己的截断逻辑才会被测到。
     """
 
     subs: object = field(default_factory=list)
@@ -130,10 +124,8 @@ def _cited_ids(result: SelfAskResult, text: str) -> list[str]:
 def test_needs_decomposition_heuristics(question: str, expected: bool) -> None:
     """分解决策是确定性启发式：长度是闸门，问号个数与并列连词才是信号。
 
-    - 短问题（含"Pod 和 Node 有什么区别"这种带连词但很短的）不分解；
-    - 长 + 连词、或一次多个问号 -> 分解；
-    - 长但没有连词、只有一个问号 -> 不分解（拆它是白花钱）；
-    - 连词不在表内（"跟"/"还有"）不当作分解信号。
+    短问题（哪怕带连词）、长但单目标都不分解（拆它是白花钱）；长 + 表内连词、
+    一次多个问号 -> 分解；连词不在表内（"跟"/"还有"）不算信号。
     """
     assert needs_decomposition(question) is expected
 
@@ -164,7 +156,7 @@ def test_short_question_skips_decomposition() -> None:
 
 
 def test_compound_question_decomposes_and_searches_each_sub() -> None:
-    """需要分解的复合问题：拆出 2 个子问题、各自检索一次，llm_calls == 2。"""
+    """需要分解的复合问题：拆出 2 个子问题、各自检索一次，llm_calls == 2，且无降级记录。"""
     subs = ["节点资源不足会导致什么", "调度器配置错误会导致什么"]
     llm = FakeDecomposer(subs=subs, composed="资源不足会驱逐 Pod[1]；调度错误会 Pending[2]。")
     search = FakeSearch(
@@ -178,22 +170,19 @@ def test_compound_question_decomposes_and_searches_each_sub() -> None:
     assert result.decomposed is True
     assert result.sub_questions == subs
     assert len(result.sub_answers) == 2
-    assert search.queries == subs  # 每个子问题各检索一次
+    assert search.queries == subs
     assert llm.decompose_calls == 1
     assert llm.compose_calls == 1
     assert result.llm_calls == 2
     assert [c["chunk_id"] for c in result.citations] == ["a::0000", "b::0000"]
     assert _cited_ids(result, result.answer) == ["a::0000", "b::0000"]
-    assert result.notes == []  # 正常路径不该有任何降级记录
+    assert result.notes == []
 
 
 def test_citations_are_renumbered_deduped_and_markers_rewritten() -> None:
     """引用重编号（重点用例）：合并去重 + 正文标记跟着改。
 
-    子答案 1 引用 A、B（局部 [1][2]）；子答案 2 引用 B、C（局部 [1][2]）。
-    合并后必须是 A=1、B=2、C=3，B 只留一份；并且**子答案 2 正文里的 [1] 要改成 [2]、
-    [2] 要改成 [3]**——只重编引用列表而不改正文，[1] 就会指到 A 上，
-    这正是最容易漏、肉眼又看不出来的错。
+    合并后 A=1、B=2、C=3 且 B 只留一份；子答案 2 与最终答案里的局部标记必须改指全局编号。
     """
     q1, q2 = "子问题一", "子问题二"
     llm = FakeDecomposer(subs=[q1, q2], composed="结论：B 与 C 都相关[2][3]。")
@@ -210,19 +199,16 @@ def test_citations_are_renumbered_deduped_and_markers_rewritten() -> None:
     assert [c["chunk_id"] for c in result.citations] == ["A::0000", "B::0000", "C::0000"]
     assert len({str(c["chunk_id"]) for c in result.citations}) == 3
 
-    # 2) 子答案 1：A=[1]、B=[2]，与全局一致
+    # 2) 子答案 1：A=[1]、B=[2] 与全局一致；子答案 2 不许再有 [1]（B->[2]、C->[3]）
     assert _markers(result.sub_answers[0].answer) == [1, 2]
     assert _cited_ids(result, result.sub_answers[0].answer) == ["A::0000", "B::0000"]
 
-    # 3) 子答案 2：正文里不能再有 [1]（那是 A），B->[2]、C->[3]
     assert _markers(result.sub_answers[1].answer) == [2, 3]
     assert _cited_ids(result, result.sub_answers[1].answer) == ["B::0000", "C::0000"]
     assert [str(c["chunk_id"]) for c in result.sub_answers[1].citations] == ["B::0000", "C::0000"]
-
-    # 4) 最终答案里的 [n] 也必须指向正确来源
     assert _cited_ids(result, result.answer) == ["B::0000", "C::0000"]
 
-    # 5) hit_ids 与引用一一对应；SubAnswer 能直接转成状态里流动的 CitedAnswer
+    # 3) hit_ids 与引用一一对应；SubAnswer 能直接转成状态里流动的 CitedAnswer
     assert result.sub_answers[1].hit_ids == ["B::0000", "C::0000"]
     cited = result.sub_answers[1].to_cited_answer()
     assert cited.text == result.sub_answers[1].answer
@@ -250,8 +236,8 @@ def test_decompose_failure_degrades_to_direct_search() -> None:
     assert result.decomposed is False
     assert result.sub_questions == []
     assert result.sub_answers == []
-    assert search.queries == [COMPOUND]  # 只检索一次，且是原问题
-    assert llm.compose_calls == 1  # 依旧给出了答案，没有把异常抛给上层
+    assert search.queries == [COMPOUND]
+    assert llm.compose_calls == 1
     assert result.llm_calls == 1  # 抛异常的分解调用不计入（见 SelfAskResult 文档）
     assert result.answer == "直接回答[1]。"
     assert _cited_ids(result, result.answer) == ["A::0000"]
@@ -259,14 +245,14 @@ def test_decompose_failure_degrades_to_direct_search() -> None:
 
 
 def test_compose_failure_falls_back_to_evidence() -> None:
-    """合成失败也不崩：退回已经重编过引用的证据原文，引用编号仍然是对的。"""
+    """合成失败也不崩：退回已重编引用的证据原文，引用编号仍正确；llm_calls 只计成功调用。"""
     llm = FakeDecomposer(compose_error=RuntimeError("上游 500（测试用）"))
     search = FakeSearch(default=[_chunk("A::0000", "A 的正文")])
     result = self_ask(SHORT, search=search, llm=llm)
 
     assert result.answer.startswith("[1] 文档 A::0000 › 小节")
     assert "A 的正文" in result.answer
-    assert result.llm_calls == 0  # 唯一一次调用就失败了，成功计数为 0
+    assert result.llm_calls == 0
     assert any("合成失败" in n for n in result.notes)
 
 
@@ -373,9 +359,9 @@ def test_string_decompose_result_is_not_split_into_characters() -> None:
     search = FakeSearch(default=[_chunk("A::0000", "正文")])
     result = self_ask(COMPOUND, search=search, llm=llm)
 
-    assert result.decomposed is False  # 只有一个子问题 -> 不算分解
+    assert result.decomposed is False
     assert result.sub_questions == []
-    assert search.queries == [COMPOUND]  # 关键：没有把字符串拆成一个个字去检索
+    assert search.queries == [COMPOUND]
     assert any("字符串" in n for n in result.notes)
 
 
@@ -405,9 +391,9 @@ def test_dict_shaped_search_result_is_tolerated() -> None:
 
 
 def test_hit_without_chunk_id_is_skipped_without_shifting_numbering() -> None:
-    """缺 chunk_id 的命中被跳过，且**不会让后面命中与引用编号错位一格**。
+    """缺 chunk_id 的命中被跳过，且不让后面命中与引用编号错位一格。
 
-    这类错位是最隐蔽的引用 bug：正文写着 [1] A、[2] B，引用列表却是 B、C。
+    错位是最隐蔽的引用 bug：正文写着 [1] A、[2] B，引用列表却是 B、C。
     """
 
     class NoId:
@@ -434,7 +420,6 @@ def test_hit_without_chunk_id_is_skipped_without_shifting_numbering() -> None:
     result = self_ask(SHORT, search=fake_search, llm=llm)
 
     assert [c["chunk_id"] for c in result.citations] == ["A::0000"]
-    # 证据文本里的编号必须与引用列表一致（跳过那条没 id 的命中不能造成错位）
     evidence = llm.seen_parts[0][0].answer
     assert _markers(evidence) == [1]
     assert _cited_ids(result, evidence) == ["A::0000"]

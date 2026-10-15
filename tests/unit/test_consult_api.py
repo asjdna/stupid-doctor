@@ -1,15 +1,10 @@
-"""`/consult` 交互层的契约测试。
+"""`/consult` 交互层的契约测试：钉住**用户可见的协议**，不测医学逻辑。
 
-这里钉住的是**用户可见的协议**，不是医学逻辑（那一层已有自己的测试）：
-
-1. 多轮采问：`action=ask` 的那一轮要能接着答，且 `session_id` 复用同一份 `IntakeState`；
-2. **急诊红线由服务端强制**：即使模型把 urgency 判成 `routine`，
-   只要 `red_line_positive` 为真，响应里 `emergency` 就必须为真并带 `emergency_note`——
-   前端只渲染、不判断，两处判断必然会不一致；
-3. **降级要说出来**：模型没走通时必须回传 `degraded`，不能把兜底文案伪装成模型结论；
-4. 索引不可用时是 **503 + 可执行指引**，不是 500 堆栈。
-
-全部用假管线，不联网、不花钱、不需要语料。
+1. 多轮采问：`action=ask` 那轮要能接着答，`session_id` 复用同一份 `IntakeState`；
+2. 急诊红线由服务端强制：`red_line_positive` 为真时，响应里 `emergency` 必须为真并带
+   `emergency_note`——前端只渲染、不判断，两处判断必然会不一致；
+3. 降级要说出来：模型没走通时必须回传 `degraded`，不能把兜底文案伪装成模型结论；
+4. 索引不可用是 503 + 可执行指引，不是 500 堆栈。全部用假管线，不联网、不花钱。
 """
 
 from __future__ import annotations
@@ -66,8 +61,7 @@ class _FakePipeline:
         intake = state if state is not None else IntakeState()
         self.seen.append(question)
         self.histories.append(history)
-        # 判定依据必须是**该会话自己的状态**，不能用跨会话的计数器——
-        # 否则"会话隔离"这条测试会因桩写错而假阴性（实测踩过一次）。
+        # 判定依据必须是该会话自己的状态（用跨会话计数器会让"会话隔离"那条测试假阴性）
         if "duration" not in intake.filled:
             intake.filled["duration"] = "两天"
             return ClinicalTurn(action="ask", message="这种情况持续多久了？", intake=intake)
@@ -168,25 +162,20 @@ def test_sessions_are_isolated(client_factory: Any) -> None:
 
 def test_conversation_history_is_threaded_into_the_next_turn(client_factory: Any) -> None:
     """**产品前提**：追问要答得一致，就必须带上文。
-
-    "科室/用药作为回答之后的可选扩展项、等用户来问"——患者追问"那该挂哪个科"时，
-    模型若看不到自己上一轮说过什么，就会重跑判断，**同一个病例可能问出另一个科室**。
+    追问"那该挂哪个科"时模型看不到上一轮说过什么就会重跑判断，同一个病例可能问出另一个科室。
     """
     pipe = _FakePipeline()
     c = client_factory(pipe)
     c.post("/consult", json={"question": "我咳嗽", "session_id": "h1"})  # 第 1 轮：追问，无 assessment
-    c.post("/consult", json={"question": "两天了", "session_id": "h1"})  # 第 2 轮：给结论
-    # 第 1 轮没有上文
+    c.post("/consult", json={"question": "两天了", "session_id": "h1"})
     assert pipe.histories[0] == []
 
-    c.post("/consult", json={"question": "那该挂哪个科", "session_id": "h1"})  # 第 3 轮：追问细节
+    c.post("/consult", json={"question": "那该挂哪个科", "session_id": "h1"})
     second_history = pipe.histories[2]
     assert [m["role"] for m in second_history] == ["user", "assistant", "user", "assistant"]
-    # 追问轮（无 assessment）在上文里就是那句追问原文——这是对的
+    # 追问轮（无 assessment）在上文里就是那句追问原文
     assert second_history[1]["content"] == "这种情况持续多久了？"
-    # **有结论的那一轮，助手那一侧必须是契约 JSON，不是散文**：
-    # 存散文时模型会跟着写散文、不再输出 JSON ⇒ 整轮降级
-    # （实测：用户追问"那该挂哪个科？"时 action=error、degraded=模型输出不可解析）。
+    # 有结论的那一轮，助手那侧必须是契约 JSON：存散文会诱导模型也写散文、不再输出 JSON ⇒ 整轮降级
     assert second_history[3]["content"].strip().startswith("{")
     assert "呼吸内科" in second_history[3]["content"]
     # 散文信息仍在 JSON 里（生产路径里 message == assessment.patient_summary）
@@ -212,7 +201,7 @@ def test_reset_clears_the_session(client_factory: Any) -> None:
     c.post("/consult", json={"question": "我咳嗽", "session_id": "s1"})
     assert c.post("/consult/reset", json={"session_id": "s1"}).json()["ok"] is True
     again = c.post("/consult", json={"question": "我咳嗽", "session_id": "s1"}).json()
-    assert again["turns"] == 1  # 从第一轮重新开始
+    assert again["turns"] == 1
 
 
 def test_degraded_is_surfaced(client_factory: Any) -> None:
@@ -262,10 +251,9 @@ class _Turn:
 
 @pytest.mark.parametrize("urgency", ["routine", "urgent"])
 def test_keyword_hit_alone_does_not_raise_the_banner(urgency: str) -> None:
-    """**架构决定（改动请连同本条一起改）**：横幅只跟**模型判出的急重症**，不跟关键词。
+    """横幅只跟**模型判出的急重症**，不跟关键词（判断标准见 system.md R1）。
 
-    底层约束是大模型：它按"病症 + 严重程度"判断（`system.md` R1），
-    关键词表已退出判断链。
+    这是架构决定，改动请连同本条一起改。
     """
     p = to_payload(_Turn(red_line=True, urgency=urgency), "s")  # type: ignore[arg-type]
     assert p["emergency"] is False
@@ -276,14 +264,12 @@ def test_keyword_hit_alone_does_not_raise_the_banner(urgency: str) -> None:
 
 @pytest.mark.parametrize("urgency", ["routine", "urgent"])
 def test_keyword_conflict_is_spoken_in_the_dialogue(urgency: str) -> None:
-    """**核心回归**：关键词命中但模型没判急重症 ⇒ 不弹横幅，但**风险提示必须出现在对话里**。
-
-    判断权归模型之后，"模型漏判"就成了一条静默失败路径。这条提示把它留成
-    **可被复核的一句话**：横幅不弹（尊重模型的结论），但系统不假装自己没担心过。
+    """**核心回归**：关键词命中但模型没判急重症 ⇒ 不弹横幅，但风险提示必须出现在对话里。
+    判断权归模型后"模型漏判"成了静默失败路径；这条提示把它留成可被复核的一句话。
     """
     p = to_payload(_Turn(red_line=True, urgency=urgency), "s")  # type: ignore[arg-type]
     assert p["keyword_hit_conflict"] is True
-    assert "胸痛" in p["message"]  # 命中的词
+    assert "胸痛" in p["message"]
     assert "120" in p["message"]  # 可执行的急救指引
     assert p["message"].startswith("m")  # 原回答仍在，提示是**追加**而不是替换
 
@@ -308,10 +294,7 @@ def test_model_red_flags_are_exposed_for_audit() -> None:
 
 
 def test_degraded_emergency_does_not_raise_the_banner() -> None:
-    """**兜底产物不算模型的判断**：主判没走通时结论来自 `reasoning._fallback`，
-    即使它写了 `urgency=emergency`，也不该让横幅冒充"模型判出急重症"。
-    兜底给患者的 120 指引仍然在对话正文里（信息不丢）。
-    """
+    """**兜底产物不算模型的判断**：`reasoning._fallback` 写的 `urgency=emergency` 不该弹横幅，120 指引仍在正文里。"""
     turn = _Turn(red_line=True, urgency="emergency", degraded="模型调用失败：网络断了")
     p = to_payload(turn, "s")  # type: ignore[arg-type]
     assert p["emergency"] is False
@@ -355,10 +338,8 @@ def page_html() -> str:
 
 
 class TestPageIsDialogueOnly:
-    """**产品契约：主页只留对话区**（结构化面板一律移到后台，由模型在正文里讲）。
-
-    这条测试是给未来的人看的：如果哪天有人想把科室表格加回主页，
-    他会先看到这条测试失败，而不是默默把产品形态改回去。
+    """**产品契约：主页只留对话区**（结构化面板移到后台，由模型在正文里讲）。
+    有人要把面板加回主页时，这条测试应当先红，而不是产品形态被默默改回去。
     """
 
     @pytest.mark.parametrize("panel_id", ["depts", "diffs", "exams", "meds", "summary", "ev", "raw"])

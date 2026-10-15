@@ -1,31 +1,14 @@
-"""`MilvusStore` 专项测试：**Milvus Lite 不可用时整文件 skip，并写明原因**。
+"""`MilvusStore` 后端的专项测试：**Milvus Lite 依赖不可用时整文件 skip，并写明原因**。
 
-## 纪律
+前置条件：装好 `pymilvus`，milvus-lite 用本地数据目录（不需要服务端）；每个用例一份独立的
+`tmp_path` 数据目录，互不干扰，也不碰真实索引（`data/index/**` 是只读资产）。数据目录被别的
+进程独占这条路径无法在本进程内模拟，只覆盖"打不开就抛 `StoreError` 并给人话提示"。
 
-1. 依赖没装就 skip（`reason` 里带具体原因），**不失败、也不假装跑过**；
-   本文件里每一条断言都真的执行过一次才可能变绿；
-2. 每个用例一份独立的数据目录（`tmp_path`），互不干扰，也不碰真实索引
-   （`data/index/**` 是资产，只读）；
-3. 与 SQLite 侧对照：同一批语料在两个后端上跑，比较**可比较的部分**
-   （向量路排序、命中集合、统计口径、向量往返），把不可比较的部分
-   （HNSW 的近似性）交给 `dense_search_exact()` 与 ADR-0005 的实测数字。
-
-## 这个文件守的是什么
-
-- **删文档必须同时清 Milvus 向量**（上一轮 sqlite-vec 踩过的坑，在两个引擎分离的
-  实现上更容易复发）；
-- **重复 upsert / 重复打开幂等**（不产生重复行）；
-- **HNSW 参数真的落到索引上**（Milvus Lite 不回传索引参数，所以守的是"我们写进
-  元信息的参数"与"配置改了必须重建"这两件事）；
-- **Milvus 不可用时抛错而不是回退**（未装依赖、路径非法、数据目录打不开）；
-- **两个引擎不一致时必须报错**，不是静默少召回。
-
-## 一个测不出来的东西（如实说明）
-
-milvus-lite 把数据目录的 **LOCK 一直占到自己进程退出**，所以"另一个进程持有锁"
-这条失败路径无法在本进程内用两个 client 模拟（同进程内第二个 client 是允许的）。
-该路径的证据是 ADR-0005 里那次**跨进程**实测（子进程报 `DataDirLockedError`），
-这里只守住"打不开就抛 `StoreError` 并给人话提示"这一层。
+守的契约：删文档必须同时清掉 Milvus 向量（两个通道都不许再召回）；重复 upsert 与重复打开
+幂等而不产生重复行；HNSW 的 `M` / `efConstruction` 记进索引元信息，改了 `M` 却不重建必须报错；
+依赖缺失、路径非法、数据目录打不开、维度不符都必须抛 `StoreError`；块表与向量索引不一致
+（缺行或多行）必须在自检与查询处报错。与 SQLite 侧只对照可比较的部分：向量路排序、命中集合、
+统计口径与向量往返（HNSW 的近似性交给 `dense_search_exact()`）。
 """
 
 from __future__ import annotations
@@ -101,11 +84,9 @@ def _milvus_ids(store: MilvusStore) -> set[str]:
 
 # --------------------------------------------------------------------------- 集合与幂等
 def test_collection_is_created_idempotently(ms: MilvusStore, tmp_path: Path) -> None:
-    """重复打开同一份索引不许报错、也不许丢数据（集合是幂等创建的）。
-
-    `create_collection` 对已存在的集合会直接报错（不像 SQL 的 IF NOT EXISTS），
-    所以幂等只能靠先判断；这条用例把"第二次打开"钉死——否则日常的
-    "跑一次 ingest、再跑一次 eval" 就会在第二次打开时炸。
+    """重复打开同一份索引不许报错、也不许丢数据：`create_collection` 对已存在的集合会报错
+    （不像 SQL 的 IF NOT EXISTS），幂等只能靠先判断；否则"跑一次 ingest、再跑一次 eval"
+    就会在第二次打开时炸。
     """
     _seed(ms)
     assert ms.stats().n_chunks == 5
@@ -122,10 +103,9 @@ def test_collection_is_created_idempotently(ms: MilvusStore, tmp_path: Path) -> 
 
 
 def test_repeated_upsert_does_not_duplicate_rows(ms: MilvusStore) -> None:
-    """同一批输入写两遍：行数不变、主键不变（upsert 是覆盖，不是追加）。
+    """同一批输入写两遍：行数不变、主键不变——upsert 是覆盖而不是追加。
 
-    行数翻倍这种事在向量库里不会报错，只会让结果慢慢变脏——
-    所以必须用**行数**而不是"查询还正常"来断言。
+    行数翻倍在向量库里不会报错，只会让结果慢慢变脏，所以断言必须盯行数与主键而非查询结果。
     """
     _seed(ms)
     before = ms._client.get_collection_stats(COLLECTION)["row_count"]  # noqa: SLF001
@@ -139,9 +119,8 @@ def test_repeated_upsert_does_not_duplicate_rows(ms: MilvusStore) -> None:
 def test_delete_docs_clears_milvus_vectors(ms: MilvusStore) -> None:
     """**删文档必须同时清 Milvus 向量**——两个通道都不许再召回。
 
-    这是上一轮 sqlite-vec 真实踩过的坑（块行删了、向量没删），在"两个引擎分离"
-    的本实现上更容易复发。所以断言分两层：SQLite 侧不再召回，且
-    **直接问 Milvus 要主键清单**里也没有被删的块（不只看查询结果）。
+    断言分两层：SQLite 侧不再召回，且直接问 Milvus 要主键清单时也没有被删的块，而不只是看
+    查询结果（块行与向量分离的实现在这里最容易漏清）。
     """
     _seed(ms)
     assert ms.delete_docs({"alpha.md"}) == 2
@@ -196,12 +175,10 @@ def test_rebuild_from_scratch_drops_the_collection(ms: MilvusStore) -> None:
     assert ms.verify_fts() == "ok"
 
 
-# --------------------------------------------------------------------------- 检索语义
 def test_dense_search_matches_exact_search_on_small_index(ms: MilvusStore) -> None:
     """小索引上 HNSW 必须与**不用索引**的精确检索给出同一个 top-k。
 
-    这是"召回归因"的基准：大索引上两者不一致时，差异来自 HNSW 的近似性，
-    而不是数据或语义变了（大索引上的实测见 ADR-0005 第五节）。
+    这是召回归因的基准：大索引上两者不一致时，差异来自 HNSW 的近似性而不是数据或语义变了。
     """
     _seed(ms)
     for q in (vec(a=1.0), vec(a=0.8, b=0.6), vec(c=1.0), vec(b=1.0)):
@@ -211,10 +188,7 @@ def test_dense_search_matches_exact_search_on_small_index(ms: MilvusStore) -> No
 def test_dense_search_matches_sqlite_backend(ms: MilvusStore, tmp_path: Path) -> None:
     """核心对照：同一批语料下，milvus 的向量路排序与 `sqlite`（numpy 精确）一致。
 
-    只比"没有并列"的名次：a 方向是 1.0 / 0.8（唯一），c 方向是 1.0 / 0.8（唯一）；
-    b 方向的第 2 名是 0.6 的**并列**（alpha::0001 与 beta::0001），d 方向全是 0 分——
-    并列次序不是契约的一部分（FTS5/vec0/HNSW 各自都可能给出不同顺序，
-    拿它断言只会得到一个随机变红的测试）。所以 b 只比第一名。
+    只比没有并列的名次（并列次序不是契约的一部分）：a、c 方向名次唯一，b 方向只比第一名。
     """
     _seed(ms)
     reference = SqliteStore(
@@ -232,8 +206,7 @@ def test_dense_search_matches_sqlite_backend(ms: MilvusStore, tmp_path: Path) ->
 def test_keyword_path_is_byte_identical_to_sqlite_vec(ms: MilvusStore, tmp_path: Path) -> None:
     """全文路复用同一份 FTS5 代码，排序必须与 sqlite-vec **逐字节相同**。
 
-    这正是"两个后端之间唯一变量是向量路"这句话的可验证形式；它一旦不成立，
-    换后端导致的指标变化就再也无法归因。
+    这是"两个后端之间唯一变量是向量路"的可验证形式；它不成立，换后端导致的指标变化就无法归因。
     """
     _seed(ms)
     other = SqliteVecStore(
@@ -283,9 +256,8 @@ def test_stats_and_get_chunks_match_sqlite(ms: MilvusStore, tmp_path: Path) -> N
 def test_hnsw_params_are_recorded_in_index_meta(ms: MilvusStore) -> None:
     """`M` / `efConstruction` / 度量必须落进索引元信息。
 
-    为什么是元信息而不是"从索引里读回来"：Milvus Lite 的 `describe_index`
-    **不回传**这两个参数（实测只有 index_type/metric_type/field_name），
-    所以"参数到底有没有生效"只能靠我们自己记账 + 下面那条不一致就报错的用例。
+    Milvus Lite 的 `describe_index` 不回传这两个参数，所以"参数有没有生效"只能靠我们记账，
+    再由"改了参数却不重建索引就报错"那条用例守住。
     """
     meta = ms.meta_dump()
     assert meta["milvus_hnsw_m"] == str(ms.hnsw_m)
@@ -310,10 +282,9 @@ def test_changing_build_params_without_rebuild_is_refused(ms: MilvusStore, tmp_p
 
 
 def test_ef_search_reaches_the_engine(ms: MilvusStore, monkeypatch: pytest.MonkeyPatch) -> None:
-    """查询期 `ef` 必须真的传进 Milvus 的检索请求（不是只写在配置里）。
+    """查询期 `ef` 必须真的传进 Milvus 的检索请求，而不是只写在配置里。
 
-    这是能在此规模下验证的**接线**证据；"ef 越大召回越高"这个**效果**需要
-    1.9 万块的索引才能看出来，实测数字写在 ADR-0005 第五节（本文件不假造它）。
+    这里能验证的只是接线；"ef 越大召回越高"的效果要在大索引上才看得出来，本文件不假造它。
     """
     _seed(ms)
     captured: dict[str, Any] = {}
@@ -350,8 +321,7 @@ def test_missing_dependency_raises_instead_of_falling_back(
 ) -> None:
     """**没装 pymilvus 时必须报错，绝不回退到 numpy 扫描**。
 
-    这是本项目明确禁止的"静默降级"：回退之后排序会变（近似 vs 精确），
-    而调用方看到的只是一个"检索质量好像变了"的谜。
+    回退之后排序会变（近似 vs 精确），调用方看到的只是一个"检索质量好像变了"的谜。
     """
     monkeypatch.setitem(sys.modules, "pymilvus", None)
     with pytest.raises(StoreError, match="不会静默回退"):
@@ -400,13 +370,10 @@ def test_dimension_mismatch_is_refused(tmp_path: Path) -> None:
 
 # --------------------------------------------------------------------------- 一致性闸门
 def test_missing_vectors_are_detected_not_silently_ignored(ms: MilvusStore) -> None:
-    """块表有数据、向量侧缺行：必须报错并给修复命令（不是静默少召回）。
-
-    这正是"打开一个还没迁移过向量的旧索引"的第一现场。
-    """
+    """块表有数据、向量侧缺行：必须报错并给修复命令，而不是静默少召回——
+    打开一个还没迁移过向量的旧索引就是这种情况。"""
     _seed(ms)
     ms._client.delete(COLLECTION, ids=["alpha::0000"])  # noqa: SLF001 - 白盒制造不一致
-    # 行数闸门在 finalize 上必须拦住
     with pytest.raises(StoreError, match="不一致"):
         ms.finalize()
     assert ms.verify_vec().startswith("FAIL")
@@ -445,7 +412,7 @@ def test_verify_vec_reports_ok_after_normal_writes(ms: MilvusStore) -> None:
 
 # --------------------------------------------------------------------------- 后端闸门与迁移
 def test_backend_takeover_requires_an_explicit_flag(tmp_path: Path) -> None:
-    """由 `sqlite-vec` 写的索引不许被 milvus 顺手接管（那会静默读到陈旧向量）。
+    """由 `sqlite-vec` 写的索引不许被 milvus 顺手接管，否则会静默读到陈旧向量。
 
     要接管必须显式打开闸门（只有迁移脚本会这么做），见 `adopt_legacy_matrix`。
     """
@@ -504,10 +471,9 @@ def test_adopt_legacy_matrix_without_matrix_gives_a_fix_hint(tmp_path: Path) -> 
 
 
 def test_detach_lets_another_backend_take_over(tmp_path: Path) -> None:
-    """`detach()` 撤销后端标记（否则"换回 sqlite-vec"连 store 都构造不出来）。
+    """`detach()` 撤销后端标记，否则"换回 sqlite-vec"连 store 都构造不出来。
 
-    摘除后向量侧必须**明确变成"空"**：块行还在、向量没了，于是向量路报错并给出修复命令，
-    而不是静默返回空结果让人觉得"检索质量突然崩了"。
+    摘除后向量侧必须明确变成空：向量路报错并给修复命令，而不是静默返回空结果。
     """
     store = _make(tmp_path)
     try:

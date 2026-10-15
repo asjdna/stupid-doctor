@@ -1,13 +1,7 @@
-"""第二轮接线测试：**已注册的工具 + 工具循环 + 真实 domain** 能不能一起跑。
+"""端到端接线：注册表里的工具 + 工具循环 + 真实 domain 串起来跑。
 
-这组测试针对的正是本项目反复栽的那个坑：**模块各自测试通过，但没接在一起**。
-所以这里不测单个模块，而是把它们串起来跑：
-
-    register_domain_tools("clinic", ...)   → 工具真的进注册表
-    run_tool_loop(..., tools=注册表里的)    → 循环真的按 LLM 的选择执行
-    handler 真的改了号源库状态              → 副作用真的落地
-
-全部用打桩 LLM（`ToolCaller`），不联网、不花钱。
+链路是 register_domain_tools → run_tool_loop(tools=注册表里的工具) → handler 真的改
+号源库状态。LLM 全部打桩（`ToolCaller`），不联网、不花钱。
 """
 
 from __future__ import annotations
@@ -25,10 +19,7 @@ from kubedocs.domains.clinic.mock import MockAppointmentProvider
 
 
 class ScriptedCaller:
-    """按剧本返回：先要求调工具，再给出最终回答。
-
-    `require_tools` 里的第一项是"该轮要调哪些工具"，最后一项之后返回 content。
-    """
+    """按剧本返回：每次 `choose` 弹出脚本下一项，用尽后返回空回答；并记录收到的 messages / tools。"""
 
     def __init__(self, script: list[dict[str, Any]]) -> None:
         self.script = list(script)
@@ -56,7 +47,7 @@ def _tools() -> list[Any]:
 
 class TestToolsAndLoopTogether:
     def test_registered_tools_are_handed_to_the_model_as_schemas(self, wired):
-        """模型必须真的收到 schema —— 这是"接线生效"的直接证据。"""
+        """注册表里的工具必须以 schema 形状交给模型，而不只是躺在注册表里。"""
         caller = ScriptedCaller([{"content": "答", "tool_calls": []}])
         run_tool_loop("你好", tools=_tools(), llm=caller)
         names = [t["function"]["name"] for t in caller.seen_tools[0]]
@@ -65,7 +56,7 @@ class TestToolsAndLoopTogether:
         assert all("parameters" in t["function"] for t in caller.seen_tools[0])
 
     def test_model_choice_drives_execution_and_result_is_visible(self, wired):
-        """LLM 选了 list_departments → 真的执行 → 结果回到下一轮上下文。"""
+        """模型选中的工具要真的执行，结果回灌进下一轮上下文。"""
         caller = ScriptedCaller(
             [
                 {"content": "", "tool_calls": [{"name": "list_departments", "arguments": {"contains": ""}}]},
@@ -119,7 +110,7 @@ class TestToolsAndLoopTogether:
         assert after == before, "号源被改了——副作用闸门失效"
 
     def test_side_effect_tool_executes_when_confirmed(self, wired):
-        """给确认回调后应当真的挂号，且号源减少——证明闸门是"要求确认"而非"禁用"。"""
+        """给确认回调后应当真的挂号、号源减少：闸门是"要求确认"而非"禁用"。"""
         caller = ScriptedCaller(
             [
                 {
@@ -172,7 +163,7 @@ class TestToolsAndLoopTogether:
 
 
 class TestRealCallerParsing:
-    """`LiteLLMToolCaller` 的解析逻辑（不联网：直接测它处理过的形状）。"""
+    """`LiteLLMToolCaller` 的参数解析：只测形状，不联网。"""
 
     def test_json_string_arguments_are_parsed(self):
         from kubedocs.agent.llm_tool_caller import LiteLLMToolCaller
@@ -222,11 +213,7 @@ class _FakeLitellmForToolCaller:
 
 
 class TestToolCallerReportsUnknownPrice:
-    """缺陷回归：`LiteLLMToolCaller` 曾经把**算不出价**报成 0。
-
-    缺陷形态是那一行 `except: self.cost = self.cost`——一个**字面意义上的空操作**，
-    于是这次调用在账本上等于免费，预算闸门永远拦不住（SECURITY.md 的 S-2）。
-    """
+    """算不出价的调用必须标成未定价，不能记成 0：否则它在账本上等于免费，预算闸门失效。"""
 
     def _caller(self, fake: _FakeLitellmForToolCaller) -> Any:
         from kubedocs.agent.llm_tool_caller import LiteLLMToolCaller
@@ -258,7 +245,7 @@ class TestToolCallerReportsUnknownPrice:
         assert caller.unpriced_calls == 0
 
     def test_unpriced_call_is_charged_by_the_loop_budget(self, tmp_path: Path) -> None:
-        """端到端：假 litellm 算不出价 ⇒ 真 `DailyBudget` 按保守上限记账（不是 0）。"""
+        """端到端：算不出价的调用由真 `DailyBudget` 按保守上限记账，而不是记 0。"""
         from kubedocs.generate import DailyBudget
 
         fake = _FakeLitellmForToolCaller(cost_raises=Exception("not mapped"))

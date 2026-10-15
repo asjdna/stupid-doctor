@@ -1,94 +1,53 @@
 """生产存储实现：Postgres + pgvector（HNSW）。
 
-## 为什么需要它（而不是"本地 SQLite 就够了"）
+相对本地 SQLite 实现补上的三件事：多实例并发写（事务与行锁）、HNSW 近似检索
+（块数上百万时不必全表扫描）、一个域一个 **schema** 的多租户隔离；备份、PITR、
+连接池与可观测性也直接沿用 Postgres。
 
-本地实现的三条边界，正好是它补上的三件事：
+## 全文检索：pg_search 的真 BM25
 
-| 边界 | 本地 SQLite | 本实现 |
-|---|---|---|
-| 单写者 | 只适合单进程摄取 | 多实例并发写、事务与行锁 |
-| 无 ANN | 1.9 万块还行，百万级不行 | **HNSW 索引**，召回/延迟可调 |
-| 无多租户 | 一个域一个文件 | 一个域一个 **schema**，可加 RLS |
-| 运维 | 备份=拷文件 | 标准备份/PITR/连接池/可观测 |
+关键字路默认走 ParadeDB 的 `pg_search`：建 `USING paradedb`（tantivy）索引，
+排序用 `pdb.score()`，它是带 IDF 与文档长度归一化的真 BM25。Postgres 核心自带的
+`ts_rank` 只有 TF 加权（没有 IDF、没有文档长度归一化），**不是 BM25**，只作为降级
+引擎，且降级会被明确标出（`meta.fts_engine`、`verify_fts()` 返回 `DEGRADED: ...`、
+构造时一条 WARNING 日志）；`fts_engine="pg_search"` 要求真 BM25，扩展不可用则直接
+抛 `StoreError`。
 
-## 全文检索：pg_search 的真 BM25（2026-10-11 起）
-
-关键字路**不再用 `ts_rank`**。Postgres 核心的 `ts_rank` 只有 TF 加权——没有 IDF、
-没有文档长度归一化，因此**不是 BM25**；实测后果是 hybrid hit@10 从冻结基线的
-0.8400 掉到 0.7400（ADR-0004 的 5.3 与第九节）。现在改由 ParadeDB 的 `pg_search`
-扩展提供真 BM25：建 `USING paradedb` 索引，排序用 `pdb.score()`。
+与默认后端 SQLite / sqlite-vec 的对照：
 
 | | SQLite / sqlite-vec（默认后端） | pgvector（本实现） |
 |---|---|---|
 | 全文索引 | FTS5 外内容表 | `CREATE INDEX ... USING paradedb`（tantivy BM25） |
 | 分词 | `tokenize='porter unicode61'` | `pdb.chinese_compatible('stemmer=english')` |
-| 索引字段 | 三个列（body / title / breadcrumb）+ 列权重 | **一个**字段：三列拼接（理由见下） |
-| 列权重 | `bm25(chunks_fts, 1.0, 3.0, 1.5)` | 无（照抄会掉 0.16 hit@10，实测，见下） |
+| 索引字段 | 三个列（body / title / breadcrumb）+ 列权重 | 一个字段：三列拼接 |
 | 打分 | BM25（IDF + 长度归一化） | BM25（IDF + 长度归一化） |
 
-仍然**不同源**的三处，逐条写明（不粉饰）：
+- **打分实现不同**：SQLite 的 `bm25()` 与 tantivy 的 BM25 是两份独立实现
+  （k1/b 默认值与 TF 饱和曲线未必一致），所以命中集合相同也不保证名次相同。
+- **列权重不能照抄** FTS5 的 `bm25(chunks_fts, 1.0, 3.0, 1.5)`：FTS5 的权重乘在
+  按整行长度归一化的 TF 上，tantivy 的 `pdb.boost` 乘在按字段自身长度归一化的
+  BM25 上，而标题/面包屑只有几个词，"标题命中"会被放大成压倒性信号。本实现改成
+  三列拼接成**单字段**：归一化域与 IDF 域各收敛成一个，是与 FTS5"整行归一化"最接近
+  的对应物，同时保住"三个字段都搜得到"。要重新引入权重必须重测。
+- **分词器**：英文按 Unicode 词边界切分 + Snowball 词干（对齐 FTS5 的 porter）；
+  CJK 按**单字**切分，不做中文分词、不查词典。因此中文检索能力仍来自应用层归一化器
+  （`normalizer=chinese` 的 jieba 预分词，索引与查询两侧都写成空格分隔的词）。没配
+  归一化器时，中文查询会被切成单字并 OR（召回高、精度低），而不是一个词元都搜不到。
+- **停用词**：pg_search 的 `simple` / `chinese_compatible` 不删停用词，查询侧的去停
+  用词由 `store/textquery.py` 自己做，因此两侧索引里的词表并不相同。
 
-1. **打分实现不同**：SQLite 的 `bm25()` 与 tantivy 的 BM25 是两份独立实现
-   （k1/b 默认值与 TF 饱和曲线未必一致），所以**即使命中集合相同，名次仍可能不同**。
-   注意 ts_rank 时代那种量级的差异（top-10 集合相同数 0/50、平均集合重合 0.3140）
-   **不是**这条能解释的——那是缺 IDF / 缺长度归一化造成的召回面变化。
-2. **列权重不能照抄**（这条是实测结论，不是设计偏好）。FTS5 的列权重乘在**按整行长度
-   归一化**的 TF 上；tantivy 的 `pdb.boost` 乘在**按字段自身长度归一化**的 BM25 上。
-   标题/面包屑字段只有几个词，于是"标题命中"在 tantivy 里被放大成压倒性信号。实测
-   （18861 块 / 50 条金标 / 关键字路单路 hit@10，原始矩阵见 ADR-0004 第十节）：
-   只 body 0.7000；**照抄 3.0/1.5/1.0 → 0.5400（最差）**；三字段无权重 0.6200；
-   title+body 无权重 0.7200；三列拼接成单字段 0.7000。
-   本实现选**单字段拼接**：它把归一化域与 IDF 域都收敛成一个，是与 FTS5"整行归一化"
-   最接近的对应物，同时保住"三个字段都搜得到"。要重新引入权重，必须连同这组数字重测。
-3. **分词器不同**，见下。
+`tsv` 生成列 + GIN 索引保留下来，作为降级引擎的索引，与 `USING paradedb` 索引并存、
+互不干扰；代价是每行多存一份 tsvector。
 
-### 分词、停用词与中文（必须如实）
+## HNSW 参数
 
-- 三个字段显式配 `pdb.chinese_compatible('stemmer=english')`：
-  - 英文：按 Unicode 词边界切分 + **Snowball english 词干**——这一条是为了对齐
-    FTS5 的 `porter`（实测：索引里的 `running` 能被查询 `run` 命中）；
-  - CJK：**按单字切分**（`pdb.chinese_compatible` 的行为，实测
-    `'这是中文正文'::pdb.chinese_compatible` → `{这,是,中,文,正,文}`）。
-    它**不做中文分词**：不切词、不查词典。
-- 因此**中文检索能力仍然来自应用层归一化器**（`normalizer=chinese` 的 jieba 预分词，
-  索引与查询两侧都写成空格分隔的词），与 ts_rank 时代一致。真正的差别在"没配
-  归一化器时会怎样"：`identity` + 中文时，pg_search 把中文切成**单字并 OR**
-  （召回高、精度低），而 `tsvector('english')` 与 FTS5 会把整句当成**一个词元**
-  （搜不到）。两者都**不叫**支持中文分词，如实写在这里。
-- pg_search 0.26.1 自带的 `pdb.jieba` 分词器实测可用
-  （`'这是中文正文没有空格应该怎么分词'::pdb.jieba` →
-  `{这是,中文,正文,没有,空格,应该,怎么,分词}`），但**本实现不采用**：
-  SQLite / sqlite-vec / pgvector 三个后端必须用**同一个**归一化器，否则同一个查询
-  在两个后端给出不同结果（ADR-0004 第三节第 4 条）。
-- **停用词**：pg_search 的 `simple` / `chinese_compatible` **不删停用词**
-  （实测查询 `the` 能命中只含 `the and of a an` 的块）；查询侧的停用词是
-  `store/textquery.py` 自己删的。`tsvector('english')` 那边则会删。
-  这一条对指标无影响（查询侧已去停用词），但说明两侧索引里的词表并不相同。
-- **扩展不存在时**：降级到 `ts_rank` 是**允许的，但必须明着标出来**——`meta` 里写
-  `fts_engine`、`verify_fts()` 返回 `DEGRADED: ...`、构造时打一条 logger.warning。
-  这条降级路径写成代码、写成测试、写进 ADR，不靠"没人会看"来蒙混。
-  （另有一条硬路径：`fts_engine="pg_search"` 时扩展不可用直接抛 `StoreError`。）
-
-### 为什么还留着 `tsv` 生成列与 GIN 索引
-
-`tsv` + GIN 现在是**降级引擎的索引**，不是主路径。留着它的代价是每行多存一份
-tsvector；收益是"扩展装不上时仍然有一个能跑的全文路，而且它被明确标成降级"。
-pg_search 侧另有一个 `USING paradedb` 索引（tantivy 段文件），两者互不干扰。
-
-## HNSW 参数与理由
-
-- `m = 16`：每个节点的出边数。pgvector 默认值；1.9 万块规模下 8 会明显掉召回，
-  32 以上收益递减而索引体积/建图时间线性上升。**m 只能重建索引才能改。**
-- `ef_construction = 64`：建图时的候选队列。默认值。与 m 一起决定图的质量；
-  本规模下建索引只需数秒到数十秒，调到 200 的收益要在更大规模上才体现。
-- `ef_search = 200`（查询期 `hnsw.ef_search`）：pgvector 默认 40，本仓库原先取 100，
-  2026-10-09 起提到 200。**加大的理由是精确召回**，依据是本机实测（同轮、同一份
-  18861 块索引、50 条金标 ×3 轮）：向量路 top-10 与 numpy 精确检索逐位相同的查询数
-  100 → 200 时从 36/50 涨到 43/50（平均集合重合 0.9420 → 0.9800），而 dense p50 只从
-  4.29ms 涨到 5.79ms；再调到 400 只多 1 条（44/50、0.9840）却再贵 1.45ms，**收益递减**。
-  它**不需要重建索引**，可随时按需调（`Settings.pg_hnsw_ef_search`）。
-  ⚠️ 注意它治不了混合检索的质量落差——那条落差来自全文路，与 ef_search 无关
-  （实测：ef=100/200/400 的 hybrid hit/recall 完全一样），见 ADR-0004 第九节。
+- `m = 16`：每个节点的出边数，pgvector 默认值。在约 1.9 万块这个规模下 8 会明显掉
+  召回，32 以上收益递减而索引体积/建图时间线性上升。**改 m 只能重建索引。**
+- `ef_construction = 64`：建图时的候选队列，默认值，与 m 一起决定图的质量。
+- `ef_search = 200`（查询期 `hnsw.ef_search`）：pgvector 默认 40，取 200 是为了提高
+  向量路与精确检索的吻合度，查询开销只小幅上升，继续加大收益递减。它**不需要重建
+  索引**，可随时按需调（`Settings.pg_hnsw_ef_search`）；它只影响向量路，改善不了
+  混合检索里来自全文路的质量落差。
 - 距离用 `vector_cosine_ops` + `<=>`：与另外两个实现的余弦语义一致。
   向量已归一化时，余弦序与内积序严格相同。
 
@@ -99,11 +58,10 @@ pg_search 侧另有一个 `USING paradedb` 索引（tantivy 段文件），两�
 设置 `hnsw.ef_search` 并注册 pgvector 类型适配器。
 
 **但 schema 初始化不能走池**：`configure` 里的 `register_vector` 要求 `vector` 类型
-已存在，用池去 `CREATE EXTENSION` 会自己把自己锁死（实测见 `__init__` 的注释）。
-所以顺序固定为「直连建 schema → 再开池」。
+已存在，用池去 `CREATE EXTENSION` 会自己把自己锁死。所以顺序固定为「直连建 schema
+→ 再开池」。
 
-SQL 里的表名一律通过 `sql.Identifier` 注入（见 `_q`），值一律走 `%s` 参数绑定：
-不给自己留"这句是我手拼的、应该安全"的口头承诺。
+SQL 里的表名一律通过 `sql.Identifier` 注入（见 `_q`），值一律走 `%s` 参数绑定。
 """
 
 from __future__ import annotations
@@ -137,12 +95,10 @@ PG_SCHEMA_VERSION = 1
 # body_normalized=D，breadcrumb=B，title=A（C 未使用，占位跟随 body）。
 #
 # ⚠️ `ts_rank` 的权重**必须落在 [0, 1] 内**，否则 Postgres 直接报
-# `InvalidParameterValue: weight out of range`（`tsrank.c` 里就是这么校验的）。
-# 所以这里**不能**照抄 FTS5 `bm25(chunks_fts, 1.0, 3.0, 1.5)` 那组倍数——原实现
-# 写了 1.0/1.5/3.0，导致 `keyword_search` 一调用就抛错（实测），全文路从未跑通。
-# 合法写法是给一组**比例相同、最大值为 1** 的权重：body 1/3、breadcrumb 1/2、title 1。
-# ts_rank 对权重是线性的（整体乘一个常数只等比缩放分数、不改次序），
-# 因此这与"body : breadcrumb : title = 1 : 1.5 : 3"的原意**同序**，只是分数尺度不同；
+# `InvalidParameterValue: weight out of range`。所以这里不能照抄 FTS5
+# `bm25(chunks_fts, 1.0, 3.0, 1.5)` 那组倍数，而要写一组**比例相同、最大值为 1** 的
+# 权重：body 1/3、breadcrumb 1/2、title 1。ts_rank 对权重是线性的（整体乘一个常数
+# 只等比缩放分数、不改次序），因此与"body : breadcrumb : title = 1 : 1.5 : 3"同序，
 # 而 `ORDER BY ts_rank(...) DESC` 只依赖次序，故意图得以保留。
 _TS_RANK_WEIGHTS = (1 / 3, 1 / 3, 1 / 2, 1.0)
 
@@ -160,38 +116,24 @@ _PG_SEARCH_EXT = "pg_search"
 _BM25_INDEX = "idx_chunks_bm25"
 
 # 三个字段共用的分词器：英文 Snowball 词干（对齐 FTS5 的 porter）+ CJK 单字切分。
-# 具体行为与"中文到底能不能搜"见模块文档「分词、停用词与中文」一节。
+# 具体行为见模块文档「全文检索」一节。
 _BM25_TOKENIZER = "pdb.chinese_compatible('stemmer=english')"
 
 # BM25 索引只建**一个**字段：`title + breadcrumb + body_normalized` 拼起来的文本。
-# 索引里的字段名（`alias=`）只用于 EXPLAIN 可读性，查询侧用**同一个表达式**引用它
-# （PostgreSQL 的表达式索引匹配是句法的，两边必须逐字一致 —— 所以这里抽成常量）。
-# 注意括号：`::` 的优先级高于 `||`，所以 `a || b::tok` 只会把 `b` 转型。
-# 这里把整个拼接表达式连同外层括号一起定义，DDL 与查询两侧共用同一个字符串
-# （PostgreSQL 的表达式索引匹配是句法的，两边必须逐字一致）。
+# 索引里的字段名（`alias=`）只用于 EXPLAIN 可读性；查询侧必须用**同一个表达式**引用
+# 它——PostgreSQL 的表达式索引匹配是句法的，两边要逐字一致，所以抽成常量。
+# 注意括号：`::` 的优先级高于 `||`，`a || b::tok` 只会把 `b` 转型，因此这里把整个
+# 拼接表达式连同外层括号一起定义，DDL 与查询两侧共用同一个字符串。
 _BM25_TEXT_EXPR = "(title || ' ' || breadcrumb || ' ' || body_normalized)"
 _BM25_FIELD_ALIAS = "fts_text"
-# `alias=` 必须写在分词器**参数括号里面**（实测：写到外面是 `syntax error at or near ","`）。
+# `alias=` 必须写在分词器**参数括号里面**，写到外面是语法错误。
 _BM25_TOKENIZER_ALIASED = "pdb.chinese_compatible('stemmer=english', 'alias=" + _BM25_FIELD_ALIAS + "')"
 _BM25_DDL = (
     "CREATE INDEX IF NOT EXISTS " + _BM25_INDEX + " ON {chunks} USING paradedb "
     "(({expr}::" + _BM25_TOKENIZER_ALIASED + "))"
 )
 
-# ⚠️ 为什么**没有**照抄 FTS5 的列权重（`bm25(chunks_fts, 1.0, 3.0, 1.5)`）——这是测出来的，不是偏好。
-#
-# FTS5 的列权重乘在**按整行长度归一化**的 TF 上（一行 = 三个列的全部词元）；而 tantivy 的
-# `pdb.boost` 乘在**按字段自身长度归一化**的 BM25 分数上。两者的归一化域不同，于是
-# "标题只有几个词"这件事在 tantivy 里被放大成了很强的信号。实测（18861 块、50 条金标、
-# 关键字路单路 hit@10，见 ADR-0004 第十节）：
-#     只索引 body                                    0.7000
-#     title+breadcrumb+body，权重 3.0/1.5/1.0（照抄） 0.5400   ← 照抄反而最差
-#     title+breadcrumb+body，无权重                   0.6200
-#     title+body，无权重                              0.7200
-#     单字段（三列拼接，本实现）                       0.7000
-# 拼接成单字段后**只剩一个归一化域与一个 IDF 域**，这是与 FTS5"整行归一化"最接近的对应物，
-# 也保住了"三个字段都能被搜到"（identifier 类查询 14/15）。权重若要重新引入，
-# 必须连同上面这组数字一起重测——不能只改 3.0 这个数字就声称"对齐了 FTS5"。
+# BM25 索引不照抄 FTS5 的列权重，而是三列拼接成单字段——理由见模块文档「全文检索」。
 
 logger = logging.getLogger(__name__)
 
@@ -203,8 +145,8 @@ _TSV_EXPR = (
     "setweight(to_tsvector('english', coalesce(breadcrumb, '')), 'B')"
 )
 
-# 建表 DDL（语句用 `;` 分隔，逐条执行）。`embedding` 与 `tsv` 都在块行内，
-# 不存在"块在、向量不在"的中间态，也不需要任何侧车文件（对比 SQLite 侧的 .npy）。
+# 建表 DDL（语句逐条执行）。`embedding` 与 `tsv` 都在块行内，不存在"块在、向量不在"
+# 的中间态，也不需要任何侧车文件（对比 SQLite 侧的 .npy）。
 # `{documents}` / `{chunks}` 是 sql.Identifier 占位符，`{dim}`/`{m}`/`{efc}` 是整数字面量。
 _DDL_STATEMENTS = (
     "CREATE TABLE IF NOT EXISTS {documents} ("
@@ -230,32 +172,28 @@ _DDL_STATEMENTS = (
     f"  tsv tsvector GENERATED ALWAYS AS ({_TSV_EXPR}) STORED)",
     "CREATE INDEX IF NOT EXISTS idx_chunks_doc ON {chunks} (doc_id)",
     "CREATE INDEX IF NOT EXISTS idx_chunks_hash ON {chunks} (content_hash)",
-    # ⚠️ 这个 GIN 索引现在只服务**降级引擎**（ts_rank）。BM25 走下面那条
-    # `USING paradedb` 的索引，两者并存、互不干扰；留着它 = 留一条被明确标成
-    # 降级的全文路（见模块文档"为什么还留着 tsv 生成列"）。
+    # ⚠️ 这个 GIN 索引只服务**降级引擎**（ts_rank）：BM25 走下面那条
+    # `USING paradedb` 索引，两者并存、互不干扰。
     "CREATE INDEX IF NOT EXISTS idx_chunks_tsv ON {chunks} USING gin (tsv)",
     "CREATE INDEX IF NOT EXISTS idx_chunks_embedding ON {chunks} "
     "USING hnsw (embedding vector_cosine_ops) WITH (m = {m}, ef_construction = {efc})",
 )
 
 
-# BM25 索引 DDL。**不在 `_DDL_STATEMENTS` 里**：它依赖 pg_search 扩展，
-# 而扩展可能装不上（那时整条建表语句会带着"unknown access method paradedb"失败，
-# 连表都建不出来）。所以它单独一条、只在探测到扩展可用时执行。
+# BM25 索引 DDL。**不在 `_DDL_STATEMENTS` 里**：它依赖 pg_search 扩展，而扩展可能
+# 装不上（那时整条语句会以"unknown access method paradedb"失败，连表都建不出来），
+# 所以单独一条、只在探测到扩展可用时执行。
 #
-# 为什么把分词器写成 `表达式::pdb.xxx(...)` 而不是索引选项：
-# pg_search 0.26.1 的索引级 `text_fields` 仍能被解析但**已被忽略**（实测同一列
-# 三个字段的分数逐位相同）；列级配置只剩表达式这一条路，而**表达式字段必须带
-# `alias=`**（实测：不带就报 `indexed expression requires a tokenizer cast with an alias`）。
-# 常量 `_BM25_DDL` 见上方"为什么没有照抄 FTS5 的列权重"一节。
+# 分词器写成 `表达式::pdb.xxx(...)` 而不是索引选项：pg_search 0.26.1 的索引级
+# `text_fields` 已被忽略，列级配置只剩表达式这一条路，而表达式字段**必须带
+# `alias=`**，否则报 `indexed expression requires a tokenizer cast with an alias`。
 
 
 def probe(dsn: str, *, timeout: float = 3.0) -> tuple[bool, str]:
     """探测数据库是否可用（不做任何建表动作）。
 
-    存在的理由：pgvector 的测试与前置检查都需要区分"数据库连不上（环境问题，
-    应 skip / 给出提示）"与"代码错了（应失败）"。把两者混在一起，
-    CI 要么红得莫名其妙，要么绿得莫名其妙。
+    存在的理由：测试与前置检查需要区分"数据库连不上（环境问题，应 skip / 给出提示）"
+    与"代码错了（应失败）"，两者混在一起会让 CI 出现莫名其妙的红或绿。
     """
     try:
         import psycopg
@@ -275,14 +213,14 @@ def probe(dsn: str, *, timeout: float = 3.0) -> tuple[bool, str]:
 def _pg_search_available(conn: Any) -> tuple[bool, str]:
     """探测这个库能不能用 pg_search（真 BM25），能用就顺手把扩展建出来。
 
-    **判据不能只看 `pg_available_extensions`**：pg_search 是 preload 型扩展，
-    扩展文件在、而 `shared_preload_libraries` 里没有它时，`CREATE EXTENSION`
-    会直接失败（实测报 `pg_search must be loaded via shared_preload_libraries`）。
-    所以真正的判据是"建一下试试"。
+    **判据不能只看 `pg_available_extensions`**：pg_search 是 preload 型扩展，扩展
+    文件在、而 `shared_preload_libraries` 里没有它时，`CREATE EXTENSION` 会直接失败
+    （`pg_search must be loaded via shared_preload_libraries`），所以真正的判据是
+    "建一下试试"。
 
     `CREATE EXTENSION` 放在**嵌套事务（SAVEPOINT）**里：它失败时不该毒化外层事务，
-    否则后面那些建表语句会统统以 `current transaction is aborted` 失败——
-    那看起来像"表建不出来"，而不是真相"扩展装不上"。
+    否则后面的建表语句会统统以 `current transaction is aborted` 失败，看起来像
+    "表建不出来"，而不是真相"扩展装不上"。
     """
     try:
         row = conn.execute(
@@ -323,14 +261,14 @@ class PgVectorStore:
         fts_engine: str = _FTS_AUTO,
     ) -> None:
         """`hnsw_ef_search` 的默认值必须与 `Settings.pg_hnsw_ef_search` **保持一致**：
-        两处默认值不同就会出现"直接构造时是 100、走配置时是 200"的双真相，
-        而这类差异只会表现为"同一份数据换个入口召回就不一样"。
+        两处默认值不同就会出现"直接构造时是 100、走配置时是 200"的双真相，而这类差异
+        只表现为"同一份数据换个入口召回就不一样"。
 
-        `fts_engine` 决定关键字路用哪个引擎（**不是**环境变量，见常量区的说明）：
-        - `auto`（默认）：库里有 `pg_search` 就用真 BM25，没有就降级到 `ts_rank`
-          并**全方位标出来**（meta / verify_fts / WARNING 日志）；app 走的就是这条。
+        `fts_engine` 决定关键字路用哪个引擎（**不是**环境变量，见常量区说明）：
+        - `auto`（默认）：库里有 `pg_search` 就用真 BM25，没有就降级到 `ts_rank`，
+          并在 meta / verify_fts / WARNING 日志三处标出来；app 走的就是这条。
         - `pg_search`：要求真 BM25，扩展不可用**直接报错**（CI / 生产闸门用得上）。
-        - `ts_rank`：显式要旧引擎（对照旧数字用），同样会带降级标记。
+        - `ts_rank`：显式要旧引擎（对照旧数字用），同样带降级标记。
         """
         if not _IDENT_RE.match(schema):
             raise StoreError(f"非法的 schema 名 {schema!r}：只允许 [A-Za-z_][A-Za-z0-9_]*")
@@ -359,15 +297,12 @@ class PgVectorStore:
             from psycopg_pool import ConnectionPool
         except ImportError as e:  # pragma: no cover - 取决于环境
             raise StoreError("pgvector 后端需要 psycopg-pool：pip install 'psycopg[pool]'") from e
-        # ⚠️ 顺序是**有意义**的：schema 初始化必须在连接池建立**之前**跑完。
-        # 池的 `configure` 回调会对每条新连接执行 `register_vector`，而那个函数要求
-        # 库里**已经存在** `vector` 类型；池一旦 open，后台就会立刻开始建连接。
-        # 于是"建扩展"被排在"注册类型"之后，而注册类型又只能靠池的连接去执行——
-        # 死锁。实测（compose 刚起、`\dx` 只有 plpgsql 的全新库）100% 复现：
-        #   error connecting in 'kubedocs-pgvector': vector type not found in the database
-        #   psycopg_pool.PoolTimeout: couldn't get a connection after 10.00 sec
-        # 而 `CREATE EXTENSION` 那句**根本没被执行到**。所以 schema 这一步走直连，
-        # 池只服务查询/写入流量（这也是池该干的事：一次性建表不需要 10 条连接）。
+        # ⚠️ 顺序是**有意义**的：schema 初始化必须在连接池建立**之前**跑完。池的
+        # `configure` 回调会对每条新连接执行 `register_vector`，而那要求库里**已经
+        # 存在** `vector` 类型；池一旦 open 就会立刻开始建连接，于是"建扩展"被排在
+        # "注册类型"之后，而注册类型又只能靠池的连接去执行——死锁（表现为
+        # PoolTimeout，且 `CREATE EXTENSION` 根本没被执行到）。所以 schema 这一步走
+        # 直连，池只服务查询/写入流量。
         self._ensure_schema()
         self._pool = ConnectionPool(
             conninfo=dsn,
@@ -384,24 +319,22 @@ class PgVectorStore:
     def _q(self, template: str, **extra: object) -> sql.Composed:
         """把 `{chunks}` / `{documents}` / `{meta}` 换成 **schema 限定的标识符**。
 
-        表名不是用户输入（`schema` 在构造时已按 `_IDENT_RE` 校验过），但与其口头
-        保证"我拼的字符串安全"，不如把引用规则交给驱动：`sql.Identifier` 正是
-        psycopg 为这件事提供的 API，动态 SQL 也就不再是一个无法静态区分的模式。
+        表名不是用户输入（`schema` 在构造时已按 `_IDENT_RE` 校验过），但与其口头保证
+        "我拼的字符串安全"，不如把引用规则交给驱动：`sql.Identifier` 正是 psycopg 为
+        这件事提供的 API，动态 SQL 也就不再是无法静态区分的模式。
         """
         return sql.SQL(template).format(**self._tbl, **extra)
 
     def _configure_connection(self, conn: Any) -> None:
         """池里每条新连接：设置查询期 HNSW 候选队列 + 注册 pgvector 适配器。
 
-        `register_vector` 让 numpy 数组可以直接作为向量参数传入/取出
-        （否则只能自己拼 `'[1,2,3]'::vector` 文本，读回来还要手写解析）。
+        `register_vector` 让 numpy 数组可以直接作为向量参数传入/取出（否则只能自己
+        拼 `'[1,2,3]'::vector` 文本，读回来还要手写解析）。
 
-        **结尾必须 `commit()`**：`SET` 与类型注册都会开一个隐式事务，而
-        `psycopg_pool` 要求 `configure` 回调把连接留在 **IDLE** 状态。不提交的话
-        每条新连接都会被判为
-        `connection left in status INTRANS by configure function ...: discarded`
-        并立刻丢弃——表现为池永远填不满、每次取连接都等到 `PoolTimeout`。
-        这是实测踩到的第三个坑（前两个见 `__init__` 与 `_init_meta`）。
+        **结尾必须 `commit()`**：`SET` 与类型注册都会开一个隐式事务，而 `psycopg_pool`
+        要求 `configure` 回调把连接留在 **IDLE** 状态；不提交的连接会被判为
+        `connection left in status INTRANS by configure function ...: discarded` 并
+        立刻丢弃，表现为池永远填不满、每次取连接都等到 `PoolTimeout`。
         """
         conn.execute(f"SET hnsw.ef_search = {int(self.hnsw_ef_search)}")
         self._register_vector(conn)
@@ -411,9 +344,8 @@ class PgVectorStore:
     def _ensure_schema(self) -> None:
         """建扩展/schema/表/索引（幂等）。摄取与 finalize 都能自己把 schema 准备好。
 
-        **用直连而不是连接池**：见 `__init__` 里的顺序说明——池的 `configure`
-        会 `register_vector`，而那要求 `vector` 类型已存在；用池来建扩展就是死锁。
-        建表是一次性动作，本来也不需要池。
+        **用直连而不是连接池**：池的 `configure` 会 `register_vector`，而那要求
+        `vector` 类型已存在；用池来建扩展就是死锁。建表是一次性动作，也不需要池。
         """
         try:
             with psycopg.connect(self.dsn, connect_timeout=10) as conn:
@@ -473,8 +405,8 @@ class PgVectorStore:
     def _setup_fts(self, conn: Any) -> None:
         """定下全文引擎；能上 pg_search 就建 BM25 索引，不能就**标记**降级。
 
-        这条路径的取值顺序是刻意的：`auto` 会降级但绝不隐瞒（meta + verify_fts +
-        WARNING 日志三处都写着），`pg_search` 则宁可报错也不降级。
+        `auto` 会降级但不隐瞒（meta / verify_fts / WARNING 日志三处都写着），
+        `pg_search` 则宁可报错也不降级。
         """
         if self._fts_mode == _FTS_TS_RANK:
             self._fts_engine = _FTS_TS_RANK
@@ -514,9 +446,8 @@ class PgVectorStore:
     def _init_meta(self, conn: Any) -> None:
         """首次写入元信息；已存在则做与 SQLite 侧同样的闸门校验。
 
-        `executemany` 在 `psycopg.Cursor` 上而**不在** `Connection` 上（实测
-        psycopg 3.3.6：`Connection.executemany` 不存在），所以这里显式开游标——
-        `Connection.execute` 只是"快捷开一个游标"的语法糖，没有对应的批量版本。
+        `executemany` 在 `psycopg.Cursor` 上而**不在** `Connection` 上，所以这里显式
+        开游标——`Connection.execute` 只是"快捷开一个游标"的语法糖，没有批量版本。
         """
         rows = dict(conn.execute(self._q("SELECT key, value FROM {meta}")).fetchall())
         if not rows:
@@ -538,11 +469,9 @@ class PgVectorStore:
             raise StoreError(f"Postgres 索引 schema 版本不符：库里是 {got}，代码要求 {PG_SCHEMA_VERSION}")
         old_dim = int(rows.get("embedding_dim", "0"))
         if old_dim != self.dim:
-            # ⚠️ 这条提示**曾经是错的**，写成"必须重建索引（ingest --rebuild）"。
-            # 实测踩过：`--rebuild` 走 `rebuild_from_scratch()`，而它只 `TRUNCATE` 表；
-            # 表是用 `CREATE TABLE IF NOT EXISTS` 建的，`embedding vector(384)` 的列定义
-            # 不会因为 TRUNCATE 而改变 ⇒ 再跑一次还是同一个错，用户被指到死循环里。
-            # 维度是**列类型**，只能靠丢掉整个 schema（索引是派生物，重建即可）来改。
+            # ⚠️ 维度是**列类型**，只能靠丢掉整个 schema 来改（索引是派生物，重建
+            # 即可）：`ingest --rebuild` 走 `rebuild_from_scratch()`，而它只 `TRUNCATE`
+            # 表，`embedding vector(384)` 的列定义不会因此改变，再跑一次还是同一个错。
             raise StoreError(
                 f"索引向量维度不符：库里是 {old_dim}，当前配置 {self.dim}。\n"
                 f"  维度是 vector 列的**类型**，`ingest --rebuild` 只 TRUNCATE、改不了它。\n"
@@ -614,9 +543,9 @@ class PgVectorStore:
         """把驱动读回的 pgvector 值统一成 float32 的 `ndarray`。
 
         **不能直接 `np.asarray(value)`**：pgvector 0.5.0 的 `Vector` 不是 `ndarray`
-        子类（实测 MRO 只有 `object`），`np.asarray` 会把它当标量，报
+        子类，`np.asarray` 会把它当标量，报
         `float() argument must be a string or a real number, not 'Vector'`。
-        它自带 `to_numpy()`；对已经是 ndarray 的情况（没注册适配器时）也兼容。
+        它自带 `to_numpy()`；值已是 ndarray 时（没注册适配器）也兼容。
         """
         to_numpy = getattr(value, "to_numpy", None)
         arr = to_numpy() if callable(to_numpy) else value
@@ -700,15 +629,13 @@ class PgVectorStore:
     def keyword_search(self, query: str, limit: int) -> list[tuple[str, int]]:
         """全文路：`pg_search` 的 BM25 索引 + `pdb.score()` 排序（降级时是 `ts_rank`）。
 
-        两套 SQL 的差别、以及"为什么必须换成 BM25"，见模块文档第一节。
-        **查询词元在两条路上是同一套**（`normalizer.query_text` + `textquery.query_tokens`）：
-        换引擎不该顺手把查询语义也换掉。
+        两条路共用同一套查询词元（`normalizer.query_text` + `textquery.query_tokens`）：
+        换引擎不改查询语义。
 
-        并列分数按 chunk_id 定序：FTS5 的并列顺序由内部实现决定、不可依赖；
-        这里给一个**确定性**次序，至少让"同样的输入给同样的输出"成立。
-        （代价：`ORDER BY score DESC, chunk_id` 不能被 pg_search 下推成 Top-K 扫描，
-        计划是 `Limit → Sort → ParadeDB Base Scan`；实测 p50 仍在 10ms 量级，
-        见 ADR-0004 第十节。）
+        并列分数按 chunk_id 定序，给一个**确定性**次序（FTS5 的并列顺序由内部实现
+        决定、不可依赖）。代价是 `ORDER BY score DESC, chunk_id` 不能被 pg_search
+        下推成 Top-K 扫描，计划为 `Limit → Sort → ParadeDB Base Scan`，p50 仍在
+        10ms 量级。
         """
         if limit <= 0:
             return []
@@ -721,22 +648,18 @@ class PgVectorStore:
         """真 BM25：`USING paradedb` 索引 + `pdb.score()`。
 
         索引只有**一个字段**（`title + breadcrumb + body_normalized` 的拼接，见
-        `_BM25_TEXT_EXPR`）——为什么不是三个字段各带权重，见常量区那段
-        "为什么没有照抄 FTS5 的列权重"（那是测出来的结论，照抄 3.0/1.5 会掉 0.16）。
+        `_BM25_TEXT_EXPR`）；为什么不是三个字段各带权重，见模块文档「全文检索」。
 
         `pdb.match_disjunction(...)` 是**显式的析取（OR）**，与 FTS5 侧 `"a" OR "b"`
         的召回语义一致；查询串不经过 pg_search 的查询语法解析，所以 `textquery.py` 里
         "只抽 `\\w+`、按 OR 连接"的那套注入面分析在这里依然成立（而且更强）。
 
-        ⚠️⚠️ 两个踩过的坑，都在这里留档：
-        1. **不能用 `field ||| %s::pdb.boost(3.0)`**。直接连接里前 10 次都对，第 11 次起
-           稳定报 `The right-hand side of the ||| operator must be a text or text array
-           value`。根因是 psycopg 的 `prepare_threshold`（默认 5）到点后改用**服务端
-           prepare**，参数类型不再由客户端给定、而是由服务端从上下文推断：
-           `$1::pdb.boost(3.0)` 让 `$1` 被推断成 `pdb.boost`，而 `|||` 的重载里没有它。
-           `pdb.match_disjunction(%s)` 的参数类型由函数签名（`text`）钉死，没有这个洞。
-        2. 表达式字段**必须**用同一个表达式在 WHERE 里引用（PostgreSQL 表达式索引的
-           句法匹配），不能拿 `alias=` 当列名用（实测 `column "fts_text" does not exist`）。
+        ⚠️ 两条维护约束：不要用 `field ||| %s::pdb.boost(3.0)`——psycopg 到点改用
+        服务端 prepare 后，`$1` 会被推断成 `pdb.boost`，而 `|||` 没有这个重载（报
+        "The right-hand side of the ||| operator must be a text or text array value"）；
+        `pdb.match_disjunction(%s)` 的参数类型由函数签名（`text`）钉死。表达式字段还
+        必须用同一个表达式在 WHERE 里引用（PostgreSQL 表达式索引的句法匹配），不能拿
+        `alias=` 当列名用（`column "fts_text" does not exist`）。
 
         ⚠️ 没命中任何词元的查询（空串、纯标点）返回 0 行而不是报错——与 FTS5 一致。
         """
@@ -790,8 +713,8 @@ class PgVectorStore:
     def dense_search_exact(self, query_vector: Vector, limit: int) -> list[tuple[str, int]]:
         """**不用索引**的精确检索：度量 HNSW 召回率的基准。
 
-        没有它，"HNSW 够不够准"就只能靠感觉。它关掉索引扫描，强制顺序扫描全表
-        算精确余弦序——1.9 万块约几十毫秒，作为离线度量完全可接受。
+        它关掉索引扫描、强制顺序扫描全表算精确余弦序——1.9 万块约几十毫秒，作为离线
+        度量完全可接受。
         """
         if limit <= 0:
             return []
@@ -904,17 +827,15 @@ class PgVectorStore:
     def verify_fts(self) -> str:
         """全文索引自检：**先报引擎，再报索引**。
 
-        返回三态（`store/base.py` 的契约只写了 ok/FAIL，这里多一个 DEGRADED，
-        理由见下）：
+        返回三态（`store/base.py` 的契约只写了 ok/FAIL，这里多一个 DEGRADED）：
         - `"ok"`：BM25 引擎在位、索引在位；
-        - `"DEGRADED: ..."`：跑得动，但引擎是 `ts_rank`（无 pg_search），
-          检索质量**低于**基线。它不是"索引坏了"，而是"这条路的排序函数不是 BM25"；
+        - `"DEGRADED: ..."`：跑得动，但引擎是 `ts_rank`（无 pg_search），检索质量
+          **低于**基线。它不是"索引坏了"，而是"这条路的排序函数不是 BM25"；
         - `"FAIL: ..."`：索引真的缺失/漂移（缺索引时结果仍正确、但会退化成顺序扫描，
           那是**静默的性能事故**）。
 
-        为什么 DEGRADED 不并进 "ok"：`cli stats --verify` 把非 `"ok"` 视为不满足前置条件。
-        降级的 pgvector 后端**就该**在那一步被拦住——把"跑得动"说成"没问题"，
-        正是本项目反复出现的那种假装。
+        DEGRADED 不并进 `"ok"`：`cli stats --verify` 把非 `"ok"` 视为不满足前置条件，
+        降级的 pgvector 后端就该在那一步被拦住。
         """
         with self._pool.connection() as conn:
             if self._fts_engine == _FTS_PG_SEARCH:

@@ -1,11 +1,7 @@
-"""产品层（`kubedocs.clinical`）测试。
+"""产品层（`kubedocs.clinical`）测试：守护契约与流程，而不是"算得对不对"。
 
-这一层是**契约与流程**，所以测试的重点不是"算得对不对"，而是：
-
-1. 契约能不能挡住不合规的输出（没有依据的检查/用药建议、编造的证据 id、加了剂量）；
-2. 流程的**安全性质**能不能被证伪（未确认绝不取号、证据不足不许给结论、红线必须进上下文）；
-3. 提示词的硬性条款有没有被真的写进去（提示词是产品契约的一部分）。
-
+契约拦得住不合规输出（无依据的检查/用药建议、编造的证据 id、剂量）；流程的安全性质
+成立（未确认绝不取号、证据不足不给结论、红线进上下文）；提示词的硬性条款真写在里面。
 全部离线：检索器、挂号后端、LLM 客户端一律用假对象。
 """
 
@@ -255,36 +251,28 @@ class TestTriage:
 
 
 class TestTriageFromCardLabels:
-    """分诊 v1：按召回卡片的**科室标签**投票（v0 只看"科室名有没有出现在文本里"）。
+    """按召回卡片的**科室标签**投票分诊，钉住三条不变式。
 
-    这里钉住三件在真实数据上踩过的事：
-
-    1. 卡片正文里那句「建议就诊科室：X、Y。」要能解析出来；
-    2. **占位符「未标注」必须被滤掉**——实测 `data/clinic/cards.json` 里正文含该子句的
-       27,303 张卡中有 **12,863 张（47.1%）只写着「未标注」**，不滤掉它会把
-       「未标注」投成一个"科室"，而实测它真的出现在了人工金标的 top-3 里
-       （看起来像答案、实际什么都没有）；
-    3. 多科室卡片按科室数**均分**票权，否则列了 3 个科室的卡片等于 3 票。
+    正文的「建议就诊科室：X、Y。」要能解析、缺这句属正常数据；占位符「未标注」必须滤掉
+    （含该子句的卡片里 47.1% 只写「未标注」）；多科室卡片按科室数**均分**票权。
     """
 
     def test_clause_is_parsed(self) -> None:
         assert triage_mod.departments_in_card("咳嗽。建议就诊科室：呼吸内科、儿科。") == ["呼吸内科", "儿科"]
 
     def test_missing_clause_is_not_an_error(self) -> None:
-        """没有科室的卡片是正常的，不该抛异常。"""
+        """正文缺科室子句是正常数据，不该抛异常。"""
         assert triage_mod.departments_in_card("只是一句普通正文") == []
 
     def test_placeholder_is_filtered(self) -> None:
-        """**核心回归**：占位符不是科室。"""
+        """占位符不是科室：必须被滤掉。"""
         assert triage_mod.departments_in_card("某病。建议就诊科室：未标注。") == []
         assert triage_mod.departments_in_card("某病。建议就诊科室：其他科室。") == []
 
     def test_department_map_fills_placeholder_cards(self) -> None:
-        """**核心回归**：卡片正文写着「未标注」时，补全映射表能给出科室。
+        """正文写着「未标注」时，补全映射表必须给出科室。
 
-        语料里 47.1% 的卡片是占位符（源图谱缺关系），映射表由
-        `scripts/clinic_derive_departments.py` 从原始三元组推导。若这条测试挂了，
-        说明分诊又退化成"只信正文"，那批卡片会集体弃权。
+        语料里 47.1% 的卡片是占位符；查表失败要退回正文解析，不能丢标签。
         """
         engine = triage_mod.RetrievalTriage(known_departments=None, department_map={"耳朵里疼": ["耳鼻喉科"]})
         chunk = rag.RetrievedChunk(
@@ -292,7 +280,7 @@ class TestTriageFromCardLabels:
         )
         assert engine._departments_of("耳朵里疼", chunk.body) == ["耳鼻喉科"]
         assert engine.map_hits == 1
-        # 映射表里没有的 title 必须退回正文解析（不能因为查表失败就丢标签）
+        # 映射表里没有的 title 必须退回正文解析
         assert engine._departments_of("咳嗽", "咳嗽。建议就诊科室：呼吸内科。") == ["呼吸内科"]
 
     def test_confidence_tier_controls_which_labels_are_trusted(self, tmp_path: object) -> None:
@@ -322,7 +310,7 @@ class TestTriageFromCardLabels:
         loose = triage_mod.load_department_map(p, min_confidence="medium")
         assert strict == {"权威": ["心内科"]}
         assert loose == {"权威": ["心内科"], "模糊": ["产科"]}
-        # 文件不存在时**不能抛异常**：分诊要退化成正文解析，而不是整体挂掉
+        # 文件不存在时不能抛异常：分诊退化成正文解析
         assert triage_mod.load_department_map(p.parent / "nope.json") == {}
 
     def test_vote_comes_from_card_labels(self) -> None:
@@ -355,16 +343,10 @@ class TestTriageFromCardLabels:
 # --------------------------------------------------------------------- 证据装配
 class TestEvidence:
     def test_keyword_hit_is_not_rendered_into_the_prompt(self) -> None:
-        """**核心回归（架构决定）**：关键词命中**不再进模型上下文**。
+        """关键词命中不进模型上下文：提示词里一个字都不能提关键词。
 
-        旧实现渲染成「【红线信号｜MUST 处理】命中词『胸痛』…必须包含紧急处理指引」，
-        那是**用关键词约束医学判断**：词表覆盖不到的表述会被漏掉，
-        不该报的（"突然看不清"可能只是干眼）会被强制转急诊。
-        现在急重症由模型按病症 + 严重程度判断（`system.md` R1），
-        所以提示词里**一个字都不能提关键词**——否则模型仍被那行字牵着走，
-        "交给模型判断"就是假的。
-
-        命中本身仍然保留（`red_line_positive`），但只用于降级提示与不一致留痕。
+        用关键词约束医学判断会漏掉词表覆盖不到的表述，也会把不该报的转成急诊；急重症改由
+        模型按病症 + 严重程度判断（`system.md` R1），命中事实只留在 `red_line_positive` 里。
         """
         bundle = ev.build_evidence(
             "我胸痛",
@@ -375,7 +357,6 @@ class TestEvidence:
         assert "胸痛" not in text  # 命中词不得出现在上下文里
         assert "MUST" not in text
         assert "红线" not in text
-        # 但命中事实本身要留着：降级提示与"模型是否漏判"的留痕都要用它
         assert bundle.red_line_positive is True
         assert bundle.red_line is not None and bundle.red_line.word == "胸痛"
 
@@ -432,11 +413,9 @@ class TestIntake:
 
 
 class TestContractEnforcement:
-    """**核心回归**：契约违规必须**真的拦掉内容**，不能只记一笔账。
+    """契约违规必须真的拦掉内容，不能只记一笔账。
 
-    此前 `validate_against()` 只返回问题字符串，调用方塞进 `turn.problems` 就完了 ——
-    一条没有任何依据的用药建议**照样发给患者**，而患者端只渲染 `message`，
-    连问题清单都看不见。那让 R3「检索不到就不给」退化成事后记账。
+    `enforce()` 丢弃违规条目并记入 `problems`：只返回问题字符串会让 R3 退化成事后记账。
     """
 
     def test_exam_without_evidence_is_dropped(self) -> None:
@@ -466,10 +445,9 @@ class TestContractEnforcement:
         assert any("K99" in d for d in out.dropped)
 
     def test_emergency_content_is_never_dropped(self) -> None:
-        """**安全优先**：急重症判断与科室建议**不因 R3 被削弱**。
+        """急重症判断与科室建议不因 R3 被削弱：漏报急诊比多报危险得多。
 
-        引用了不存在的 id 时，检查/用药会丢，但 `red_flags`、`departments`、
-        `patient_summary` 必须原样留下 —— 漏报急诊比多报危险得多。
+        引用不存在的 id 只丢检查/用药，`red_flags`、`departments`、`patient_summary` 原样留下。
         """
         a = contracts.ClinicalAssessment(
             urgency="emergency",
@@ -486,9 +464,9 @@ class TestContractEnforcement:
             patient_summary="请立刻拨打 120。",
         )
         out = contracts.enforce(a, {"K1"})
-        assert out.assessment.red_flags  # 留着
-        assert out.assessment.departments  # 留着
-        assert out.assessment.patient_summary == "请立刻拨打 120。"  # 留着
+        assert out.assessment.red_flags
+        assert out.assessment.departments
+        assert out.assessment.patient_summary == "请立刻拨打 120。"
         assert out.assessment.exams == []  # 有依据才留
         assert any("急重症判断" in p for p in out.problems)  # 只记不丢
 
@@ -519,15 +497,15 @@ class TestSystemPrompt:
             "检索不到就不给",  # R3
             "不给确定诊断",  # R4
             "不要编造依据编号",  # R6
-            # R1 改成"由模型按病症 + 严重程度判断"，不再执行关键词表
+            # R1：急重症由模型按病症 + 严重程度判断，不查关键词表
             "急重症由你判断",
             "病症",
             "严重程度",
             "red_flags",
             "拿不准时往重的一侧判",  # 保守偏置必须写在提示词里
-            "120",  # 急救动作
-            "followup_questions",  # 输出契约
-            "证据_ids",  # 依据引用
+            "120",
+            "followup_questions",
+            "证据_ids",
         ],
     )
     def test_hard_clauses_are_present(self, clause: str) -> None:
@@ -536,11 +514,7 @@ class TestSystemPrompt:
         assert clause.replace("证据_ids", "evidence_ids") in text
 
     def test_prompt_does_not_tell_the_model_to_obey_a_keyword_list(self) -> None:
-        """**核心回归**：提示词里不得再出现"照红线信号执行"这类关键词约束。
-
-        留一条测试盯着它：如果哪天有人把关键词闸门加回提示词，
-        "底层约束是大模型"这个决定就被悄悄推翻了。
-        """
+        """提示词里不得出现"照红线信号执行"这类关键词约束：急重症判断权在模型。"""
         text = system_prompt()
         assert "【红线信号" not in text
         assert "MUST 处理" not in text
@@ -550,13 +524,9 @@ class TestSystemPrompt:
         assert "只输出 JSON" in system_prompt()
 
     def test_prompt_is_declared_as_package_data(self) -> None:
-        """**核心回归（打包）**：`system.md` 必须声明为 package-data，否则不进 wheel。
+        """`system.md` 必须声明为 package-data，否则不进 wheel。
 
-        setuptools 默认只带 `.py`，所以 editable 安装（本机开发）一切正常，
-        而 `pip install .` 装出来的包里没有这个文件。**实测**：重建容器镜像后
-        `/consult` 直接报 `FileNotFoundError: 系统提示词缺失：
-        /opt/venv/lib/python3.10/site-packages/kubedocs/clinical/prompts/system.md`。
-        这条断言很朴素（读 pyproject），但它挡的正是"开发环境永远发现不了"的那一类。
+        setuptools 默认只带 `.py`，editable 安装发现不了，装出来的包读提示词会直接失败。
         """
         from kubedocs.config import repo_root
 
@@ -704,11 +674,7 @@ class TestReasoner:
         assert result.problems and "契约" in result.problems[0]
 
     def test_keyword_hit_without_red_flag_is_recorded_not_silently_ignored(self) -> None:
-        """关键词命中而模型没判出急重症时，**必须留痕**（但不推翻模型）。
-
-        判断权在模型手上；程序只负责把这种不一致记下来，
-        好让人事后能查"是不是漏了一个真急症"。
-        """
+        """关键词命中而模型没判出急重症时必须留痕，但不推翻模型：判断权归模型，程序只记进 `problems`。"""
         bundle = ev.build_evidence(
             "q",
             backend=rag.LocalIndexBackend(_FakeRetriever([_Chunk("T", "B")])),
@@ -722,11 +688,7 @@ class TestReasoner:
         assert result.assessment is not None and result.assessment.urgency == "routine"
 
     def test_red_flags_force_emergency_by_contract(self) -> None:
-        """**核心回归（红线的新落点）**：判出急重症却给常规档 ⇒ 契约判违规。
-
-        关键词表退出后，"不许把急症当小事"这条安全性就靠这里守住：
-        判断权在模型，但**自相矛盾的输出会被程序拦下**并记进 `problems`。
-        """
+        """判出急重症却给常规档 ⇒ 契约判违规：自相矛盾的输出会被程序拦下并记进 `problems`。"""
         bundle = ev.build_evidence("q", backend=rag.LocalIndexBackend(_FakeRetriever([])))
         raw = json.dumps(
             {
@@ -756,9 +718,8 @@ class TestReasoner:
 class TestLiteLLMAdapter:
     """把仓库的 `LLMResult` 适配成 `str` 的那一层。
 
-    **这个坑是实测踩到的**：`ClinicalReasoner` 直接对返回值调 `.strip()`，而仓库真实的
-    `LiteLLMClient.complete()` 返回 `LLMResult` 对象 → `AttributeError` → 整条主判
-    **安静地走降级**（表面上"有回答"，实际一次模型判断都没发生）。
+    真实 `LiteLLMClient.complete()` 返回对象而非字符串，`ClinicalReasoner` 却对返回值调
+    `.strip()`：类型不匹配必须抛错，否则主判会安静地走降级，表面上"有回答"而实际没判断。
     """
 
     def test_reads_text_from_a_result_like_object(self) -> None:
@@ -858,14 +819,10 @@ class TestPipeline:
         )
 
     def test_intake_does_not_preempt_the_model_when_tool_loop_is_present(self) -> None:
-        """**核心回归（安全关键）**：追问闸门不得抢在模型判急重症之前。
+        """有工具循环时，追问闸门不得抢在模型判急重症之前。
 
-        实测过的真实缺陷：关键词护栏退场后，无条件先判 `intake.can_conclude()` 让
-        「突发言语不清，右侧肢体无力两小时」（教科书级卒中）**4/4 次**都返回
-        `action=ask` —— 患者拿到的是一句**追问**，而模型根本没机会判断这是急症。
-        追问闸门只会看槽位填满没有，它不会看急症。
-
-        有工具循环时"够不够下结论"必须归模型（提示词 R5）。
+        追问闸门只看槽位填满没有，不看急症：「突发言语不清，右侧肢体无力两小时」这类卒中
+        描述会被判成 `action=ask`。有工具循环时"够不够下结论"必须归模型（提示词 R5）。
         """
         loop = _FakeToolLoop(
             json.dumps(
@@ -943,7 +900,7 @@ class TestPipeline:
         turn = self._pipeline(word="胸痛").advance("胸口疼")
         assert turn.red_line_positive is True
         assert any("关键词表命中" in p for p in turn.problems)
-        # 模型（这个桩）判的是 routine，结论就必须是 routine——不是被关键词改成 emergency
+        # 桩判的是 routine，结论就得是 routine，不被关键词改写
         assert turn.assessment is not None
         assert turn.action != "emergency"
 
@@ -954,8 +911,7 @@ class TestPipeline:
         assert first.action == "confirm_booking"
         assert first.skill is not None and first.skill.needs_confirmation
 
-        # 会话状态由调用方持有并回传（`ClinicalTurn.intake`）——不传就等于新开一轮，
-        # 连主诉都要重问。这一条既是用法示范，也是那个设计的回归测试。
+        # 会话状态由调用方持有并回传（`ClinicalTurn.intake`）；不传就等于新开一轮。
         second = pipe.advance(
             "好",
             state=first.intake,

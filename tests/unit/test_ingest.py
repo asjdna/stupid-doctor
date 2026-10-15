@@ -107,10 +107,7 @@ def test_removed_file_is_pruned(settings, store, embedder):
 
 
 def test_limit_files_does_not_prune_the_rest(settings, store, embedder):
-    """`--limit-files` 只处理语料子集，绝不能把"没出现在子集里"当成"已删除"。
-
-    这是本项目最危险的一个默认行为：一旦搞错，一次冒烟跑就会把整个索引删掉。
-    """
+    """`--limit-files` 只处理语料子集，绝不能把"没出现在子集里"当成"已删除"：搞错一次就清空索引。"""
     _write(settings.corpus_path, "a.md", "Resource Management", BODY_A)
     _write(settings.corpus_path, "b.md", "Eviction", BODY_B)
     _ingest(store, settings, embedder)
@@ -142,11 +139,7 @@ def test_identical_content_reuses_vectors_from_index(settings, store, embedder):
 
 
 def test_intra_batch_dedup_with_duplicate_in_the_middle(settings, store, embedder):
-    """回归测试：批内重复块**不在批尾**时，向量下标必须仍然对得上。
-
-    真实全量摄取踩到过这个越界：重复块在中间，导致"用 pending 的下标去索引
-    压缩后的矩阵"错位并 IndexError。这里刻意让重复出现在中间和开头。
-    """
+    """批内去重后向量下标仍须对齐：重复块出现在中间或开头都不许错位。"""
     _write(settings.corpus_path, "dup1.md", "Same Title", BODY_A)
     _write(settings.corpus_path, "other.md", "Different Title", BODY_B)
     _write(settings.corpus_path, "dup2.md", "Same Title", BODY_A)

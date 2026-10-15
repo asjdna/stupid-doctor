@@ -1,10 +1,6 @@
-"""工具编排（`clinical/orchestration.py`）的回归测试。
+"""工具编排（`clinical/orchestration.py`）接线测试：全打桩、不联网、不需要语料。
 
-这里钉住的是**架构决定**：底层约束是大模型 ⇒ 它自己决定调哪些模块取证。
-代码只保留三件非医学的事：轮次上限、工具白名单、以及把工具返回的证据编号累积起来
-以便事后校验引用。下面每条测试对应其中一件，外加"模型犯错时不要崩"。
-
-全部用假客户端与假工具，不联网、不花钱、不需要语料。
+代码只保留三件非医学的事——轮次上限、工具白名单、证据编号累积；调哪些模块取证由模型自选。
 """
 
 from __future__ import annotations
@@ -116,9 +112,8 @@ def _run(client: _FakeClient, **kw: Any) -> Any:
     return loop.run(system="SYS", question="我咳嗽", intake=IntakeState())
 
 
-# --------------------------------------------------------------- 工具可见性
 def test_side_effect_tools_are_hidden_by_default(registry: Any) -> None:
-    """**副作用工具默认不给模型**（挂号会占号源）。与 MCP server 同一套约定。"""
+    """副作用工具默认不给模型（挂号会占号源），必须先显式开启。"""
     names = [s["function"]["name"] for s in tool_schemas(domain="clinic")]
     assert "search_docs" in names
     assert "book_appointment" not in names
@@ -137,9 +132,8 @@ def test_tool_catalogue_is_rendered_into_the_prompt(registry: Any) -> None:
     assert "book_appointment" not in text
 
 
-# --------------------------------------------------------------- 主流程
 def test_model_drives_the_calls_and_evidence_is_numbered_by_us(registry: Any) -> None:
-    """**核心**：模型要工具 → 我们执行 → 证据编号由我们分配 → 模型出最终结论。"""
+    """主流程：模型要工具 → 我们执行 → 证据编号由我们分配 → 模型出最终结论。"""
     client = _FakeClient(
         [
             _TurnSpec(calls=[("search_docs", '{"query": "咳嗽"}')]),
@@ -167,7 +161,7 @@ def test_messages_carry_the_tool_result_back(registry: Any) -> None:
 
 
 def test_final_answer_without_tools_stops_immediately(registry: Any) -> None:
-    """模型选择不检索也必须能一轮结束——**这正是"它自己决定"的意思**。"""
+    """模型选择不检索也必须能一轮结束——这正是"它自己决定"的意思。"""
     client = _FakeClient([_TurnSpec(content='{"urgency":"routine"}')])
     result = _run(client)
     assert result.calls == []
@@ -182,7 +176,6 @@ def test_no_tools_available_is_not_an_error(registry: Any) -> None:
     assert _run(client).final_text == "{}"
 
 
-# --------------------------------------------------------------- 模型犯错
 def test_unknown_tool_becomes_a_message_not_a_crash(registry: Any) -> None:
     """模型点名一个不存在的工具 ⇒ 把错误回给它，让它换策略，而不是抛出去。"""
     client = _FakeClient([_TurnSpec(calls=[("nope", "{}")]), _TurnSpec(content="{}")])
@@ -225,9 +218,8 @@ def test_tool_error_is_swallowed_into_the_conversation(registry: Any) -> None:
     assert "索引是空的" in result.calls[0].summary
 
 
-# --------------------------------------------------------------- 硬上限
 def test_round_limit_is_enforced_and_the_model_is_told(registry: Any) -> None:
-    """**硬上限**：模型不能靠"再查一次"把预算烧穿；到顶要**明说**，不静默截断。"""
+    """硬上限：模型不能靠"再查一次"烧穿预算；到顶要明说，不静默截断。"""
     client = _FakeClient([_TurnSpec(calls=[("search_docs", "{}")]) for _ in range(MAX_TOOL_ROUNDS + 1)])
     result = _run(client)
     assert result.rounds == MAX_TOOL_ROUNDS + 1
@@ -258,9 +250,8 @@ def test_evidence_is_capped(registry: Any) -> None:
     assert len(result.evidence.items) == 5
 
 
-# --------------------------------------------------------------- 计费
 def test_every_tool_round_is_billed(registry: Any) -> None:
-    """工具循环里**每一次模型调用都要计费**，否则多轮取证是绕过日预算的口子。"""
+    """工具循环里每一次模型调用都要计费，否则多轮取证就是绕过日预算的口子。"""
     from kubedocs.clinical.reasoning import BudgetedClient
 
     class _Budget:

@@ -1,58 +1,36 @@
-"""真正的 function calling 工具循环：**模型自己选工具、自己决定调几次**。
+"""工具循环：模型自己选工具、自己决定调几次（ReAct 式的 function calling）。
 
-## 为什么必须有一个循环，而不是一串回调
+`run_tool_loop` 把 `spec.schema()` 作为 `tools=` 交给 LLM，读回 `tool_calls`，执行，
+按 `role="tool"` 回灌结果，再让模型决定下一步——**没有关键词匹配、没有硬编码的工具顺序**。
+`max_steps` 是 LLM 轮次的硬上限，达到上限仍未停下就留下 `answer` 为空的记录。
 
-仓库里已经有 `ToolSpec` / `ToolRegistry`（声明）与 `rag_tools` / `clinic.tools`（执行体），
-但控制流一直是写死的回调序列：代码决定第几步做什么，模型只在"抽症状""生成回答"两个点上
-被调用。那是一台**带图外壳的流水线**，不是 agent——模型没有机会说"我得先查号源再回答"，
-也没有机会在工具报错之后换一个工具重试。
+## 错误回灌而不是抛出
 
-`run_tool_loop` 补上这一层：把 `spec.schema()` 作为 `tools=` 交给 LLM，读回 `tool_calls`，
-执行，把结果按 `role="tool"` 回灌，再让模型决定下一步。**没有关键词匹配、没有硬编码的
-工具顺序**——哪天模型换了个工具名，这个文件一行都不用改。
+工具报错（名字不存在、参数不合法、业务失败）在循环里是**正常的一步**：错误文本作为该步的
+工具结果交回模型，它下一轮才有机会改参数或换工具。同一工具名连续两次不存在会记进 `notes`，
+这类记录通常意味着提示词或 schema 在误导模型，值得人去看一眼。
 
-## 为什么错误要"回灌"而不是抛出
+## side_effect 工具默认拒绝
 
-工具报错（名字不存在、参数不合法、业务失败）在 agent 循环里是**正常的一步**，不是异常
-终止：把错误文本当作该步的工具结果交回模型，它下一轮就有机会改参数、换工具、或换个说法
-回答。直接抛出等于剥夺它自我纠正的机会，也让整轮问答一起失败。代价是模型可能固执地重试
-同一个错名字，所以 `max_steps` 是硬上限，且同一工具名连续两次不存在会记进 `notes`
-（这类记录通常意味着提示词或 schema 在误导模型，值得人去看一眼）。
+`side_effect=True` 的工具在执行**之前**检查 `confirm` 回调；没有回调或回调不点头就拒绝执行，
+并把"需要用户确认"回灌给模型。安全属性：不可逆操作（如挂号占号）默认不执行。
 
-## 为什么 side_effect 工具没有 confirm 就拒绝执行
+## 历史与消息顺序
 
-"挂号"会真实占用号源且不可逆。循环在**执行之前**检查 `confirm` 回调；没有回调就拒绝执行，
-把"需要用户确认"回灌给模型，让它先去征求用户同意。这是安全属性：默认不执行不可逆操作，
-而不是默认执行、出了事再回滚。
+顺序固定为 `[system?] + history... + [本轮 user]`。`history` 只接受 `role` 为
+`user` / `assistant` 的条目，其余抛 `ValueError`（见 `_history_messages`）。
+循环**不做长度截断**，上下文窗口预算属于调用方的职责。
 
-## 多轮上下文（`history`）怎么进来
+## 预算闸门
 
-`history` 插在 **system 之后、本轮 `question` 之前**，顺序原样保留：
+循环每轮最多调 5 次模型，每次调用都是一个花钱点，所以预算由循环自己查：
+调用之前 `check()`、之后 `record(...)`。三条不变量：
 
-    [system?] + history... + [本轮 user]
-
-只接受 `role` 为 `user` / `assistant` 的条目，其余**直接报错**（见 `_history_messages`）。
-这个参数是补上一次真实缺陷加上的：调用方（`clinic_react.turn`）把 history 拼进了一个
-本地 `messages` 列表，却**从来没把它交给循环**——而 `messages` 被 `extend` 过，
-所以连 F841 都抓不到。表现是"`/chat` 多轮对话没有上下文"，而日志里看不出任何异常。
-
-## 预算（`budget=`）为什么必须由循环来查，而不是由 ToolCaller 自己记
-
-循环每轮最多调 5 次模型（`max_steps`），**每一次调用都是一个花钱点**。曾经的形态是
-`LiteLLMToolCaller` 只把成本累加到 `self.cost`、从不与预算比较，而
-`ClinicReactRuntime.turn()` 每轮新建一个 caller——累加值随对象一起丢掉。
-结果：`/chat` 路径的花费**没有任何上限**（缺陷记录见 SECURITY.md 的 S-2）。
-
-所以预算闸门放在这里：**每次调用模型之前 `budget.check()`，调用之后
-`budget.record(...)`**。三条不变量：
-
-- **检查在调用之前**：超限时那一次模型调用根本不会发生（不是"先花了再拒")。
-- **预算异常原样上抛**：`check()` 抛出的异常**不**走下面那个"LLM 是外部服务"
-  的 `except`——预算超限是**本地策略**决定，不是供应商故障，绝不能降级成一条
-  note 就算了（note 在 `/chat` 的响应里根本到不了调用方）。
-- **算不出价要如实上报**：`ToolCaller` 用 `cost_priced=False` 表示"这次算不出价"，
-  循环会把它记进 `turn.unpriced_calls` 与 `notes`，并交给 `budget.record(priced=False)`
-  保守计入。**"算不出价"绝不等于"免费"**。
+- **检查在调用之前**：超限时那一次模型调用根本不会发生。
+- **预算异常原样上抛**：`check()` 的异常不落进"LLM 是外部服务"的 `except`，
+  预算超限是本地策略决定，不是供应商故障。
+- **算不出价要如实上报**：`cost_priced=False` 会记进 `turn.unpriced_calls` 与 `notes`，
+  并以 `budget.record(priced=False)` 保守计入——"算不出价"绝不等于"免费"。
 """
 
 from __future__ import annotations
@@ -72,7 +50,7 @@ from kubedocs.observability import observe_llm_call
 TOOL_RESULT_LIMIT = 4000
 """单条工具结果回灌给模型的最大字符数。
 
-检索类工具一次能返回几十 KB，不截断就会把对话历史挤出上下文窗口。**错误文本不截断**：
+检索类工具一次能返回几十 KB，不截断就会把对话历史挤出上下文窗口；**错误文本不截断**，
 它本来很短，而被截掉的错误会让模型无从改起。
 """
 
@@ -81,15 +59,15 @@ ConfirmFn = Callable[["ToolCall"], bool]
 
 
 class SpendGuard(Protocol):
-    """预算闸门。循环**每次调用模型之前**问一次，调用之后记一次。
+    """预算闸门：循环**每次调用模型之前**问一次，之后记一次。
 
-    刻意只要求这两个方法、不 import `generate.DailyBudget`：工具循环是**域无关**的，
-    "预算是谁实现的、超限抛什么异常"属于调用方的策略（`DailyBudget` 就是它的一个实现）。
-    鸭子类型在这里也真的有用：单测可以传一个只数调用次数的假闸门。
+    刻意只要求 `check()` / `record()` 两个方法、不 import `generate.DailyBudget`：
+    工具循环是**域无关**的，预算由谁实现、超限抛什么异常属于调用方策略
+    （`DailyBudget` 是其中一个实现）。
 
     **可选**：实现里若还有 `reserve()`（返回上下文管理器），循环会优先用它——
-    它能在整个调用期间占住额度，避免并发请求一起冲过上限。
-    只有 `check()` 的实现仍然可用，只是并发下上限会松（见 `_budget_slot`）。
+    它能在整个调用期间占住额度，避免并发请求一起冲过上限；只有 `check()` 的实现
+    仍然可用，只是并发下上限会松（见 `_budget_slot`）。
     """
 
     def check(self, estimated_usd: float = 0.0) -> None:
@@ -103,9 +81,8 @@ class SpendGuard(Protocol):
 def _budget_slot(budget: SpendGuard | None) -> Iterator[None]:
     """为一次模型调用取得预算额度。
 
-    `DailyBudget` 有 `reserve()`：整个调用期间额度被占住，并发的请求不会一起越过上限。
-    只有 `check()` 的闸门退回原行为（检查一次），并发下上限会松——这一点写在
-    `DailyBudget` 的类文档里，不假装它被这两行解决了。
+    有 `reserve()` 的闸门在整个调用期间占住额度，并发的请求不会一起越过上限；
+    只有 `check()` 的闸门退回"检查一次"，并发下上限会松。
 
     **调用方必须把这个上下文管理器放在 `try` 之外**：超限不是"一次 LLM 调用失败"，
     不能落进循环那个"LLM 是外部服务"的 `except` 里变成一条 note 被吞掉。
@@ -125,11 +102,9 @@ def _budget_slot(budget: SpendGuard | None) -> Iterator[None]:
 HISTORY_ROLES = ("user", "assistant")
 """`history` 里**允许**出现的角色，只有这两种。
 
-- 不许 `system`：系统提示由调用方的 `system=` 参数独占。允许外部再塞一条，就会出现
-  两个会各自漂移的提示词源（`build_system_prompt` 的 docstring 里同一条理由）。
-- 不许 `tool`：`role="tool"` 的消息要靠 `tool_call_id` 与某条 `assistant.tool_calls`
-  配对。循环自己生成的那些在本轮内部才成立；外部塞进来的 `tool` 消息没有归属，
-  模型会读到一段不知道从哪来的结果——比不传更糟。
+- 不许 `system`：系统提示由调用方的 `system=` 参数独占；两个提示词源会各自漂移。
+- 不许 `tool`：`role="tool"` 的消息要靠 `tool_call_id` 与本轮某条 `assistant.tool_calls`
+  配对，外部塞进来的没有归属，模型会读到一段不知道从哪来的结果。
 """
 
 
@@ -161,8 +136,8 @@ class AgentTurn:
     unpriced_calls: int = 0
     """其中**算不出价**的调用次数（0 = 每次调用的价都拿到了）。
 
-    单独一个计数而不是只看 `cost_usd`：`cost_usd == 0.0` 既可能是"真免费"
-    也可能是"没算出来"，而这两者对预算的含义完全相反，必须能分开看。
+    单独一个计数而不是只看 `cost_usd`：`cost_usd == 0.0` 既可能是"真免费"，
+    也可能是"没算出来"，而这两者对预算的含义完全相反。
     """
     notes: list[str] = field(default_factory=list)
 
@@ -188,8 +163,7 @@ class ToolCaller(Protocol):
 
         可选键 `cost_usd`（float）与 `cost_priced`（bool）：
         **`cost_priced=False` 表示"这次调用的价算不出来"**（不是 0）。
-        实现方把算不出价报成 `cost_usd=0.0` 而不带这个标记，预算闸门就会被绕过——
-        那正是 `LiteLLMToolCaller` 曾经的缺陷。
+        把算不出价报成 `cost_usd=0.0` 而不带这个标记，预算闸门就会被绕过。
         """
 
 
@@ -216,11 +190,10 @@ def _history_messages(history: Sequence[dict[str, Any]] | None) -> list[dict[str
 
     非法形状一律 `ValueError`，**不静默丢弃也不静默改写**：丢一条 history 在日志里
     与"模型没记住"长得一模一样，是查不出来的那类 bug；把非法的 `role` 硬塞进请求
-    则会让供应商报一个与真实原因无关的错。两种静默都不可接受。
+    则会让供应商报一个与真实原因无关的错。
 
-    只保留 `role` / `content` 两个键（重建字典，而不是原样透传）：调用方在条目里多带的
-    `tool_calls` 之类字段，会与它自己并不存在的 `tool` 消息配不上对，构造一个"半个
-    工具调用"的上下文。
+    只保留 `role` / `content` 两个键（重建字典，而不是原样透传）：调用方多带的
+    `tool_calls` 之类字段配不上并不存在的 `tool` 消息，会构造出"半个工具调用"的上下文。
     """
     if not history:
         return []
@@ -255,28 +228,25 @@ def run_tool_loop(
     budget: SpendGuard | None = None,
     context: Mapping[str, Any] | None = None,
 ) -> AgentTurn:
-    """跑一轮"模型选工具 -> 执行 -> 回灌 -> 再选"的循环，直到模型给出最终回答。
+    """跑一轮"模型选工具 → 执行 → 回灌 → 再选"的循环，直到模型给出最终回答。
 
     `max_steps` 是 **LLM 轮次**的硬上限（不是工具执行次数）：一轮里模型可以要求调多个
-    工具，它们都算同一步。达到上限仍未停下——宁可留下"没答完"的记录，也不要无界地
-    烧预算。
-
-    `context` 是调用方提供的环境参数（如已认证的 `patient_id`），会注入到**声明了该
-    参数名**的工具执行体上。它不进工具 schema，所以模型无法伪造它——
-    `book_appointment` 记的是"谁在调用"，不是"模型说这是谁"。
+    工具，它们都算同一步。达到上限仍未停下时 `answer` 为空并记一条 note，
+    而不是无界地烧预算。
 
     `confirm` 只对 `side_effect=True` 的工具生效；为 `None` 时这类工具一律拒绝执行。
 
     `history` 是**此前几轮**的对话（`{"role", "content"}`，role 只允许 user/assistant），
-    会被插在 system 与本轮 `question` 之间。默认 `None` 的行为与没有这个参数时**逐字相同**：
-    只有 `system`（若有）与本轮 `question` 两条。这里**不做长度/字符截断**——上下文窗口
-    的预算属于调用方的职责（`api/app.py` 用 `[-8:]` 保留最近 4 轮），循环自己不猜一个
-    没验证过的截断策略。
+    会插在 system 与本轮 `question` 之间。本函数**不做长度/字符截断**——上下文窗口的
+    预算属于调用方的职责（`api/app.py` 用 `[-8:]` 保留最近 4 轮）。
 
-    `budget` 是成本闸门（见 `SpendGuard`）。默认 `None` = **不做预算检查**，与没有这个
-    参数时行为一致（打桩循环、离线自检不受影响）。给了它就一定生效：
-    **每次调用模型之前 `check()`、之后 `record()`**；`check()` 抛出的异常**原样上抛**
+    `budget` 为 `None` 表示不做预算检查（打桩循环、离线自检不受影响）；给了就一定生效：
+    每次调用模型之前 `check()`、之后 `record()`，且 `check()` 抛出的异常**原样上抛**
     （不被下面那个"外部服务失败"的 `except` 吞掉），因为预算超限是本地策略决定。
+
+    `context` 是调用方提供的环境参数（如已认证的 `patient_id`），只注入**签名里声明了
+    该参数名**的工具执行体。它不进工具 schema，所以模型无法伪造它——
+    `book_appointment` 记的是"谁在调用"，不是"模型说这是谁"。
     """
     if max_steps < 1:
         raise ValueError(f"max_steps 必须 >= 1（收到 {max_steps}）：0 步的循环没有意义")
@@ -294,8 +264,8 @@ def run_tool_loop(
     messages: list[dict[str, Any]] = []
     if system:
         messages.append({"role": "system", "content": system})
-    # 顺序固定为 system -> history（原序）-> 本轮 user。history 里的角色原样保留，
-    # 不做合并/重排：调用方给什么顺序就是什么顺序，改了就等于替它猜意图。
+    # 顺序固定为 system -> history（原序）-> 本轮 user；history 的角色与顺序原样保留，
+    # 不做合并/重排。
     messages.extend(_history_messages(history))
     messages.append({"role": "user", "content": question})
 
@@ -304,8 +274,8 @@ def run_tool_loop(
 
     for _ in range(max_steps):
         turn.steps += 1
-        # 预算闸门在 `try` **之外**：超限时这一次模型调用根本不发生，
-        # 且异常原样上抛给调用方，而不是变成一条 note（`/chat` 的响应里看不到 notes）。
+        # 预算闸门在 `try` **之外**：超限时这一次模型调用根本不发生，且异常原样上抛给
+        # 调用方，而不是变成一条 note（`/chat` 的响应里看不到 notes）。
         # 有 `reserve()` 的闸门会在整个调用期间占住额度，见 `_budget_slot`。
         with _budget_slot(budget):
             try:
@@ -328,8 +298,8 @@ def run_tool_loop(
             cost, priced = _cost_of(response)
             turn.cost_usd += cost
             if budget is not None:
-                # 账本写不进去（磁盘满/权限）时异常同样上抛：与 `/ask` 路径一致，
-                # 不为"保住这次回答"而把一次真实花费记丢。
+                # 账本写不进去（磁盘满/权限）时异常同样上抛：不为"保住这次回答"而把一次
+                # 真实花费记丢。
                 budget.record(cost, priced=priced)
             # 指标与账本分开记：账本是事实来源，指标是可被抓取的视图。
             # 放在 `if budget` 之外——即使没有闸门，调用次数也应当被观测到。
@@ -399,11 +369,11 @@ def _execute(
 ) -> ToolCall:
     """执行一次已解析的调用，**任何失败都变成 `ToolCall.error`**。
 
-    这里刻意不抛异常：一次工具失败的语义是"这一步没成功"，不是"整轮失败"。只有把失败文本
+    这里刻意不抛异常：一次工具失败的语义是"这一步没成功"，不是"整轮失败"；只有把失败文本
     回灌给模型，它才有机会改参数或换工具。
 
     `context` 是**调用方**（不是模型）提供的环境参数，例如已认证的 `patient_id`。
-    它单独走一条路、不写进工具 schema：模型不该有机会伪造"这是谁"。
+    它单独走一条路、不写进工具 schema，模型没有机会伪造"这是谁"。
     """
     if parsed.parse_error:
         return ToolCall(name=parsed.name, arguments=parsed.arguments, error=parsed.parse_error)
@@ -446,10 +416,9 @@ def _execute(
 
 
 def _lookup(name: str, registry: dict[str, ToolSpec]) -> ToolSpec:
-    """按名取工具；取不到抛 `ToolError`（与 `ToolRegistry.get` 同一句话术）。
+    """按名取工具；取不到抛 `ToolError`。
 
-    错误信息里带上可用工具列表：模型下一轮才有可能改成正确的名字。只说"不存在"，
-    等于让它猜。
+    错误信息里带上可用工具列表：模型下一轮才有可能改成正确的名字，只说"不存在"等于让它猜。
     """
     spec = registry.get(name)
     if spec is None:
@@ -489,14 +458,14 @@ def _confirm_side_effect(
 def _invoke(spec: ToolSpec, validated: BaseModel, context: Mapping[str, Any] | None = None) -> Any:
     """按执行体的签名，把**校验后的参数**交给它。
 
-    仓库里有两种执行体形状，两种都要支持：`rag_tools` 是 `handler(params)`（收一个 pydantic
-    模型），`clinic.tools` 是 `handler(**kwargs)`。用签名区分，而不是要求调用方再声明一次——
-    "声明的东西就是能跑的东西"这条不变量，不该因为执行体的形状不同而破功。
+    仓库里有两种执行体形状，两种都要支持：`rag_tools` 是 `handler(params)`（收一个
+    pydantic 模型），`clinic.tools` 是 `handler(**kwargs)`；用签名区分，而不是要求调用方
+    再声明一次。
 
-    注意三件事：非法参数在上一道闸门就被拦下了；到这里交给执行体的是 `model_dump()` 的结果
-    （默认值补齐、类型已 coerce），不是模型给的原始 JSON；`context` 里的键**只注入执行体
-    签名里确实存在的名字**（多塞一个不认识的关键字会把 handler 打崩），且**模型显式给了就
-    以模型给的为准**（那个值已经过 pydantic 校验）。
+    到这里交给执行体的是 `model_dump()` 的结果（默认值补齐、类型已 coerce），不是模型给的
+    原始 JSON——非法参数在上一道闸门就被拦下了。`context` 里的键**只注入执行体签名里确实
+    存在的名字**（多塞一个不认识的关键字会把 handler 打崩），且**模型显式给了就以模型给的
+    为准**（那个值已经过 pydantic 校验）。
     """
     handler = spec.handler
     if handler is None:  # 只为类型收窄；真正拦住"只声明不实现"的是调用方
@@ -517,8 +486,9 @@ def _invoke(spec: ToolSpec, validated: BaseModel, context: Mapping[str, Any] | N
 def _takes_params_model(signature: inspect.Signature) -> bool:
     """判断执行体是不是 `handler(params: SomeModel)` 形状。
 
-    按名字（`params`）判断是主力手段：本仓库的模块都开了 `from __future__ import annotations`，
-    注解在运行时是**字符串**，靠 `issubclass` 认不出来。类型注解那条只是给没开 future 的模块兜底。
+    按名字（`params` / `p`）判断是主力手段：本仓库的模块都开了
+    `from __future__ import annotations`，注解在运行时是**字符串**，靠 `issubclass`
+    认不出来；类型注解那条只是给没开 future 的模块兜底。
     """
     values = list(signature.parameters.values())
     if len(values) != 1:
@@ -616,12 +586,11 @@ def _as_text(value: object) -> str:
 def _as_float(value: object) -> float:
     """把可选的 `cost_usd` 安全地转成 float。
 
-    供应商适配器不一定上报成本，上报了也不一定给对，还可能给成 JSON 字符串（`"0.0012"`）。
-    能转就转、转不动按 0 处理：成本统计不该因为一个脏字段把整轮问答搞崩，也不该悄悄丢掉
-    一个本来能用的数字。
+    供应商适配器不一定上报成本，上报了也可能给成 JSON 字符串（`"0.0012"`）；能转就转、
+    转不动按 0 处理——成本统计不该因为一个脏字段把整轮问答搞崩。
 
-    注意"转不动按 0"**不等于**"当成免费"：是不是这次真的拿到了价，由 `cost_priced`
-    单独表达（见 `_cost_of`）。数字兜底与语义兜底是两件事。
+    注意"转不动按 0"**不等于**"当成免费"：这次是不是真的拿到了价，由 `cost_priced`
+    单独表达（见 `_cost_of`）。
     """
     if isinstance(value, bool) or not isinstance(value, (int, float, str)):
         return 0.0
@@ -634,9 +603,9 @@ def _as_float(value: object) -> float:
 def _cost_of(response: dict[str, Any]) -> tuple[float, bool]:
     """从响应里取 `(cost_usd, cost_priced)`。
 
-    只有调用方**显式**报 `cost_priced=False` 才算"算不出价"。字段缺失按已定价处理：
-    打桩实现与第三方 `ToolCaller` 只会给 `cost_usd`（甚至什么都不给），
-    把"没这个字段"当成"未定价"会把它们一律按保守上限计费。
+    只有调用方**显式**报 `cost_priced=False` 才算"算不出价"；字段缺失按已定价处理——
+    打桩实现与第三方 `ToolCaller` 往往只给 `cost_usd`（甚至什么都不给），把"没这个字段"
+    当成"未定价"会把它们一律按保守上限计费。
     """
     priced = response.get("cost_priced", True) is not False
     return _as_float(response.get("cost_usd")), priced

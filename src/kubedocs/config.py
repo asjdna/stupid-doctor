@@ -1,9 +1,8 @@
 """集中配置：环境变量 -> 类型化 Settings。
 
-为什么用 pydantic-settings 而不是 `os.getenv` 分散读取：
-1. 启动即校验（缺 key、维度写错、URL 格式错都在启动时报，而不是在第一次请求时炸）；
-2. 单一真相源——想知道"这个服务有哪些可调项"只看这一个文件；
-3. `.env` 与真实环境变量同源，容器里注入 env 即可，不需要改代码。
+用 pydantic-settings 而不是散落的 `os.getenv`，为的是三件事：启动即校验（缺 key、
+维度、URL 格式错都在启动时报，而不是第一次请求时炸）、可调项只有一个真相源（就是
+本文件）、`.env` 与真实环境变量同源（容器里注入 env 即可，不必改代码）。
 """
 
 from __future__ import annotations
@@ -20,25 +19,14 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 def repo_root() -> Path:
     """仓库根目录（`src/kubedocs/config.py` -> 上溯 3 层）。
 
-    存在的意义：默认数据路径必须**锚定在代码位置上**，不能依赖进程 cwd。
-    否则从别处调 CLI（或 pytest 换了 rootdir）时，`data/...` 会解析到一个
-    空目录，"索引里明明有数据却搜不到"这种事故排查起来极贵。
+    默认数据路径锚定在代码位置上而不是进程 cwd，否则从别处调 CLI（或 pytest 换了
+    rootdir）时 `data/...` 会解析到一个空目录，表现为"索引里明明有数据却搜不到"。
 
-    ## 容器里必须覆盖它（`KUBEDOCS_REPO_ROOT`）
-
-    上溯三层只在"源码布局"下成立：`<repo>/src/kubedocs/config.py`。
-    而 `pip install .` 会把包装进 site-packages，此时
-    `__file__` 是 `/opt/venv/lib/python3.10/site-packages/kubedocs/config.py`，
-    上溯三层变成 `/opt/venv/lib/python3.10` ⇒ `data/` 指向
-    `/opt/venv/lib/python3.10/data`（不存在、也写不进去）。
-
-    实测后果（`docker compose up` 里真实发生）：`/healthz` 仍然返回 200
-    ——因为"索引不可用"按设计不算存活失败——但 `n_chunks` 是 0、
-    `/search` 降级为"索引不可用：PermissionError: '/opt/venv/lib/python3.10/data'"。
-    **服务看着是绿的，实际什么也搜不到。**
-
-    所以容器里显式给出挂载点即可（`docker-compose.yml` 里设 `KUBEDOCS_REPO_ROOT=/app`）。
-    本地与 CI 不设它，行为与以前**逐字相同**。
+    上溯三层只在源码布局下成立。`pip install .` 会把包装进 site-packages，
+    此时根目录落到 site-packages 内部，`data/` 指向一个不存在也写不进去的位置，
+    服务仍能启动但 `n_chunks` 是 0、检索全部降级为"索引不可用"。
+    容器里用 `KUBEDOCS_REPO_ROOT` 显式指向挂载点（如 `/app`）即可覆盖；
+    本地与 CI 不设它，走源码布局。
     """
     override = os.environ.get("KUBEDOCS_REPO_ROOT", "").strip()
     if override:
@@ -52,17 +40,12 @@ def env_file_path() -> Path:
 
 
 def load_env_file(path: Path | None = None) -> list[str]:
-    """把 `.env` 里的键**导出到 `os.environ`**，返回本次新增的键名。
+    """把 `.env` 里的键导出到 `os.environ`，返回本次新增的键名。
 
-    为什么必须显式做这一步（而不是只靠 pydantic-settings 的 `env_file`）：
-
-    pydantic-settings 只把 `.env` 的值填进 `Settings` 对象，**不会写进 `os.environ`**。
-    而第三方库（LiteLLM、huggingface_hub 等）以及本项目自己的 `has_api_key()`
-    读的都是 `os.environ`。结果就是 `cp .env.example .env` 填好密钥之后，
-    模型调用仍然报"未配置密钥"——README 描述的那套流程**静默失效**。
-
-    这个缺陷正是"回答层从未用真实 LLM 跑过"掩盖住的：所有单测都打桩，
-    打桩路径不经过密钥读取。
+    pydantic-settings 只把 `.env` 的值填进 `Settings` 对象，不会写进 `os.environ`；
+    而 LiteLLM、huggingface_hub 等第三方库以及本项目自己的 `has_api_key()` 读的都是
+    `os.environ`。少了这一步，`cp .env.example .env` 填好密钥后模型调用仍会报
+    "未配置密钥"。
 
     `override=False`：真实环境变量优先于 `.env`，容器里注入的密钥不会被文件覆盖。
     """
@@ -95,72 +78,53 @@ class Settings(BaseSettings):
     )
 
     # ---------- 应用 ----------
-    # 这里曾有一个 `env`（`KUBEDOCS_ENV`，Literal: local/ci/prod）字段与派生属性 `is_prod`，
-    # 两者都是**假开关**：全仓没有任何一行代码读它们，只做声明与校验，却让 CI 里的
-    # `KUBEDOCS_ENV: ci` 看起来在起作用。已删除（连同 `.env.example` 与 `ci.yml` 里的设置）。
-    # 纪律：配置项要**先接上真实分支**再声明。需要环境相关行为时，写清楚哪个分支读它、
-    # 怎么验证；在那之前不要新增 is_prod / is_ci / env 之类的派生字段——假开关比缺配置更糟。
     log_level: str = "INFO"
     api_port: int = 8080
 
     # ---------- 存储 ----------
-    # 同一 Store 协议下的四种实现（选型理由与实测数字见 docs/adr/0004 与 0005）：
+    # 同一 Store 协议下的四种实现（环境变量 KUBEDOCS_STORE，前缀由 env_prefix 自动加）：
     #   sqlite-vec : 默认。SQLite（FTS5 全文）+ sqlite-vec 向量索引，零外部进程/零镜像/零网络
-    #   sqlite     : 旧实现（numpy 暴力内积 + .npy 侧车矩阵），保留作对照与回退
-    #   pgvector   : 生产实现（Postgres + pgvector HNSW），需要 database_url 可达
-    #   milvus     : 可选实现（SQLite FTS5 全文 + Milvus Lite 本地文件里的 HNSW），无需外部服务
-    # 环境变量名是 KUBEDOCS_STORE（env_prefix 自动加前缀）。
-    # 非法取值**直接报错**，绝不静默回退到某个默认实现：静默回退会让"我明明切到
-    # pgvector 了为什么数据还是旧的"变成一个没有任何日志的谜。
+    #   sqlite     : numpy 暴力内积 + .npy 侧车矩阵，作对照与回退
+    #   pgvector   : Postgres + pgvector HNSW，需要 database_url 可达
+    #   milvus     : SQLite FTS5 全文 + Milvus Lite 本地文件里的 HNSW，无需外部服务
+    # 非法取值直接报错，绝不静默回退：静默回退会让"我明明切到 pgvector 了、
+    # 为什么数据还是旧的"变成一个没有任何日志的谜。
     store: Literal["sqlite-vec", "sqlite", "pgvector", "milvus"] = "sqlite-vec"
     database_url: str = "postgresql://kubedocs:kubedocs@127.0.0.1:5432/kubedocs"
-    # 这里曾有 `redis_url`（以及 pyproject 的 `redis` 依赖、compose 的 redis 服务）：
-    # 全仓没有任何一行代码用它，属于"假开关"，已删除。要加缓存/限流时再连真实分支。
     db_pool_min: int = 1
     db_pool_max: int = 10
-    # pgvector HNSW 建索引参数（理由见 ADR-0004：m 决定图的出边数，
-    # ef_construction 决定建图时的候选队列，两者都只影响召回率与建索引耗时）。
+    # pgvector HNSW 建索引参数：m 是图的出边数，ef_construction 是建图时的候选队列，
+    # 两者都只影响召回率与建索引耗时，改完必须重建索引。
     pg_hnsw_m: int = Field(default=16, ge=2, le=100)
     pg_hnsw_ef_construction: int = Field(default=64, ge=4, le=1000)
-    # 查询期候选队列：越大召回越高、越慢。**只影响查询，不需要重建索引**。
-    #
-    # 默认 200 是被本机实测逼出来的（2026-10-09，18861 块真实索引、50 条金标 ×3 轮，
-    # 同轮对照、原始数据在 `data/eval/store_bench/latency_pgvector_ef*.json`）：
-    #   ef=100 → top-10 与 numpy 精确检索**逐位相同** 36/50，平均集合重合 0.9420，dense p50 4.29ms
-    #   ef=200 → 43/50，0.9800，p50 5.79ms（多召回 7 条查询的代价是 +1.5ms）
-    #   ef=400 → 44/50，0.9840，p50 7.24ms（再多 1 条、再贵 1.45ms，**收益已递减**）
-    # 归因与"为什么 pgvector 的混合检索质量仍低于冻结基线"是两件事，见 ADR-0004 第九节：
-    # 那条落差来自全文路（Postgres 核心没有 BM25），与 ef_search 无关。
+    # 查询期候选队列：越大召回越高、越慢，只影响查询，不需要重建索引。
+    # 默认 200 的由来：在 1.8 万块的真实索引上，ef=100 时 top-10 与精确检索的平均集合
+    # 重合是 0.942，ef=200 升到 0.980，ef=400 只到 0.984 而延迟继续增长——收益已递减。
     pg_hnsw_ef_search: int = Field(default=200, ge=1, le=1000)
-    # SQLite 页缓存上限（KiB，sqlite-vec 后端）。
-    #
-    # 这个参数是被实测逼出来的，不是抄来的：18861×384 的向量表 29MB，而 SQLite 默认
-    # 页缓存只有 2MB，于是每次 KNN 都在反复穿透页缓存读盘——实测 KNN p50
-    # 默认 66~147ms，调到 128MB 后 **12ms**（同一份数据、同一台机器）。
-    # 只影响本地默认后端；SQLite 按需分配页面，给小索引设大上限不会白占内存。
+    # SQLite 页缓存上限（KiB，sqlite-vec 后端）。默认 128MB：1.8 万块 × 384 维的向量表
+    # 约 29MB，而 SQLite 默认页缓存只有 2MB，KNN 会反复穿透页缓存读盘（p50 从百毫秒
+    # 量级降到 12ms）。SQLite 按需分配页面，给小索引设大上限不会白占内存。
     sqlite_cache_kib: int = Field(default=131072, ge=2000)
     # Milvus Lite 数据文件的**位置**（本地文件模式：`MilvusClient("<path>.db")`，
     # 不需要任何外部服务/容器）。留空 = `<index_dir>/<domain>/milvus.db`，
-    # 与 `sqlite_path` 完全同一套"按域分目录"的组织方式：两个域的语料、维度、
-    # 归一化方式都可能不同，共用一个数据目录只会让"切域时忘了切集合"无从发现。
+    # 与 `sqlite_path` 同属"按域分目录"的组织方式：两个域的语料、维度与归一化方式
+    # 都可能不同，共用一个数据目录只会让"切域时忘了切集合"无从发现。
     # 相对路径锚定仓库根（与 index_dir 一致），绝对路径原样使用。
-    # **必须以 .db 结尾**：milvus-lite 只认以 .db 结尾的本地数据目录或 unix/http/tcp
-    # 形式的远端地址，别的一律在打开时抛 `uri ... is illegal`，所以本实现在构造时先自己
-    # 挡一道并给人话提示。注意 `.db` 结尾的路径在 milvus-lite 里是**目录**（实测：里面有
-    # LOCK / manifest.json / wal / parquet 段文件），且**同一目录只允许一个进程打开**。
+    # **必须以 .db 结尾**，milvus-lite 只认这种本地数据路径或 unix/http/tcp 形式的
+    # 远端地址，否则打开时抛 `uri ... is illegal`；本实现在构造时先自己挡一道并给人话提示。
+    # 该路径在 milvus-lite 眼里是**目录**（内含 LOCK / manifest.json / wal / parquet 段
+    # 文件），且**同一目录只允许一个进程打开**。
     milvus_db: str = ""
-    # Milvus 侧 HNSW 的建索引参数（理由见 ADR-0005）。M / efConstruction
-    # **只能重建索引才能改**：本实现把实际用到的取值记进索引元信息，
-    # 配置与索引不一致时**直接报错**——"你以为调了、其实索引还是老的"正是本项目禁止的静默降级。
+    # Milvus 侧 HNSW 的建索引参数。M / efConstruction **只能重建索引才能改**：
+    # 本实现把实际用到的取值记进索引元信息，配置与索引不一致时**直接报错**，
+    # 避免"你以为调了、其实索引还是老的"。
     milvus_hnsw_m: int = Field(default=16, ge=2, le=2048)
     milvus_hnsw_ef_construction: int = Field(default=200, ge=8, le=4096)
     # 查询期候选队列（HNSW 的 `ef`）：越大召回越高、越慢，**不需要重建索引**。
-    # 取值与实测召回见 ADR-0005 第五节。
     milvus_hnsw_ef_search: int = Field(default=128, ge=1, le=4096)
     # 度量。默认 COSINE，与 sqlite-vec（`distance_metric=cosine`）和 pgvector
     # （`vector_cosine_ops`）一致；向量已归一化时 IP 与 COSINE 严格同序，
-    # 保留这个开关只是为了让"度量到底有没有影响"可以在真实数据上 A/B，
-    # 而不是让它变成一个没人注意的隐性变量。
+    # 保留这个开关是为了让"度量到底有没有影响"能在真实数据上 A/B。
     milvus_metric: Literal["COSINE", "IP"] = "COSINE"
     # 索引与语料的根目录；实际索引在 <index_dir>/<domain>/ 下，每个域一份、互不干扰。
     index_dir: str = "data/index"
@@ -183,23 +147,16 @@ class Settings(BaseSettings):
     # bge-small-en-v1.5 官方说明 v1.5 起可省略 query 指令；保留开关以便做 A/B。
     query_instruction: str = ""
     # 模型下载源。留空 = 走 HuggingFace 官方；企业内网/受限网络下指向镜像站。
-    # 为什么要做成本项目配置而不是让用户自己 export：模型能否下到，决定了
-    # "第一次运行能不能起来"，属于部署配置的一部分，应当与其它配置同源可查。
+    # 做成本项目配置而不是让用户自己 export，是因为"模型能否下到"决定第一次运行能不能起来。
     hf_endpoint: str = ""
-    # 模型已缓存时置 True，跳过一切联网校验。
-    # 不是微调：在无法访问 huggingface.co 的网络里，联网校验不是"慢"，而是
-    # **挂死到超时**（实测载入一个已缓存模型 >10 分钟无返回）。
+    # 模型已缓存时置 True，跳过一切联网校验。在无法访问 huggingface.co 的网络里，
+    # 联网校验不是"慢"而是**挂死到超时**（载入一个已缓存模型可超过 10 分钟无返回）。
     hf_offline: bool = False
 
     # ---------- 会话状态 ----------
-    # clinic 图的 checkpoint 落盘路径。**留空 = 内存态**（与以前逐字相同的行为）。
-    #
-    # 为什么要有它：图状态原先只在 `InMemorySaver` 里，**进程重启就把问到一半的会话丢了**。
-    # 参考项目（`Agent_In_Action` 的 LangGraph 章节）演示的"外部记忆"正是这个。
-    # 我们的 `build_clinic_graph` 早就留了 `checkpointer` 参数，只是没人传。
-    #
-    # 为什么不是布尔开关：路径本身就是它需要的信息，"开关 + 另一处写路径"会让
-    # 两处状态可能不一致。留空即关闭，配了就用——一个字段表达一件事。
+    # clinic 图的 checkpoint 落盘路径。**留空 = 内存态**，即会话状态只活在进程内、
+    # 重启就丢。用路径而不是布尔开关：路径本身就是它需要的信息，一个字段表达一件事，
+    # 也避免"开关 + 另一处写路径"两处状态不一致。
     clinic_state_db: str = ""
 
     # ---------- 检索 ----------
@@ -225,38 +182,27 @@ class Settings(BaseSettings):
     llm_fallbacks: str = ""
     llm_temperature: float = Field(default=0.1, ge=0.0, le=2.0)
     llm_max_tokens: int = Field(default=2000, ge=1)
-    # 从 800 提到 2000 是**实测评测逼出来的**（2026-10-15，见
-    # `scripts/eval_medical_cot.py`）：临床主判要求模型回一个结构化契约 JSON
-    # （科室 + 病症排序 + 检查 + 用药 + 引用 + 白话总结），中文很吃 token。
-    # 800 时 20 条里有 **7 条被截断**（raw 长度恰好卡在 1573~1718），
-    # 而截断的表现是"模型输出不符合契约"——**一个会把人引向错误方向的报错**：
-    # 看起来像模型不听话，实际是我方给的额度不够。
-    # `max_tokens` 是上限而非目标，正常回答写不到就按实际计费，所以调高它
-    # 只增加"最坏情况的上界"，不增加日常成本。
+    # 临床主判要求模型回一个结构化契约 JSON（科室 + 病症排序 + 检查 + 用药 + 引用 +
+    # 白话总结），中文很吃 token：额度 800 时 20 条里有 7 条被截断，而截断的表现是
+    # "模型输出不符合契约"，会被误读成模型不听话。`max_tokens` 是上限而非目标，
+    # 调高它只抬高最坏情况的上界，不增加日常成本。
     llm_timeout: float = Field(default=30.0, gt=0)
     llm_max_retries: int = Field(default=2, ge=0)
     llm_daily_budget_usd: float = Field(default=5.0, ge=0.0)
     # litellm **算不出价**（价格表里没有这个模型）时，每次调用按这个金额保守计入
-    # 当日预算。默认**不假设免费**：按 0 记会让预算闸门永远拦不住（缺陷记录见
-    # generate.UNPRICED_CALL_FALLBACK_USD 的说明，0.25 的取值推导也在那里）。
+    # 当日预算。默认**不假设免费**：按 0 记会让预算闸门永远拦不住。
     # 真跑本地免费模型（例如 ollama）时可以置 0：那种情况下 litellm 会正常返回
     # 0.0（`cost_priced=True`），本来就不走这条保守路径，所以一般不需要改这里。
     llm_unpriced_call_usd: float = Field(default=0.25, ge=0.0)
 
     # ---------- 可观测 ----------
-    # 这三个字段**都有真实分支**（见 `observability.py`），不是声明了没人读的开关：
+    # 这三个字段都有真实分支（见 `observability.py`）：
     #   · log_level     -> configure_logging() 设 root logger 级别
     #   · otel_enable   -> setup_tracing() 建 TracerProvider
     #   · otel_exporter -> console / otlp 分流（`none` = 不装 processor）
-    # `otel_enable` **默认关**：console 导出器会往 stdout 打 span，在测试与库场景里
-    # 是噪声（实测 pytest 下会因为 capsys 关掉 stdout 而抛
-    # `ValueError: I/O operation on closed file`）。要观测时显式打开——
-    # 打开后它真的导出，而不是像此前那样"设了没反应"。
+    # `otel_enable` 默认关：console 导出器会往 stdout 打 span，在测试与库场景里是噪声
+    # （pytest 下 capsys 关掉 stdout 后会抛 `ValueError: I/O operation on closed file`）。
     # /metrics 与这个开关无关：Prometheus 指标始终可用。
-    #
-    # 此前这里还并排着 `langfuse_host/public_key/secret_key` 与存储段的 `redis_url`，
-    # 四个都没有任何读者——正是本文件另一处注释里明令禁止的"假开关"，
-    # 已删除（连同 `redis` 依赖与 compose 里没人连的 redis 服务）。
     otel_enable: bool = False
     otel_exporter: Literal["console", "otlp", "none"] = "console"
 
@@ -267,7 +213,7 @@ class Settings(BaseSettings):
     @field_validator("chunk_overlap_chars")
     @classmethod
     def _overlap_lt_max(cls, v: int, info: ValidationInfo) -> int:
-        # 允许相等（等于重叠不合法会死循环），但必须严格小于 max
+        # 重叠必须严格小于块长，否则切块无法前进
         mx = (info.data or {}).get("chunk_max_chars")
         if mx is not None and v >= mx:
             raise ValueError(f"chunk_overlap_chars({v}) 必须小于 chunk_max_chars({mx})")
@@ -305,15 +251,11 @@ class Settings(BaseSettings):
     def llm_spend_path(self) -> Path:
         """LLM 花费账本的位置：**全局一份**，不在域目录下。
 
-        为什么不做成 `<index_dir>/<domain>/llm_spend.json`（曾经就是这样）：
-        预算是"这份部署今天还能花多少"的约束，与"用哪个域的语料"无关。
-        按域分账有两个实测后果，都真实发生过：
-        1. 匿名调用方只要在请求里切换 `domain`，就能把日上限翻成 `域数 × 预算`；
-        2. clinic 会话的花费被记进 **k8s_docs** 目录（`/chat` 用的是应用默认域的
-           `index_path`），审计 `data/index/clinic/` 的人看不到那笔钱。
-
-        所以账本锚在 `index_root` 上，路径只有一个真相源，两个 LLM 路径
-        （`generate.Answerer` 与 `agent/clinic_react`）都从这里取。
+        预算是"这份部署今天还能花多少"的约束，与用哪个域的语料无关。按域分账会让
+        匿名调用方只要在请求里切换 `domain`，就能把日上限翻成"域数 × 预算"；
+        也会把 clinic 会话的花费记进应用默认域的目录，审计那个域的人看不到这笔钱。
+        账本因此锚在 `index_root` 上，两个 LLM 路径（`generate.Answerer` 与
+        `agent/clinic_react`）都从这里取。
         """
         return self.index_root / "llm_spend.json"
 
@@ -321,10 +263,9 @@ class Settings(BaseSettings):
     def effective_embedding_model(self) -> str:
         """真正决定向量空间的那个标识，写进索引元信息并参与闸门比较。
 
-        为什么不能直接用 `embedding_model`：`hashing` 提供商并不会加载
-        `BAAI/bge-small-en-v1.5`，但配置里的名字仍是它。若索引只记配置名，
-        一次 hashing 运行与一次真实模型运行会**记成同一个模型**，
-        闸门就会拿两种完全不同质量的运行互相比较——这是静默的错误结论来源。
+        `hashing` 提供商并不会加载 `embedding_model` 里写的那个模型，所以这里换成
+        `hashing-<dim>`。若索引只记配置名，一次 hashing 运行与一次真实模型运行会被
+        记成同一个模型，闸门就会拿两种质量完全不同的运行互相比较。
         """
         if self.embedding_provider == "hashing":
             return f"hashing-{self.embedding_dim}"
@@ -342,9 +283,9 @@ class Settings(BaseSettings):
     def milvus_path(self) -> Path:
         """Milvus（milvus-lite 本地文件模式）的数据目录。
 
-        默认与 `sqlite_path` 同目录：索引的"位置"按域组织，换域就换一整套文件，
-        不会出现"切了域但集合名没切"这类事故。`KUBEDOCS_MILVUS_DB` 可覆盖。
-        注意它虽然在路径上以 `.db` 结尾，在 milvus-lite 眼里是**目录**（见 `milvus_db` 的注释）。
+        默认与 `sqlite_path` 同目录：索引的位置按域组织，换域就换一整套文件，
+        不会出现"切了域但集合名没切"。`KUBEDOCS_MILVUS_DB` 可覆盖。
+        注意它在路径上以 `.db` 结尾，在 milvus-lite 眼里却是**目录**。
         """
         if self.milvus_db:
             return self._resolve(self.milvus_db)

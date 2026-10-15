@@ -1,66 +1,41 @@
 """可选后端：SQLite（FTS5 全文） + **Milvus Lite**（本地文件里的 HNSW 向量索引）。
 
-## 这个实现与另外三个的关系
+全文路完全复用 `SqliteStore`：同一份 FTS5 外内容表、同一段 `keyword_search`、
+同一组 BM25 列权重，因此 `sqlite` / `sqlite-vec` / `milvus` 三个后端的全文结果
+逐字节相同。混合检索 = FTS5（jieba 分词）+ 稠密向量 + RRF，所以后端之间的差异
+只可能来自向量路。`pgvector` 则是 Postgres + 服务端 HNSW。
 
-| | `sqlite` | `sqlite-vec`（默认） | `milvus`（本文件） | `pgvector` |
-|---|---|---|---|---|
-| 全文 | SQLite **FTS5** + `bm25()` | 同左（**同一份索引、同一段代码**） | 同左（**同一份索引、同一段代码**） | `tsvector` + GIN + `ts_rank` |
-| 向量 | numpy 暴力内积 | `vec0` 虚表（**C 实现的穷举扫描**，不是 ANN） | **HNSW**（milvus-lite 内置 knowhere 索引） | HNSW（服务端） |
-| 向量存放 | `.npy` 侧车矩阵 | 与块行**同一事务** | **另一个数据目录**（milvus-lite 的 `<...>.db` 目录），与 SQLite 不同事务 | 与块行同一行 |
-| 需要外部服务 | 否 | 否 | 否（本地文件模式） | 是（Postgres） |
-| 多进程 | 单写多读（WAL） | 单写多读（WAL） | **独占**：同一数据目录同一时刻只允许一个进程打开 | 多实例并发 |
+**向量与块行不在同一个事务里**：Milvus Lite 是另一个数据目录、另一个引擎，没有
+跨引擎事务可用。本实现用显式排序 + 显式检测代替假设：
 
-**为什么继承 `SqliteStore` 而不是另起一套**：与 `SqliteVecStore` 同一个理由——
-这两个后端之间**唯一的变量是向量路**。全文路共用 FTS5 外内容表、同一段
-`keyword_search`、同一组 BM25 列权重，因此 `sqlite` / `sqlite-vec` / `milvus`
-三者的全文结果**逐字节相同**；指标若有变化，只可能来自向量路。这对"换后端到底
-改了什么"的归因是决定性的——混合检索 = FTS5(带 jieba 分词) + 稠密向量 + RRF，
-评测数字就建立在这条路上，全文路一动，历史数字全部失去可比性。
-
-## 唯一真正的代价：向量与块行**不再同事务**
-
-`sqlite-vec` 把向量写进同一个 SQLite 事务，所以不存在中间态。Milvus Lite 是**另一个
-数据目录、另一个引擎**，没有跨引擎事务可用。本实现的处理方式是**显式排序 + 显式检测**，
-而不是假装它不存在：
-
-1. `upsert_docs` 里向量写 Milvus 发生在 SQLite **提交之前**（`_index_chunk_vectors`
-   这个钩子就在事务里）。因此 **Milvus 写失败 → 抛错 → SQLite 事务回滚**，
-   不会留下"块写了、向量没写"的中间态。这是刻意选的顺序，不是碰巧。
-2. 反过来（Milvus 已写、SQLite 提交失败）会留下**孤儿向量**。这一侧无法用事务消掉，
-   所以改为**检测**：`_refresh_vec_ready()` 在每次打开与每次 `finalize()` 核对
-   "块表行数 vs 向量行数"，不一致就**拒绝向量检索**（抛 `StoreError` 并给修复命令），
-   绝不静默少召回；`verify_vec()` 另外做一次**主键集合**级核对（连"行数相同但内容错位"
-   也能看出来），供 `cli stats --verify` 显式调用。
-3. 已知无法检测的残留窗口：整批 Milvus 写成功、SQLite 提交失败、且**两次写入的
-   chunk_id 完全相同**（改写同一篇文档）——此时行数与主键集合都相同，只有向量内容是旧的。
+1. `_index_chunk_vectors` 在 SQLite 事务提交**之前**写 Milvus，因此 Milvus 写失败
+   会抛错并回滚 SQLite，不会留下"块写了、向量没写"的中间态。
+2. 反向情形（Milvus 已写、SQLite 提交失败）会留下孤儿向量，无法用事务消掉，改为
+   **检测**：`_refresh_vec_ready()` 在打开时与每次 `finalize()` 核对"块表行数 vs
+   向量行数"，不一致就拒绝向量检索（抛 `StoreError` 并给出修复命令），绝不静默少召回；
+   `verify_vec()` 另做一次**主键集合**级核对（连"行数相同但内容错位"也能看出来），
+   由 `cli stats --verify` 显式调用。
+3. 已知无法检测的窗口：整批 Milvus 写成功、SQLite 提交失败、且两次写入的 chunk_id
+   完全相同（改写同一篇文档）——此时行数与主键集合都相同，只有向量内容是旧的。
    处理方式是 `scripts/migrate_to_milvus.py` 重灌或 `ingest --rebuild`。
-   把这条写在这里，是因为"没法用事务保证"和"我们假装它没问题"是两种不同的东西。
 
-## HNSW 参数与度量
+HNSW 与度量：`M = 16`、`efConstruction = 200` 是**建索引期**参数，改了必须重建索引；
+查询期 `ef`（默认 128）可随时调。度量默认 **COSINE**，与 sqlite-vec 的
+`distance_metric=cosine`、pgvector 的 `vector_cosine_ops` 一致；向量已归一化，
+此时余弦序与内积序严格相同。Milvus Lite 不回传索引参数（`describe_index` 只有
+index_type/metric_type/field_name），所以本实现把 `M` / `efConstruction` / 度量
+写进 SQLite 元信息（`milvus_hnsw_*`），配置与索引不一致时报错，而不是静默沿用
+一个参数不同的旧索引。
 
-- `M = 16`、`efConstruction = 200`（建索引期，**改了必须重建**）；查询期 `ef`（默认 128）
-  可随时调。取值理由与实测召回见 `docs/adr/0005`。
-- 度量默认 **COSINE**，与 sqlite-vec 的 `distance_metric=cosine`、pgvector 的
-  `vector_cosine_ops` 一致；本项目向量已归一化，此时余弦序与内积序严格相同。
-- Milvus Lite **不回传**索引参数（`describe_index` 只有 index_type/metric_type/field_name），
-  所以本实现把 `M` / `efConstruction` / 度量写进 SQLite 的元信息（`milvus_hnsw_*`），
-  配置与索引不一致时**报错**而不是静默沿用一个参数不同的旧索引。
+未安装 `pymilvus`/`milvus-lite`、数据目录打不开、初始化失败——一律抛 `StoreError`
+并给出可执行的修复提示，**不会**退回 numpy 暴力扫描：静默降级会让配置错误无法被发现。
 
-## 不可用就报错，绝不回退
+运维上必须知道的两点：
 
-未安装 `pymilvus`/`milvus-lite`、数据目录打不开（最常见的是**被另一个进程独占**）、
-初始化失败——一律抛 `StoreError` 并给出可执行的修复提示。**不会**退回 numpy 暴力扫描：
-本项目明确禁止静默降级，"我明明配了 milvus，为什么排序和 sqlite 一模一样"
-必须是一个能被发现的配置问题。
-
-## 实测出来的两条硬约束（ADR-0005 里有原始数字与命令）
-
-1. **`<...>.db` 是一个目录，不是文件**：里面有 `LOCK`、`manifest.json`、`wal/`、
-   `partitions/**/data_*.parquet`。备份/清理要按目录处理。
-2. **独占锁**：同一数据目录同一时刻只允许一个进程打开（第二个进程报
-   `DataDirLockedError: another process holds the lock`）。也就是说
-   **API 服务开着的时候，CLI 的 ingest/eval 打不开同一份 milvus 索引**——
-   这一点比 SQLite 的 WAL（单写多读）更严格，是本后端最实在的运维代价。
+1. **以 `.db` 结尾的路径是一个目录，不是文件**：里面有 `LOCK`、`manifest.json`、
+   `wal/`、`partitions/**/data_*.parquet`，备份/清理要按目录处理。
+2. **独占锁**：同一数据目录同一时刻只允许一个进程打开。也就是说 API 服务开着时，
+   CLI 的 ingest/eval 打不开同一份索引——比 SQLite 的 WAL（单写多读）更严格。
 """
 
 from __future__ import annotations
@@ -81,16 +56,16 @@ from kubedocs.store.sqlite_store import SqliteStore
 __all__ = ["BACKEND", "COLLECTION", "MilvusStore", "deps_available", "from_settings", "probe"]
 
 BACKEND = "milvus"
-# 集合名固定：milvus-lite 的数据文件按域分文件，一个文件里只有一个集合，
-# 名字带上 "vec" 是为了让"这是向量索引、不是块表"一目了然（块表始终在 SQLite 里）。
+# 集合名固定：milvus-lite 的一个数据目录里只有一个集合，名字带 "vec" 是为了让
+# "这是向量索引、不是块表"一目了然（块表始终在 SQLite 里）。
 COLLECTION = "chunks_vec"
 
-# 每批写入/删除的行数。Milvus 单次调用的载荷会整段序列化进 RPC，
-# 太大会让单次调用的内存与失败代价一起膨胀；实测 1000 行是插入吞吐与可控性的折中。
+# 每批写入/删除的行数。Milvus 单次调用的载荷会整段序列化进 RPC，太大会让单次调用
+# 的内存与失败代价一起膨胀；1000 行是插入吞吐与可控性之间的折中。
 _BATCH = 1000
 
-# chunk_id 的主键最大长度（字节）。实测本语料最长 122 字节（`<rel_path>::<ordinal>`），
-# 留足余量：这里放宽不会多占存储，写不下却会在插入时才报错。
+# chunk_id 的主键最大长度（字节），格式为 `<rel_path>::<ordinal>`。
+# 放宽不会多占存储，但写不下只会在插入时才报错，所以留足余量。
 _MAX_ID_BYTES = 512
 
 _MIGRATE_HINT = (
@@ -106,11 +81,10 @@ _DEP_HINT = (
 
 
 def _import_milvus() -> Any:
-    """延迟导入 pymilvus。
+    """延迟导入 pymilvus，缺包时抛 `StoreError` 并附可执行的安装提示。
 
-    延迟导入有两个理由，都是实际会遇到的：
-    1. 只想用 `sqlite` 的人不该因为没装 pymilvus 而起不来进程（与工厂的延迟导入同一考虑）；
-    2. 缺包时必须能给出**可执行的**提示，而不是让 `ImportError` 裸奔到调用方。
+    延迟导入的理由：只用 `sqlite` 的人不该因为没装 pymilvus 而起不来进程，
+    而缺包时必须给出提示，不能让 `ImportError` 裸奔到调用方。
     """
     try:
         from pymilvus import DataType, MilvusClient
@@ -123,8 +97,8 @@ def _import_milvus() -> Any:
 def deps_available() -> tuple[bool, str]:
     """只检查依赖（pymilvus + milvus-lite）是否装好，**不碰文件系统**。
 
-    与 `probe()` 分开的理由：本地文件模式"打开即创建"，所以真正的探测一定有副作用；
-    只想判断"这一路能不能跑"的调用方（测试模块顶层的 skip 判据）不该被逼着建目录。
+    与 `probe()` 分开：本地文件模式"打开即创建"，真正的探测一定有副作用，
+    而只想判断"这一路能不能跑"的调用方不该被逼着建目录。
     """
     try:
         import milvus_lite  # noqa: F401
@@ -137,15 +111,12 @@ def deps_available() -> tuple[bool, str]:
 def probe(path: str | Path) -> tuple[bool, str]:
     """探测 Milvus Lite 是否真的可用（依赖齐全 + 能打开一个数据目录）。
 
-    与 `pgvector_store.probe()` 同一个理由：测试与前置检查要能区分
-    "环境不可用（应 skip 并写明原因）"与"代码错了（应失败）"。两者混在一起，
-    CI 要么红得莫名其妙，要么绿得莫名其妙。
+    与 `pgvector_store.probe()` 同一契约：让调用方区分"环境不可用（skip）"与
+    "代码错了（失败）"。本地文件模式的两条语义使探测必然有副作用：
 
-    注意本地文件模式特有的两条语义（都实测过，见 ADR-0005）：
-    1. **打开即创建**：`path` 会被当作**数据目录**创建（milvus-lite 把以 `.db`
-       结尾的路径当目录用，里面有 LOCK / manifest / parquet 段文件），所以探测有副作用，
-       调用方传临时路径；
-    2. **同一数据目录在同一时刻只允许一个进程打开**（独占锁），所以"另一个进程正开着"
+    1. **打开即创建**：`path` 会被当作**数据目录**创建（milvus-lite 把以 `.db` 结尾的
+       路径当目录用，里面有 LOCK / manifest / parquet 段文件），所以调用方传临时路径；
+    2. **独占锁**：同一数据目录同一时刻只允许一个进程打开，所以"另一个进程正开着"
        也会探测失败——那属于环境原因，应当 skip 而不是当成代码错误。
     """
     ok, why = deps_available()
@@ -180,7 +151,7 @@ class MilvusStore(SqliteStore):
         allow_backend_takeover: bool = False,
     ) -> None:
         # 块行与全文路完全交给基类（同一个 SCHEMA、同一段 FTS5 代码、同一套元信息闸门）。
-        # `vector_path` 在这里只是"旧实现的侧车矩阵位置"：本实现不读也不写它，
+        # `vector_path` 在这里只作为旧实现的侧车矩阵位置：本实现不读也不写它，
         # 只在 `dense_search_exact()` 与迁移脚本里用它拿一份精确答案。
         super().__init__(
             db_path,
@@ -198,10 +169,10 @@ class MilvusStore(SqliteStore):
         self.hnsw_ef_search = int(hnsw_ef_search)
         self.metric = str(metric).upper()
         # **只给迁移脚本用**的开关，见 `_check_backend_meta`：默认 False，
-        # 也就是"从别的后端抢过这份索引"这件事必须显式声明，不能顺带发生。
+        # 也就是"从别的后端抢过这份索引"必须显式声明，不能顺带发生。
         self._allow_takeover = bool(allow_backend_takeover)
         # 精确检索用的内存副本（懒加载）：只在 `dense_search_exact()` 里用，
-        # **不在查询路径上**——向量不常驻内存正是这个后端存在的理由之一。
+        # **不在查询路径上**——向量不常驻内存正是这个后端的特点之一。
         self._exact: tuple[list[str], np.ndarray] | None = None
 
         self._DataType, self._MilvusClient, self._MilvusException = _import_milvus()
@@ -215,15 +186,13 @@ class MilvusStore(SqliteStore):
     def _open_client(self) -> Any:
         """打开 Milvus Lite 数据目录（本地文件模式，无服务端）。
 
-        路径必须先自己校验：milvus-lite 对不以 `.db` 结尾的路径会抛
-        `uri ... is illegal, needs start with [unix, http, https, tcp] or a local file
-        endswith [.db]`——那句话对一个"我明明写了个路径"的用户毫无帮助。
+        路径必须先自己校验：milvus-lite 只接受以 `.db` 结尾的本地路径或
+        unix/http/tcp 形式的远端地址，否则抛出的 `uri ... is illegal` 对用户毫无帮助。
 
-        **一个 `.db` 结尾的路径在 milvus-lite 里是一个目录，不是文件**（实测：里面有
-        LOCK / manifest.json / wal / parquet 段文件），而且**同一目录同一时刻只允许
-        一个进程打开**（独占锁，实测第二个进程报 `DataDirLockedError`）。所以"打开失败"
-        最常见的两个原因——被别的进程占着、父目录不可写——必须写进错误信息里，
-        否则用户只会看到一句 `Open local milvus failed`。
+        **一个 `.db` 结尾的路径在 milvus-lite 里是目录，不是文件**（内含 LOCK /
+        manifest.json / wal / parquet 段文件），且**同一目录同一时刻只允许一个进程
+        打开**（第二个进程报 `DataDirLockedError`）。所以打开失败最常见的原因——
+        被别的进程占着、父目录不可写——必须写进错误信息里。
         """
         if self.milvus_path.suffix.lower() != ".db":
             raise StoreError(
@@ -248,9 +217,9 @@ class MilvusStore(SqliteStore):
     def _ensure_collection(self) -> None:
         """幂等建集合（含 HNSW 索引），并把声明维度读回来核对。
 
-        `create_collection` 对已存在的集合**会报错**（不像 SQL 的 IF NOT EXISTS），
-        所以幂等性只能靠先 `has_collection` 判断；并发下两个进程同时建时，
-        再兜一层"建失败后复查是否真的存在"，成功就当幂等，失败才报错。
+        `create_collection` 对已存在的集合会报错（不像 SQL 的 IF NOT EXISTS），
+        幂等性只能靠先 `has_collection` 判断；并发建集合时再兜一层"建失败后复查
+        是否真的存在"，存在就当幂等，否则才报错。
         """
         if not self._client.has_collection(COLLECTION):
             try:
@@ -293,15 +262,13 @@ class MilvusStore(SqliteStore):
         return None
 
     def _check_backend_meta(self) -> None:
-        """同一份 SQLite 索引不许被两个"向量落在别处"的后端反复写。
+        """同一份 SQLite 索引的向量只允许由一个后端写入。
 
-        为什么这条闸门必须存在（而不是"反正有行数核对"）：块表与向量表行数相同
-        完全可能发生——先用 sqlite-vec 建好索引，再用 milvus 摄取几批，
-        此时 `chunks_vec` 里的旧向量行数与块表**仍然一致**，sqlite-vec 会静默返回
-        陈旧向量。行数核对看不出这种事，只有"这份索引的向量是谁写的"这个标记能看出来。
+        行数核对挡不住跨后端写入：先用 sqlite-vec 建好索引、再用 milvus 摄取几批，
+        此时 `chunks_vec` 里旧向量行数与块表仍然一致，sqlite-vec 会静默返回陈旧向量。
+        只有"这份索引的向量是谁写的"这个标记能看出来。
 
-        `allow_backend_takeover` 是**唯一**的出口，只有迁移脚本（它真的把向量搬过去了）
-        会打开它；普通代码路径不许设置。
+        `allow_backend_takeover` 是唯一的出口，只有真正把向量搬过去的迁移脚本才打开它。
         """
         got = self._meta().get("vector_backend", "")
         if got and got != BACKEND and not self._allow_takeover:
@@ -317,10 +284,10 @@ class MilvusStore(SqliteStore):
             self._set_meta("vector_backend", BACKEND)
 
     def _check_hnsw_meta(self) -> None:
-        """HNSW 建索引参数必须与索引一致——不一致就报错，而不是"配置看起来改了"。
+        """HNSW 建索引参数必须与索引一致，不一致就报错。
 
         Milvus Lite 不回传索引参数（`describe_index` 只有 index_type/metric_type/
-        field_name），所以要靠我们自己把用过的值记进索引元信息。
+        field_name），所以用过的值只能由本实现记进索引元信息。
         `ef`（查询期）不进这道闸门：它本来就应该随时可调。
         """
         recorded = {
@@ -346,8 +313,8 @@ class MilvusStore(SqliteStore):
     def _refresh_vec_ready(self) -> None:
         """核对"块表行数 vs Milvus 向量行数"，不一致就拒绝向量检索。
 
-        这是两个引擎之间唯一一处**廉价**的一致性检查（行数查询在本机是毫秒级），
-        所以它放在打开时与每次 `finalize()`。更强的**主键集合**级核对在 `verify_vec()`。
+        这是两个引擎之间唯一一处的**廉价**一致性检查（行数查询是毫秒级），所以放在
+        打开时与每次 `finalize()`。更强的**主键集合**级核对在 `verify_vec()`。
         """
         with self._lock:
             n_chunks = int(self._con.execute("SELECT COUNT(*) FROM chunks").fetchone()[0])
@@ -372,8 +339,8 @@ class MilvusStore(SqliteStore):
             with contextlib.suppress(Exception):
                 # 这里**显式**忽略关闭异常：Milvus Lite 的每次写入都是同步落盘的，
                 # 关失败没有可执行的补救动作，而它一旦抛出去就会盖住调用方正在处理的
-                # 真正异常（并且让后面的 SQLite 连接关不掉）。不是"静默降级"——
-                # 检索/写入路径上的任何异常仍然一律外抛。
+                # 真正异常（并且让后面的 SQLite 连接关不掉）。检索/写入路径上的任何
+                # 异常仍然一律外抛。
                 client.close()
         super().close()
 
@@ -384,9 +351,9 @@ class MilvusStore(SqliteStore):
     def _index_chunk_vectors(self, con: Any, chunks: list[ChunkInput], vectors: dict[str, Vector]) -> None:
         """把本批向量写进 Milvus——**在 SQLite 事务提交之前**。
 
-        这个顺序是有意的：Milvus 写失败 → 抛 `StoreError` → `_tx` 回滚 SQLite，
-        于是不会留下"块写了、向量没写"的中间态。反过来的顺序（先提交再写 Milvus）
-        在 Milvus 失败时会留下一个行数不一致的索引，只能靠事后检测。
+        这个顺序保证 Milvus 写失败时抛出 `StoreError`、由 `_tx` 回滚 SQLite，
+        不会留下"块写了、向量没写"的中间态；反过来先提交再写 Milvus，失败时会
+        留下行数不一致的索引。
         """
         if not chunks:
             return
@@ -407,10 +374,9 @@ class MilvusStore(SqliteStore):
                 ) from e
 
     def _drop_doc_chunks(self, con: Any, doc_id: str) -> int:
-        """删一篇文档的块：**先删 Milvus 向量再删块行**（顺序反了就找不回 chunk_id 了）。
+        """删一篇文档的块：**先删 Milvus 向量再删块行**。
 
-        这正是上一轮 sqlite-vec 踩过的坑（"删文档不清向量"），所以在 milvus 上
-        显式处理，并有专门的测试守着它。
+        顺序反了就再也查不到这篇文档的 chunk_id，向量会永久残留。
         """
         with self._lock:
             ids = [
@@ -438,9 +404,9 @@ class MilvusStore(SqliteStore):
     def finalize(self) -> None:
         """收尾：盖时间戳、清待写缓冲、复核"块表 vs 向量索引"。
 
-        与 `sqlite-vec` 不同，这里**不是**同一个事务的收尾；因此 `finalize()` 是
-        "这一批写完，两个引擎是否还对齐"的最后一道闸门：不一致就抛错，
-        让摄取在**能定位的边界**上失败，而不是留给下一次检索去发现。
+        与 `sqlite-vec` 不同，这里不是同一个事务的收尾，所以 `finalize()` 是"这一批
+        写完，两个引擎是否还对齐"的最后一道闸门：不一致就抛错，让摄取在能定位的
+        边界上失败，而不是留给下一次检索去发现。
         """
         with self._lock:
             self._set_meta("indexed_at", time.strftime("%Y-%m-%dT%H:%M:%S"))
@@ -467,7 +433,7 @@ class MilvusStore(SqliteStore):
         self._pending.clear()
         self._dirty = False
         self._reload_index()
-        # 新建的集合是按当前配置建的，于是"实际用到的参数"要重新记一遍
+        # 新建的集合是按当前配置建的，"实际用到的参数"要重新记一遍
         self._set_meta("milvus_hnsw_m", str(self.hnsw_m))
         self._set_meta("milvus_hnsw_ef_construction", str(self.hnsw_ef_construction))
         self._set_meta("milvus_metric", self.metric)
@@ -517,10 +483,9 @@ class MilvusStore(SqliteStore):
         return got
 
     def _reload_index(self) -> None:
-        """覆写基类：本实现不把向量读进内存。
+        """覆写基类：本实现不把向量读进内存（向量由 Milvus 管理）。
 
-        基类在这里 `np.load` 整个 `.npy`（18861×384 ≈ 29MB 常驻），
-        而本实现的向量由 Milvus 管理——省掉常驻内存正是选它的理由之一。
+        基类在这里 `np.load` 整个 `.npy` 侧车矩阵并常驻内存，本实现省掉这一步。
         """
         with self._lock:
             self._row_index: list[str] = []
@@ -538,10 +503,9 @@ class MilvusStore(SqliteStore):
     def dense_search(self, query_vector: Vector, limit: int) -> list[tuple[str, int]]:
         """向量路：Milvus 的 **HNSW 近似检索**，按相似度降序。
 
-        与另外两个实现的语义对照：内积/余弦在向量已归一化时严格同序，
-        但 **HNSW 是近似索引**——同样的输入不保证给出与精确检索相同的前 k。
-        这一点不允许含糊：本实现提供 `dense_search_exact()` 度量它，
-        实测召回与 `ef` 取值见 ADR-0005。
+        **HNSW 是近似索引**：同样的输入不保证给出与精确检索相同的前 k。这一点不
+        允许含糊，所以本实现提供 `dense_search_exact()` 来度量召回率。
+        返回的名次从 1 开始，与另外几个后端同构。
         """
         if self._vec_error:
             raise StoreError(self._vec_error)
@@ -567,10 +531,9 @@ class MilvusStore(SqliteStore):
     def dense_search_exact(self, query_vector: Vector, limit: int) -> list[tuple[str, int]]:
         """**不用 HNSW** 的精确检索：度量近似索引召回率的基准。
 
-        没有它，"HNSW 够不够准"就只能靠感觉。它把全量向量拉回内存算一次精确余弦序
-        （18861×384 约 29MB、实测一次性拉取约 11s，之后每次查询是一次 BLAS 矩阵乘）。
-        代价必须写清楚：**这是刻意留在查询路径之外的东西**——
-        "向量不常驻内存"正是 milvus 后端相对旧实现的一个卖点，不该被基准工具吃掉。
+        它把全量向量拉回内存算一次精确余弦序，之后每次查询是一次 BLAS 矩阵乘。
+        代价必须写清楚：**这是刻意留在查询路径之外的方法**——向量不常驻内存是本
+        后端的特点，不该被基准工具吃掉。
         """
         if limit <= 0:
             return []
@@ -612,13 +575,12 @@ class MilvusStore(SqliteStore):
     def adopt_legacy_matrix(self) -> int:
         """把旧实现的 `.npy` 矩阵搬进 Milvus 的 HNSW 索引（**不重新编码**）。
 
-        为什么这条路径值得存在：全量重编码在本机是 1.9 万块 × 约 9.4 块/秒 ≈ 33 分钟，
-        而向量本身一个字节都没变——只是存放位置变了。搬运的正确性由
-        `chunks.vector_row` ↔ 矩阵行号的对应关系保证（旧实现 `finalize()` 写入的那个映射），
-        越界即报错，不做任何猜测。
+        向量本身一个字节都没变，只是存放位置变了，所以搬运比全量重编码快得多。
+        正确性由 `chunks.vector_row` ↔ 矩阵行号的对应关系保证（旧实现 `finalize()`
+        写入的那个映射），越界即报错，不做任何猜测。
 
         幂等：先 drop 集合再整批灌，重复跑不会产生重复行。它同时把 `vector_backend`
-        这道闸门切到 `milvus`——因为它是**唯一**一处"向量真的被搬过去"的地方。
+        这道闸门切到 `milvus`——这是唯一一处"向量真的被搬过去"的地方。
         """
         path = Path(self.vector_path)
         if not path.exists():
@@ -666,14 +628,13 @@ class MilvusStore(SqliteStore):
     def detach(self) -> None:
         """把这份索引从 milvus 上摘下来：清空集合 + 撤掉后端标记。
 
-        为什么需要它：`vector_backend` 这道闸门是双向的——它挡住了"静默读陈旧向量"，
-        但同时也会让"我想换回 sqlite-vec，先 `ingest --rebuild`"这一步开不了场
-        （连 store 都构造不出来）。所以换回去的路径必须有人打开闸门，这个人就是本方法：
-        它只做"宣布这里不再有 milvus 向量"这件事，**不动块表与全文索引**。
-        之后换回别的后端仍需 `ingest --rebuild` 重新产生向量（本方法不负责造向量）。
+        `vector_backend` 闸门是双向的：它挡住"静默读陈旧向量"，但也会让"我想换回
+        sqlite-vec、先 `ingest --rebuild`"这一步连 store 都构造不出来。所以要换回去
+        必须先打开闸门，本方法就是那个人：它只宣布"这里不再有 milvus 向量"，
+        **不动块表与全文索引**；换回别的后端仍需 `ingest --rebuild` 重新产生向量。
 
-        清空后集合**重建为空集合**（而不是留一个不存在的集合）：这样数据目录仍是一份
-        自洽的状态，任何后续操作看到的是"块有、向量没有"，会**明确报错并给出修复命令**，
+        清空后集合**重建为空集合**（而不是留一个不存在的集合）：数据目录因此仍是一份
+        自洽状态，后续操作看到的是"块有、向量没有"，会明确报错并给出修复命令，
         而不是撞上一句 `collection does not exist`。
         """
         try:
@@ -693,13 +654,12 @@ class MilvusStore(SqliteStore):
     def verify_vec(self) -> str:
         """向量索引自检：**行数** + **主键集合**两级核对。返回 `"ok"` 或 `"FAIL: ..."`。
 
-        比 `_refresh_vec_ready()` 强的地方是主键集合：行数相同但内容错位
-        （删了 A 的向量、又重复写了 B 的向量）只有它看得出来。
-        代价是 Milvus Lite 逐行回传主键较慢（18861 条约 9s），所以它是**显式**操作
-        （`cli stats --verify`），不在每次检索或每次 finalize 上跑。
+        比 `_refresh_vec_ready()` 强的地方是主键集合：行数相同但内容错位（删了 A 的
+        向量、又重复写了 B 的向量）只有它看得出来。代价是 Milvus Lite 逐行回传主键较慢，
+        所以它是**显式**操作（`cli stats --verify`），不在每次检索或 finalize 上跑。
 
         诊断信息优先给出**集合差**（谁缺了、谁多了），因为它比"行数 5 vs 6"更能直接
-        指向修复动作；`_vec_error` 只在集合一致时兜底报告（那种情形理论上不该出现）。
+        指向修复动作；`_vec_error` 只在集合一致时兜底报告。
         """
         try:
             milvus_ids = set(self._all_ids())
@@ -720,7 +680,7 @@ class MilvusStore(SqliteStore):
         return "ok"
 
     def _all_ids(self) -> list[str]:
-        """全量主键。Milvus Lite 的逐行回传较慢，这里如实说明它会扫一遍集合。"""
+        """全量主键。Milvus Lite 逐行回传较慢，这里会扫一遍集合。"""
         n = self._row_count()
         if n == 0:
             return []

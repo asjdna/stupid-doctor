@@ -1,39 +1,16 @@
 """多后端一致性测试：同一批输入在 `sqlite` / `sqlite-vec` / `pgvector` / `milvus` 上的行为对照。
 
-## 这个文件守的是什么
+存储层的四个实现必须满足同一个契约：`dense_search` / `keyword_search` 返回 `list[(chunk_id, rank)]`
+且 rank 从 1 起连续；同一批输入下向量路给出同样的排序；全文路在共用 FTS5 的三个后端之间逐字节
+相同；覆盖、删除与"缺向量拒绝写入"三条写入语义在四个后端上一致。
 
-存储层有四个实现，它们必须满足**同一个契约**。契约不写在文档里，写在这里：
+允许的差异：`pgvector` 的全文路走 pg_search（ParadeDB）的 BM25，与 FTS5 的 `bm25()` 是两份独立
+实现、分词器也不同，所以只断言**命中集合相同**，排序差异是已知的；`pgvector` / `milvus` 的向量路
+是 HNSW 近似索引，在本文件 5 块的小索引上与精确检索一致，大索引上的召回率是另一个问题。
 
-1. `dense_search` / `keyword_search` 的返回形态都是 `list[(chunk_id, rank)]`，
-   rank 从 1 起连续；
-2. 同一批输入下，**向量路必须给出同样的排序**（向量已归一化时，
-   内积序与余弦序严格相同——这是"换后端不改指标"的前提）；
-3. 全文路在 `sqlite` / `sqlite-vec` / `milvus` 之间必须**逐字节相同**（三者共用同一份
-   FTS5 索引与同一段代码）；`pgvector` 允许排序差异，原因写在下面与 ADR-0004 里；
-4. 覆盖语义（同一 doc 重写）、删除语义（两个通道都不再召回）、
-   无向量必须**拒绝写入**——这三条在四个后端上必须一致。
-
-## 谁"允许差异"，差在哪（不是含糊过去）
-
-- `pgvector` 的全文路用 **pg_search（ParadeDB）的 BM25**，SQLite 用 FTS5 的 `bm25()`。
-  两边**都是 BM25**（都含 IDF 与文档长度归一化），但是两份独立实现、分词器也不同
-  （`pdb.chinese_compatible('stemmer=english')` vs `porter unicode61`），
-  所以相同命中集合下的**排序仍可能不同**。因此对 pgvector 断言的是**命中集合相同**，
-  而排序的精确一致只对共用 FTS5 的三个后端断言。
-  （2026-10-11 之前 pgvector 用的是 `ts_rank`——那个**不是** BM25，hybrid hit@10 会掉到 0.74；
-  换掉之后 0.86 ≥ 冻结基线 0.84，见 ADR-0004 第十节。）
-- `pgvector` / `milvus` 的向量路是 **HNSW 近似索引**，理论上允许给出与精确检索不同的
-  top-k。在本文件的 5 块小索引上它们与精确检索一致（另有一组 `dense_search_exact()`
-  对拍用例）；大索引上的召回率是**另一个问题**，结论与实测见 ADR-0005 第五节。
-
-## pgvector / milvus 的接入方式
-
-- **pgvector**：数据库不可达时整个参数**不出现**（而不是出现后 skip 掉全部用例）——
-  这样"本地没 Docker"不会让报告里出现一堆带 skip 的绿点，掩盖"这一路没跑过"。
-  `test_pgvector_store.py` 里另有一组显式 skip 的用例，用来标明"未验证"。
-- **milvus**：依赖是本地文件（不需要 Docker/服务端），所以它**始终**留在参数化里；
-  真的不可用（没装包 / 文件打不开）时由夹具 `pytest.skip` 并打印原因——
-  skip 是显式可见的"没跑过"，而"悄悄从参数里消失"看起来像"这一路根本不需要存在"。
+接入方式：`pgvector` 不可达时整个参数不出现（否则"本地没 Docker"会让报告里出现一堆带 skip 的
+绿点，掩盖这一路没跑过）；`milvus` 依赖本地文件、始终留在参数化里，真不可用时由夹具 skip 并
+打印原因——显式可见的"没跑过"胜过悄悄从参数里消失。
 """
 
 from __future__ import annotations
@@ -66,12 +43,10 @@ def _pg_available() -> tuple[bool, str]:
 
 
 def _milvus_available() -> tuple[bool, str]:
-    """探测 Milvus Lite **依赖**是否装好（本地数据目录，无需服务端）。
+    """探测 Milvus Lite 依赖是否装好（本地数据目录，无需服务端）。
 
-    刻意只查依赖、不真的打开数据目录：milvus-lite 的数据目录一旦打开，
-    **在进程存活期间不会被释放**（LOCK 一直占着，连目录都删不掉），
-    模块级探测不该为此在每个测试进程里留一份垃圾。真正打不开的情形
-    （目录被别的进程独占等）由夹具在构造 store 时 skip 并打印原因。
+    刻意只查依赖、不打开数据目录：milvus-lite 一旦打开数据目录，LOCK 会一直占到进程退出，
+    模块级探测不该为此在每个测试进程里留一份垃圾；真正打不开的情形由夹具 skip 并打印原因。
     """
     return deps_available()
 
@@ -198,12 +173,11 @@ def test_dense_query_dim_mismatch_is_refused(seeded: Store) -> None:
 
 # --------------------------------------------------------------------------- 排序一致
 def test_dense_ranking_is_identical_across_backends(seeded: Store) -> None:
-    """契约第 2 条：向量已归一化时，三个后端的向量路排序必须**完全相同**。
+    """契约第 2 条：向量已归一化时，四个后端的向量路排序必须**完全相同**。
 
-    这是整个改造的核心断言：换后端（numpy 内积 / sqlite-vec 余弦 / pgvector HNSW）
-    不许改变检索顺序，否则评测指标的变化就无法归因。
-    查询取 top-2 而不是 top-3：0 分是**并列**的，并列名次没有唯一答案，
-    拿它做跨实现断言只会得到一个随机变红的测试。
+    换后端（numpy 内积 / sqlite-vec 余弦 / pgvector HNSW / Milvus HNSW）不许改变检索顺序，
+    否则评测指标的变化就无法归因。查询取 top-2 而不是 top-3：0 分是并列的，并列名次没有唯一
+    答案，拿它做跨实现断言只会得到一个随机变红的测试。
     """
     assert seeded.dense_search(_vec(a=1.0), 2) == [("alpha::0000", 1), ("alpha::0001", 2)]
     assert seeded.dense_search(_vec(c=1.0), 2) == [("gamma::0000", 1), ("beta::0001", 2)]
@@ -212,9 +186,8 @@ def test_dense_ranking_is_identical_across_backends(seeded: Store) -> None:
 def test_keyword_ranking_matches_sqlite_reference(seeded: Store, backend: str) -> None:
     """契约第 3 条。
 
-    两个 SQLite 后端共用同一份 FTS5 索引，排序必须逐字节相同；
-    pgvector 用 pg_search 的 BM25（与 FTS5 的 `bm25()` 是两份独立实现、分词器也不同），
-    只断言**命中集合**相同，排序差异是已知且已记录的（见模块文档与 ADR-0004 第十节）。
+    两个 SQLite 后端共用同一份 FTS5 索引，排序必须逐字节相同；pgvector 用 pg_search 的 BM25
+    （与 FTS5 的 `bm25()` 是两份独立实现、分词器也不同），只断言**命中集合**相同。
     """
     got = seeded.keyword_search("kubelet", 5)
     if backend == "pgvector":
@@ -264,10 +237,8 @@ def test_missing_vector_is_refused_on_every_backend(stores: Store) -> None:
 def test_upsert_overwrites_and_keeps_vectors_aligned(stores: Store) -> None:
     """覆盖语义：整篇重写后，两个通道看到的都是新内容与新向量。
 
-    为什么必须连 `DocInput` 一起传：覆盖的粒度是**文档**（先删该 doc 的全部块再写），
-    只传块会撞主键——这是三个实现共同的前提，测试按真实调用方式构造。
-    这一条专门盯"向量与块行错位"：旧实现靠 `finalize()` 重建矩阵、
-    sqlite-vec 靠主键、pgvector 靠同一行——三者都必须过。
+    覆盖的粒度是**文档**（先删该 doc 的全部块再写），所以必须连 `DocInput` 一起传，只传块会
+    撞主键；这条断言专盯"向量与块行错位"，四个后端都必须过。
     """
     seed = make_seed()
     stores.upsert_docs(seed.docs, seed.chunks, seed.vectors)
@@ -355,10 +326,8 @@ def test_rebuild_from_scratch_clears_everything(seeded: Store) -> None:
     seeded.upsert_docs(seed.docs, seed.chunks, seed.vectors)
     seeded.finalize()
     assert seeded.stats().n_chunks == 5
-    # 全文自检的**三态**契约（`ok` / `DEGRADED: ...` / `FAIL: ...`）：
-    # 这里只要求"索引本身没坏"，不要求刚好等于 "ok"——`DEGRADED` 是合法的第三种结果
+    # 全文自检是三态契约（`ok` / `DEGRADED: ...` / `FAIL: ...`）：`DEGRADED` 是合法结果
     # （库里没有 pg_search 时关键字路降级到 ts_rank），把它读成 FAIL 会掩盖真实状态。
-    # 详见 ADR-0004 第十节与 test_pgvector_store.py 的 `_fts_is_healthy`。
     fts = seeded.verify_fts()
     assert fts == "ok" or fts.startswith("DEGRADED"), fts
 
@@ -403,11 +372,8 @@ class TestSqliteVecBackend:
     """只对 sqlite-vec 成立的几条：页缓存参数、空向量表守卫、旧索引迁移。"""
 
     def test_page_cache_is_raised(self, tmp_path: Any) -> None:
-        """页缓存必须按配置调大。
-
-        这一条守的是一个**实测 5~12 倍**的性能退化：向量表 29MB、SQLite 默认页缓存
-        2MB，不调 cache_size 时每次 KNN 都在穿透页缓存读盘（实测 p50 147ms vs 12ms）。
-        它不影响任何正确性断言，所以只能靠这条专门测出来。
+        """页缓存必须按配置调大：向量表 29MB 而 SQLite 默认页缓存 2MB，不调 cache_size 时
+        每次 KNN 都在穿透页缓存读盘。它不影响任何正确性断言，只能靠这条专门测出来。
         """
         s = SqliteVecStore(
             db_path=tmp_path / "c.db",
@@ -425,8 +391,8 @@ class TestSqliteVecBackend:
     def test_missing_vector_table_is_reported_not_silently_empty(self, tmp_path: Any) -> None:
         """块表有数据、向量表却是空的：向量路必须报错并给出修复命令。
 
-        这正是"改默认后端后打开旧索引"的第一现场。静默返回空结果会让它
-        表现为"检索质量突然崩了"，而不是"你少跑了一步迁移"。
+        这正是"改默认后端后打开旧索引"的第一现场；静默返回空结果会让它表现为
+        "检索质量突然崩了"，而不是"你少跑了一步迁移"。
         """
         legacy = SqliteStore(
             db_path=tmp_path / "m.db", vector_path=tmp_path / "m.npy", dim=DIM, embedding_model="hashing-test"

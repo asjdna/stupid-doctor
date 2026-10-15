@@ -1,17 +1,17 @@
 """评测执行器：加载标注集 -> 校验 -> 跑多路对照 -> 汇总 -> 卡闸门。
 
-## 这个评测器刻意具备"能失败"的性质
+一个永远通过的评测等于没有评测，因此这里设了四道拒绝/失败条件：
 
-一个永远通过的评测等于没有评测。这里设置了四道拒绝/失败条件：
-
-1. **标注集自检失败**：标注引用的文档不在索引里，或 `must_contain` 关键词在该文档
-   里找不到 —— 说明标注写错了（或者索引没建全），此时直接退出，不产出任何分数。
-   没有这道检查，"标注了不存在的文档"会让指标悄悄变成随机水平而无人察觉。
+1. **标注集自检失败**：标注引用的文档不在索引里，或 `must_contain` 关键词在该文档里
+   找不到 —— 说明标注写错了（或者索引没建全），此时直接退出，不产出任何分数。
 2. **引用完整性**：每条结果必须有可点击的官方 URL，且 URL 必须能由 doc_id 重算出来
-   （防止 URL 映射与存储内容漂移）；违规数不为 0 就视为失败。
-3. **基线与标注集哈希绑定**：改了问题却没重建基线 -> 拒绝比较。跨标注集的分数
-   没有可比性，静默比较是自欺。
+   （防止 URL 映射与存储内容漂移）；违规数不为 0 即失败。
+3. **基线与标注集哈希绑定**：改了问题却没重建基线 -> 拒绝比较；跨标注集的分数没有
+   可比性。
 4. **基线漂移容忍**：hit@k / mrr@k 相对基线下降超过阈值即失败（退出码 2）。
+
+退出码：0 通过，2（`EXIT_GATE_FAIL`）闸门失败或没有基线，`EXIT_PRECONDITION` 表示
+标注集缺失或自检不通过。
 """
 
 from __future__ import annotations
@@ -42,8 +42,8 @@ CORPUS_DRIFT_TOL = 0.02
 
 **它现在是次要判据**：语料身份由 `corpus_sha`（`(rel_path, n_chunks)` 的 sha256）
 精确判定，两者不等就直接拒绝比较。这个阈值只在**已经用 `--allow-corpus-drift`
-放行**之后才起作用，用来把"变了多少"写进输出——它单独存在时是近似的
-（容差之内的语料变化会被静默放过，实测踩过），所以不要再把它当主判据。"""
+放行**之后才起作用，用来把"变了多少"写进输出；它单独存在时是近似的（容差之内的
+语料变化不会有任何输出），不要当主判据。"""
 
 KINDS = ("identifier", "paraphrase", "concept")
 MODES: dict[str, tuple[str, ...]] = {
@@ -206,16 +206,17 @@ def load_baseline(path: Path) -> dict[str, Any] | None:
 
 
 def check_gate(base: dict, current: dict, *, allow_drift: bool) -> list[str]:
-    """返回失败原因列表；空列表表示通过。"""
+    """返回失败原因列表；空列表表示通过。
+
+    比较的前提是**基线可比**：基线缺必需字段，或 schema / gold_sha256 /
+    embedding_model / top_k 与本次不一致，都属于"不可比"，一律拒绝比较而不是跳过校验；
+    corpus_sha 不一致默认也拒绝，只有显式 `--allow-corpus-drift` 才降级为警告。
+    """
     fails: list[str] = []
     # **先校验基线有必需字段**，再谈比较。
     #
-    # 为什么这条不能省：下面每一处都用 `base.get(key, 0)` 取值，而比较又写成
-    # `if b_top_k and ...`。于是"基线里没有 top_k"会让整段校验**静默跳过**——
-    # 实测（取 6232223 之前那版 schema-1 基线，它恰好没有 top_k 字段）：
-    # `eval --top-k 20 --gate` 以 hit@20 = 0.9000 通过了绑定 hit@10 = 0.8400 的基线，
-    # **退出码 0、「闸门：通过」**。代码注释把"为什么必须校验 top_k"讲得很清楚，
-    # 实现却让它依赖"基线恰好带了这个字段"。**缺字段 = 不可比，不是"不用比"。**
+    # 下面多处写成 `base.get(key, 0)` 配合 `if b_top_k and ...`，基线缺字段会让整段
+    # 校验静默跳过，于是"不可比"变成"通过"。**缺字段 = 不可比，不是"不用比"。**
     missing = [
         key
         for key in ("schema", "gold_sha256", "corpus_sha", "embedding_model", "top_k", "n_chunks", "metrics")
@@ -240,9 +241,8 @@ def check_gate(base: dict, current: dict, *, allow_drift: bool) -> list[str]:
             f"嵌入模型变了（{base.get('embedding_model')} -> {current['embedding_model']}），向量空间不可比"
         )
         return fails
-    # top_k 必须与基线一致，否则就是拿 hit@k 去比基线的 hit@10。而且方向不对称：
-    # hit 随 k 单调上升，于是「把 --top-k 改大」就能让闸门变绿，把真实的指标退化盖过去
-    # （实测 `--top-k 20 --gate` 曾以 hit@20=0.9000 通过了绑定 top_k=10 的基线）。
+    # top_k 必须与基线一致，否则就是拿 hit@k 去比基线的 hit@10。方向是不对称的：
+    # hit 随 k 单调上升，"把 --top-k 改大"就能让闸门变绿、盖过真实的指标退化。
     # 字段存在性已由上面的 missing 校验保证，所以这里直接取、不再用 .get 兜底。
     b_top_k = int(base["top_k"])
     c_top_k = int(current["top_k"])
@@ -256,15 +256,9 @@ def check_gate(base: dict, current: dict, *, allow_drift: bool) -> list[str]:
     c_chunks = int(current["n_chunks"])
     # ---- 语料身份：**精确**判据，优先于下面的块数容差 ----
     #
-    # `_corpus_fingerprint()` 的 docstring 一直写着"用于判断两次评测是否同一批数据"，
-    # 但它此前**只被计算、落盘，从未被比较**：报告里有、基线里有，闸门里没有。
-    # 于是文档（CONTRIBUTING 第 5 节、ci.yml 的 gate job 注释）声称的"拒绝跨语料比较"
-    # 实际上只是靠下面那条 2% 的块数容差近似，而容差之内的语料变化**一个字都不打印**。
-    #
-    # 实测触发（2026-10-14）：重拉上游语料后文档 1720 -> 1722、块数 18811 -> 18822
-    # （+0.058%），旧实现落在容差内 ⇒ 静默通过，而"索引已经不是基线那一批数据"
-    # 这件事在输出里完全看不到。指纹是 (rel_path, n_chunks) 的 sha256，
-    # 两个后端都按 `ORDER BY rel_path` 迭代（确定性），所以它可以直接当判据。
+    # `corpus_sha` 是 (rel_path, n_chunks) 的 sha256，两个后端都按 `ORDER BY rel_path`
+    # 迭代（确定性），因此它可以直接当判据：指纹不同就意味着索引不是基线那一批数据，
+    # 分数不可比。只靠下面 2% 的块数容差时，容差之内的语料变化不会有任何输出。
     if str(base["corpus_sha"]) != str(current["corpus_sha"]):
         msg = (
             f"语料指纹变了（corpus_sha {base['corpus_sha']} -> {current['corpus_sha']}）："
@@ -365,9 +359,9 @@ def run_eval(args: Namespace, settings: Settings, store: Store) -> int:
 
     retriever = HybridRetriever(store, build_embedder(settings), settings)
 
-    # 预热：sentence-transformers 的**首次** encode 含模块导入与权重载入
-    # （本机实测约 20 秒）。把它算进第一个查询的延迟会污染 p50/p95，
-    # 让"检索延迟"这个指标完全失真。所以先空跑一次并单独报告冷启动。
+    # 预热：sentence-transformers 的**首次** encode 含模块导入与权重载入，
+    # 把它算进第一个查询的延迟会污染 p50/p95，让"检索延迟"这个指标完全失真。
+    # 所以先空跑一次，冷启动耗时单独报告。
     t_cold = time.perf_counter()
     if rows:
         retriever.search(rows[0].q, top_k=1)
@@ -396,21 +390,12 @@ def run_eval(args: Namespace, settings: Settings, store: Store) -> int:
         "corpus_sha": _corpus_fingerprint(store),
     }
 
-    # ⚠️ 这一段的**顺序本身**是做过缺陷修复的，别改回去。
+    # 这一段的**顺序本身**就是契约，别改：
     #
-    # 曾经的写法是 `if args.json: print(...); return EXIT_OK` 抢在 `--write-baseline`
-    # 与 `--gate` **之前**返回。后果：`eval --gate --json` 永远退出码 0，闸门连
-    # `check_gate` 都没调到就"通过"了——**退出码 0 与"质量达标"之间不再有任何关系**，
-    # 任何拿 `--json` 跑闸门的自动化（CI、发版脚本）都在看一个假绿灯。
-    # 实测对照（修复前）：带 `--json` → exit 0；不带 → exit 2 并打印「闸门：不通过」。
-    #
-    # 现在的契约：**`--json` 只影响输出格式，不影响是否跑闸门、也不影响退出码。**
-    # 退出码只由 `--write-baseline` / `--gate` 决定，JSON 一律最后才打印。
-    # 表格与未命中列表**只打印一份**。曾经这里有两份逐行相同的代码：第一份用
-    # 内建 `print()`、第二份用 `emit()`，于是不带 `--json` 时整张表连同"未命中"
-    # 列表被打两遍（带 `--json` 时两份都不执行，所以这个缺陷只在人读路径上可见，
-    # 靠 `--json` 跑 CI 发现不了）。保留的这份统一走 `emit()`：人类可读输出全部
-    # 经由同一个出口，`--json` 时它改道 stderr，stdout 只剩纯 JSON。
+    # `--json` 只影响输出格式，不影响是否跑闸门、也不影响退出码；退出码只由
+    # `--write-baseline` / `--gate` 决定，JSON 一律最后才打印。表格与未命中列表
+    # **只打印一份**，且统一走 `emit()`——人类可读输出全部经由同一个出口，
+    # `--json` 时它改道 stderr，stdout 只剩纯 JSON。
     if not args.json:
         _print_table(results, k, n_by_kind)
         if hv.citation_violations:

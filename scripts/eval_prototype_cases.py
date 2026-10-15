@@ -1,32 +1,23 @@
-"""用**原型抽取的用例**测本项目的红线判定与抗噪（离线、免费、确定）。
+"""用原型抽取的用例测本项目的红线判定与抗噪（离线、免费、确定）。
 
-## 数据出处与边界
+用例在 `data/eval/prototype/`，只用两份与本项目语料无关、可直接迁移的：
+`symptom_status_gold.jsonl`（35 条症状实体三维判定 + 难例标签）与
+`noise_ood_gold.jsonl`（30 条非医疗寒暄 + 30 条真实主诉）。
+`rag_gold.jsonl` 不用：它的 `expect_titles` 指向原型那套 OpenCMKG 派生卡片，与本项目 clinic 语料不同源。
 
-用例在 `data/eval/prototype/`（从 `medical-agent` 逐字复制，出处见表里的 README）。
-这里只用其中两份**与语料无关、可直接迁移**的：
-
-- `symptom_status_gold.jsonl`（35 条）：症状实体的三维判定 + 难例标签
-  （`fake-negation` / `hypothetical` / `experiencer` / `scope-reset`…）；
-- `noise_ood_gold.jsonl`（60 条）：非医疗噪音。
-
-`rag_gold.jsonl` **不用**：它的 `expect_titles` 指向原型那套 OpenCMKG 派生卡片，
-与我们的 clinic 语料不是同一份（详见该目录 README 的"不可迁移"一节）。
-
-## 三条指标，权重不一样
+三条指标，权重不同：
 
 | 指标 | 含义 | 门槛 |
 |---|---|---|
-| **急诊假阳性** | 原型明确标了"否定/他人/过去/假设"，而我们的红线仍然命中 | **必须为 0**（安全底线） |
-| **急诊漏报** | 原型标了"本人当下存在"的红线症状，而我们没命中 | 报告，不作硬门槛（15 词表之外的说法本就可能漏） |
-| **三维一致率** | status / experiencer / temporality 三个维度逐条比对 | 报告；低一致率要点名到标签 |
-
-假阳性之所以是底线：把「没有胸痛，就是有点胸闷」判成急诊，代价不是"多一次就诊"，
-而是**让人从此不再相信红线提示**——那比没有红线更危险。
+| **急诊假阳性** | 原型标了"否定/他人/过去/假设"，红线仍命中 | **必须为 0**：误报会让人不再相信红线提示 |
+| **急诊漏报** | 原型标了本人当下的红线症状，我们没命中 | 报告，不设门槛（15 词表之外的说法本就可能漏） |
+| **三维一致率** | status / experiencer / temporality 逐条比对 | 报告；低一致率要点名到标签 |
 
 用法：
-
     python scripts/eval_prototype_cases.py
     python scripts/eval_prototype_cases.py --verbose   # 逐条打印不一致的用例
+
+退出码：0 通过（假阳性 0 且 non_medical 无误触发）/ 1 未通过；前置条件：`data/eval/prototype/` 三个文件都在。
 """
 
 from __future__ import annotations
@@ -55,8 +46,7 @@ def _load_jsonl(path: Path) -> list[dict[str, Any]]:
 
 
 def _expected_reportable(entity: dict[str, Any]) -> bool:
-    """原型标签 → "可报告"。与 `polarity.is_reportable` 的定义保持一致
-    （present/possible + 本人 + 现在），这样两边说的是同一件事。"""
+    """原型标签 → "可报告"：present/possible + 本人 + 现在，与 `polarity.is_reportable` 同定义。"""
     return (
         entity.get("status") in ("present", "possible")
         and entity.get("experiencer") == "self"
@@ -97,10 +87,9 @@ def eval_symptom_status(guard: RiskGuard, *, verbose: bool) -> dict[str, Any]:
         hit = guard.check(text)
         contains_red_line = any(word in text for word in EMERGENCY_RED_LINE)
         says_asserted = any(_expected_reportable(e) for e in entities)
-        # "漏报"必须看**红线词本身**是否可报告，而不是"文本里有没有可报告的症状"。
-        # 初版口径写糙了，把「没有胸痛，就是有点胸闷」误报成漏报——那句里可报告的是
-        # "胸闷"（不在 15 词表内），而红线词"胸痛"恰恰是被否认的，不命中才是对的。
-        # 指标定义错了，会把正确行为报成缺陷。
+        # "漏报"要看**红线词本身**是否可报告，而不是文本里有没有可报告的症状：
+        # 「没有胸痛，就是有点胸闷」里可报告的是"胸闷"（不在 15 词表内），
+        # 红线词"胸痛"恰被否认，不命中才是对的。
         red_line_reportable = any(word in text and is_reportable(text, word) for word in EMERGENCY_RED_LINE)
 
         # 假阳性：文本里有红线词，但原型没把任何症状标成"本人当下存在"，我们却命中了。
@@ -131,13 +120,9 @@ def eval_symptom_status(guard: RiskGuard, *, verbose: bool) -> dict[str, Any]:
 
 
 def eval_ood(guard: RiskGuard, *, verbose: bool) -> dict[str, Any]:
-    """`noise_ood_gold.jsonl` 是**区分集**，不是纯噪音集：
-
-    - `non_medical`（30 条）是流程寒暄 → **不得**触发红线（硬门槛）；
-    - `medical`（30 条）是真实主诉 → 触发红线**不是错**。对其中含红线词却没命中的，
-      记为**潜在漏报**并列出：它暴露的是我们 15 词红线表的召回缺口。
-      补词表要有依据（见 SECURITY.md 第 6 节关于红线用例的说明），所以不设门槛、
-      只如实报告。
+    """`noise_ood_gold.jsonl` 是区分集：`non_medical`（30 条寒暄）不得触发红线（硬门槛），
+    `medical`（30 条真实主诉）触发红线不是错；其中含红线词却没命中的记为潜在漏报并列出，
+    暴露的是 15 词红线表的召回缺口。补词表要有依据，所以不设门槛、只如实报告。
     """
     cases = _load_jsonl(CASES / "noise_ood_gold.jsonl")
     false_trigger: list[str] = []
@@ -165,9 +150,8 @@ def eval_ood(guard: RiskGuard, *, verbose: bool) -> dict[str, Any]:
         for line in medical_missed:
             print("  -", line)
     if verbose and medical_nohit:
-        # 这一份**必须人工看**：没有红线词不等于不紧急（"胸口疼放射到左肩" 就是典型
-        # 心梗表现，但它的字面不在我们 15 词表里）。列出来是为了让人判断，
-        # 不是为了自动判定——把临床判断交给关键词匹配才是真的危险。
+        # 这一份必须人工看：没有红线词不等于不紧急（"胸口疼放射到左肩"是典型心梗表现，
+        # 字面却不在 15 词表里）。列出来是供人判断，不是自动判定。
         print("\nmedical 组未命中（需人工复核是否属于漏召回）：")
         for line in medical_nohit:
             print("  -", line)

@@ -43,11 +43,8 @@ class BrokenEmbedder:
 
 
 def _seed(store: SqliteStore) -> None:
-    """直接写入两篇文档，向量手工指定，便于精确断言。
-
-    A：正文含 bm25 独有词，向量与查询正交（向量路应当排后面）
-    B：正文不含查询词，向量与查询一致（向量路应当排第一）
-    """
+    """直接写入两篇文档，向量手工指定，便于精确断言两路排序：A 正文含 bm25 独有词、
+    向量与查询正交；B 正文不含查询词、向量与查询一致。"""
     docs, chunks, vecs = [], [], {}
     for doc_id, body, vec in (
         ("a", "## Section\n\nalphauniqueword describes the thing in detail here", _v(0.0, 1.0)),
@@ -103,8 +100,7 @@ class TestChannels:
         assert set(res.chunk_ids) == {"a::0000", "b::0000"}
 
     def test_fusion_ranks_two_channel_hit_higher(self, retriever: HybridRetriever):
-        """A 在全文路第 1、向量路第 2；B 只在向量路第 1。
-        两路都被命中的 A 应当胜出——这正是融合要的效果。"""
+        """A 在全文路第 1、向量路第 2，B 只在向量路第 1：两路都被命中的 A 应当胜出。"""
         res = retriever.search("alphauniqueword")
         assert res.results[0].chunk_id == "a::0000"
         assert res.results[0].ranks == {"bm25": 1, "dense": 2}

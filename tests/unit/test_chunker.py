@@ -1,8 +1,7 @@
-"""切块器的单元测试。
+"""切块器契约测试：每条测试钉住一条会直接影响检索质量的切块规则。
 
-这些不是"覆盖率凑数"，每条都对应一个会**实际污染检索质量**的坑：
-front matter 混进正文、shortcode 连正文一起丢掉、YAML 清单被切断、面包屑层级错乱、
-引用 URL 点不开。语料是 Hugo markdown，这些坑在真实 K8s 文档里全都会遇到。
+覆盖 front matter 剥离、shortcode 与 HTML 清洗、代码块与 YAML 清单不被切断、
+面包屑与上下文头、稳定的 `chunk_id` 与内容指纹。语料是 Hugo markdown。
 """
 
 from kubedocs.chunker import (
@@ -99,7 +98,6 @@ def test_超长正文按段落切且带重叠():
     chunks = chunk_document("concepts/long.md", doc, max_chars=600, overlap=100, min_chars=10)
     assert len(chunks) >= 2, "超长正文没有被切开"
     assert all(len(c.text) <= 600 + 200 for c in chunks), "块长度失控"
-    # 相邻块应有重叠内容（尾部带入下一块）
     assert any(chunks[i].text[-50:] in chunks[i + 1].text for i in range(len(chunks) - 1)), (
         "块之间没有重叠，跨块上下文会丢"
     )
@@ -158,10 +156,8 @@ def test_真实文档端到端不丢正文():
     assert all(c.source_url == "https://kubernetes.io/docs/concepts/cgroups/" for c in chunks)
 
 
-# ---------------------------------------------------------------------------
-# HTML 处理：K8s 的 API reference 用 HTML 表格排版，占真实语料近六成块。
-# 不处理的话 `<td>`/`<thead>` 全变成检索词，把 BM25 与嵌入都带偏。
-# ---------------------------------------------------------------------------
+# HTML 清洗：K8s API reference 用 HTML 表格排版，占真实语料近六成块；
+# 标签不剥离就会变成检索词，把 BM25 与嵌入都带偏。
 def test_HTML_标签剥离但保留文字():
     from kubedocs.chunker import strip_html
 
@@ -209,14 +205,13 @@ def test_HTML_不碰代码围栏内的尖括号():
 
 
 def test_重叠对齐到安全边界不切词():
-    """按字符硬切会产生 `...rip between` 这种从词中间开始的块（真实语料实测）。"""
+    """按字符硬切会切出从词中间开始的块，跨块上下文因此失真。"""
     from kubedocs.chunker import _safe_overlap_tail
 
     block = "alpha beta gamma delta epsilon zeta eta theta iota kappa"
     tail = _safe_overlap_tail(block, 20)
     assert tail, "应当能对齐到一个词边界"
     assert block.endswith(tail)
-    # 对齐后必须从某个词的起始处开始，而不是词中间
     assert block[-len(tail) - 1] in " \n", f"重叠起点落在词中间：{tail!r}"
     assert _safe_overlap_tail(block, 0) == ""
     assert _safe_overlap_tail("", 10) == ""
@@ -224,11 +219,8 @@ def test_重叠对齐到安全边界不切词():
     assert _safe_overlap_tail("a" * 50, 10) == ""
 
 
-# ---------------------------------------------------------------------------
-# 上下文头（add_context）
-# 真实语料实测：不加上下文头时，API reference 的模板化小节在 18861 块里产生
-# 5794 块（30.7%）逐字重复；加上之后降到 212 块（1.12%）。
-# ---------------------------------------------------------------------------
+# 上下文头（add_context）：不加时模板化小节会跨文档逐字重复（约占三成块），
+# 加上 `[文档 › 小节]` 头后内容指纹才区分得开。
 def test_上下文头出现在块首():
     doc = (
         "---\ntitle: DeviceClass\n---\n\n## Operations\n\n### Query Parameters\n\n"

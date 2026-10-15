@@ -1,15 +1,11 @@
 """文本嵌入：把块正文与查询映射到同一向量空间。
 
-提供两种实现，用途截然不同，别混：
+两种实现用途不同，别混：`BgeEmbedder` 用于真实检索，走本地 sentence-transformers，
+首次运行需下载模型；`HashingEmbedder` 无依赖、确定性，只用于单测与离线降级。
 
-| 实现 | 用途 | 说明 |
-|---|---|---|
-| `BgeEmbedder` | 真实检索 | 本地 sentence-transformers，首次运行需下载模型 |
-| `HashingEmbedder` | 单测 / 离线降级 | 无依赖、确定性、**不代表真实语义质量** |
-
-`HashingEmbedder` 存在的意义是让"切块→写入→FTS→融合→引用"这条**管道**能被
-快速、离线、可重复地测;它只擅长字面重合,任何语义改写(同义、换语序)都会退化。
-所以它绝不出现在评测结论里——评测必须跑 BgeEmbedder。
+`HashingEmbedder` 让"切块 -> 写入 -> FTS -> 融合 -> 引用"这条**管道**能快速、离线、
+可重复地跑起来，但它只擅长字面重合，同义改写与换语序都会退化，**不代表真实语义
+质量**，因此绝不出现在评测结论里——评测必须跑 BgeEmbedder。
 """
 
 from __future__ import annotations
@@ -183,9 +179,9 @@ def embed_texts(
 ) -> Vector:
     """分批编码并拼成矩阵。
 
-    分批的意义不只是显存/内存：进度可见 + 单批失败可定位（一次 2 万条崩了
-    没法知道崩在哪）。`progress(done, total, elapsed_s)` 让调用方能把
-    "还要多久"报给用户——编码是整条链路最慢的一步，没有进度就等于不可观测。
+    分批不只是为了显存/内存：进度可见 + 单批失败可定位（一次 2 万条崩了没法知道
+    崩在哪）。`progress(done, total, elapsed_s)` 让调用方能把"还要多久"报给用户
+    ——编码是整条链路最慢的一步，没有进度就等于不可观测。
     """
     chunks: list[np.ndarray] = []
     t0 = time.perf_counter()

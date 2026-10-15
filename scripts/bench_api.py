@@ -1,46 +1,26 @@
-"""API 性能基准：并发下的延迟分位、吞吐、错误率（客户端 + 服务端两个口径）。
+"""API 性能基准：并发下的延迟分位、吞吐、错误率，客户端与服务端两个口径。
 
-## 为什么要它：这是仓库里唯一从没测过的一面
-
-`SECURITY.md` 第 6 节一直写着"**没有做过任何渗透测试、模糊测试或负载测试**"。
-检索延迟有 `cli eval`（p50/p95）与 `bench_store_latency.py`（存储层），
-但**HTTP 层在并发下是什么样，一次都没量过** —— 而"并发下会不会崩、会不会把
-CPU/预算吃光"恰恰是部署时最先被问到的问题。
-
-## 两个口径，别混为一谈
-
-| 口径 | 含什么 | 怎么取 |
-|---|---|---|
-| **客户端** | 应用耗时 + 序列化 + 环回网络 + 客户端调度 | 本脚本直接掐表 |
-| **服务端** | 只有应用耗时（中间件里的 `time.perf_counter()`） | 读 `/metrics` 的 `kubedocs_http_request_seconds` 直方图，**按窗口差值**从 `_bucket` 算分位 |
-
-两个都报：差得远说明瓶颈在序列化/网络或客户端，差得近说明时间真的花在应用里。
-（直方图桶是固定的，服务端分位报的是**桶上界** ⇒ 只会高估；默认桶在 100→250 ms 之间有个大空档。）
-
-## 方法
-
-- 每档并发先跑 `--warmup` 个请求丢弃，再计 `--requests` 个；避免把"首次加载模型"
-  混进稳态数字（冷启动单独由 `--cold` 模式测量，两者**绝不能混报**）；
-- 用 `httpx` 线程池发请求（项目本来就依赖 httpx，不引入 k6/locust —— 本机也没有，
-  且"为了压测装一个工具"与"什么都不装到 C 盘"的约束冲突）；
-- 每档前后读一次 `/metrics`，报服务端计数增量与**非 2xx** 增量：客户端超时会把
-  请求算成失败，而服务端计数能区分"没到服务端"与"服务端返回了错"。
-
-## 用法
-
+用法：
     python scripts/bench_api.py                              # 默认打 127.0.0.1:8080
     python scripts/bench_api.py --base-url http://127.0.0.1:8080 --requests 40
     python scripts/bench_api.py --endpoint /healthz          # 极轻的对照端点
     python scripts/bench_api.py --cold                       # 只测冷启动（首个请求）
     python scripts/bench_api.py --json out.json              # 落盘，便于写进文档
 
-## 读结果时的三个前提
+前置条件：目标服务已在 `--base-url` 上运行并暴露 `/metrics`（服务端计数与直方图从这里
+读）。`/search` 的首个请求要加载嵌入模型，冷启动很慢，所以稳态测试靠 `--warmup` 预热，
+冷启动只能由 `--cold` 单独测，两者不能混报。
 
-1. **本机不是基准机**：16 GB / 20 逻辑核，且 `--base-url` 可能指向 Docker 容器
-   （CPU 与宿主共享）。数字只对"这台机器这一次"负责，不要当容量规划依据。
-2. **`/search` 的第一枪要加载嵌入模型**（本机实测冷启动 20~70 s），所以稳态测试
-   必须预热；`--cold` 是**单独**的模式。
-3. **别把这份数字当 SLO**：没有多机、没有长稳压、没有内存泄漏观测。
+输出：每档并发一行——请求数、成功/失败数、吞吐、客户端 p50/p95/p99 与服务端 p50/p95；
+末行是 `/metrics` 上该端点的请求数与非 2xx 增量。`--json` 落盘同一份结果。
+
+数字怎么读：**客户端**含序列化与环回网络，**服务端**取 `/metrics` 直方图的窗口差值，
+报的是**桶上界**：只会高估（默认桶在 100→250 ms 间有个大空档，报 250 的含义是"分位
+落在 100~250 ms 之间"）。两者差得远说明瓶颈在序列化/网络；失败数要配合服务端非 2xx
+增量看，才能区分"请求没到服务端"与"服务端返回了错"。本机数字只对这台机器这一次负责，
+不能当容量规划或 SLO 依据。
+
+退出码：0 正常结束；`--cold` 下首个请求失败返回 1。
 """
 
 from __future__ import annotations
@@ -86,10 +66,8 @@ class Level:
 def _hist_buckets(text: str, metric: str, endpoint: str) -> dict[float, float]:
     """抓某个端点的直方图桶（`le` -> 累计计数）。
 
-    必须按**前后差值**用（见 `_quantile_from_delta`）：Prometheus 直方图是
-    **进程生命周期累计**的，而进程里第一枪 `/search` 要加载嵌入模型（本机 20~70 s），
-    它落在高桶里。直接对累计值取分位会得到"服务端 p95 = 750ms"这种**假数字**——
-    实测第一次跑就是这么被骗的（客户端只有 100ms）。
+    值是**进程生命周期累计**的，必须按前后差值用（见 `_quantile_from_delta`）；
+    否则冷启动那一枪会把服务端分位抬成假数字。
     """
     out: dict[float, float] = {}
     for line in text.splitlines():
@@ -109,10 +87,8 @@ def _hist_buckets(text: str, metric: str, endpoint: str) -> dict[float, float]:
 def _quantile_from_delta(before: dict[float, float], after: dict[float, float], q: float) -> float | None:
     """窗口内分位（秒 → 毫秒）：先逐桶相减，再在差值上取分位。
 
-    返回的是命中桶的 `le`，即**桶上界**：真分位 ≤ 报出的数。也就是说这个数字
-    只会**高估**、不会低估（默认桶在 100ms → 250ms 之间有个大空档，所以报 250
-    的实际含义是"p50 落在 100~250 ms 之间"）。报表必须写明这一点，否则会被
-    当成"服务端比客户端还慢"。
+    返回命中桶的 `le`，即**桶上界**：真分位 ≤ 报出的数，只会高估。默认桶在
+    100ms→250ms 间有个大空档，所以报 250 的实际含义是"p50 落在 100~250 ms 之间"。
     """
     delta = {le: after.get(le, 0.0) - before.get(le, 0.0) for le in after}
     total = delta.get(float("inf"), 0.0)
@@ -211,9 +187,7 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     base = args.base_url.rstrip("/")
-    # /healthz、/metrics、/domains、/tools、/console 都是 GET；POST 它们会拿到 405，
-    # 于是"延迟"测的是 405 的生成开销、而且 64 个请求全被算成失败
-    # （实测踩到：服务端非 2xx +216 的交叉核对把它抓了出来）。
+    # /healthz、/metrics 等只接受 GET：POST 它们只会拿到 405，测到的是 405 的开销。
     method = args.method or ("POST" if args.endpoint in ("/search", "/ask", "/chat") else "GET")
     payload: dict[str, Any] = {"q": args.query, "top_k": args.top_k}
     url = f"{base}{args.endpoint}"
@@ -238,7 +212,6 @@ def main(argv: list[str] | None = None) -> int:
                 args.json.write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
             return 0 if ok else 1
 
-        # 服务端计数基线
         before_text = client.get(f"{base}/metrics").text
         srv_before, bad_before = _server_counters(before_text, args.endpoint)
 

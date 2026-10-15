@@ -1,10 +1,11 @@
-"""MCP server：把 `ToolRegistry` 里的工具按 MCP 协议暴露出去。
+"""MCP server：把 `ToolRegistry` 里的工具按 MCP 协议经 stdio 暴露出去（也是 `--help` 的说明文本）。
 
-设计取舍见包文档（`kubedocs/mcp/__init__.py`）。这里只强调三条实现约束：
+工具定义全部来自 `ToolRegistry`，本模块不含任何工具的业务描述。三条实现约束：
 
-1. **单一真相源**：工具定义来自 `ToolRegistry`，本文件不含任何工具的业务描述；
-2. **副作用默认不外露**，且开启后强制 `confirm=true`（见 `_SIDE_EFFECT_CONFIRM_FIELD`）；
-3. **参数校验走 pydantic**：与 agent 内部调用同一条路径，MCP 不该是一条绕过校验的后门。
+1. **副作用默认不外露**：未开 `--allow-side-effects` 时过滤掉 `side_effect=True` 的工具；开启后仍需入参传 `confirm=true`。
+2. **参数校验走 pydantic**：与 agent 内部调用同一条路径，MCP 不是绕过校验的后门。
+3. **工具由域装配**：`register_domain_tools` 填充空的 `ToolRegistry`。目前只支持 `clinic` 域，暴露
+   `list_departments` / `get_availability` / `book_appointment`（副作用）+ `check_citations`；MCP 层不持有真实检索器。
 
 用法：
 
@@ -24,20 +25,16 @@ from kubedocs.agent.tools import ToolRegistry
 logger = logging.getLogger(__name__)
 
 _SIDE_EFFECT_CONFIRM_FIELD = "confirm"
-"""副作用工具被要求显式给出的确认字段。
+"""副作用工具必须显式给出的确认字段名，**不在** `ToolSpec.params` 里。
 
-它**不在** `ToolSpec.params` 里——因为它是 MCP 边界特有的要求（agent 内部走的是
-图上的 `interrupt` 确认，而不是这个字段）。加在这里而不是加进 `BookParams`，
-是为了不改变 agent 内部那条已经被测试覆盖的调用路径。
+确认是 MCP 边界特有的要求（agent 内部走图上的 `interrupt`）；塞进 `BookParams` 会改变那条已被测试覆盖的调用路径。
 """
 
 
 def _wire_tools(domain: str) -> None:
-    """按域注册工具（与 `create_app` 用的是同一个 `register_domain_tools`）。
+    """按域装配工具：`ToolRegistry` 初始为空，工具只在装配时才注册进来。
 
-    为什么必须做这一步：`ToolRegistry` 是**空的**，工具由域包在装配时注册。
-    漏了它，MCP 会列出一个空清单——而"空清单"看起来像"这个项目没有能力"，
-    是个安静且误导的失败。
+    与 HTTP 层 `create_app` 同一个装配入口；漏掉它，MCP 会列出空清单——看起来像"这个项目没有能力"。
     """
     from kubedocs.agent.bootstrap import register_domain_tools
     from kubedocs.domains import load_all
@@ -49,9 +46,8 @@ def _wire_tools(domain: str) -> None:
 
         register_domain_tools("clinic", service=BookingService(MockAppointmentProvider()))
     else:
-        # `k8s_docs` 域的检索工具需要真实检索器（要 store + embedder），
-        # 而 MCP 这一层不持有它们。传 None 注册出来的 search 工具**调不通**，
-        # 所以这里直接说清楚，而不是注册一个一调用就报错的空壳。
+        # `k8s_docs` 的检索工具需要真实检索器（store + embedder），MCP 层不持有它们。
+        # 传 None 注册出来的 search 工具调不通，所以直接拒绝，而不是注册一个一调用就报错的空壳。
         raise SystemExit(
             f"域 {domain!r} 的检索工具需要检索器，MCP server 暂不持有；"
             "目前只支持 clinic（号源三件套 + 引用核对）。"
@@ -74,7 +70,9 @@ def _tool_schema(spec: Any, *, allow_side_effects: bool) -> dict[str, Any]:
 
 
 def build_server(domain: str = "clinic", *, allow_side_effects: bool = False) -> Any:
-    """造一个 MCP server。返回的对象已挂好 `list_tools` / `call_tool`。"""
+    """造一个 MCP server：按 `domain` 装配工具，并挂好 `list_tools` / `call_tool`。
+    `allow_side_effects=False` 时清单不含 `side_effect=True` 的工具，直接调用也会被拒。
+    """
     from mcp.server import Server
     from mcp.types import CallToolResult, TextContent, Tool
 

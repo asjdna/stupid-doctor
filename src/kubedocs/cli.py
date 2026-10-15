@@ -1,8 +1,7 @@
 """命令行入口：`python -m kubedocs.cli <子命令>`。
 
-存在的理由很直接：**业务逻辑必须先能在本机跑起来，才谈得上包装成服务**。
-所有能力（摄取 / 检索 / 索引体检 / 评测）都从这里可执行，HTTP 层只是它的一个
-薄包装——这也保证了"能跑通"这件事可以在没有容器、没有数据库、没有网络的情况下复现。
+所有能力（摄取 / 检索 / 索引体检 / 评测）都能从这里跑起来，HTTP 层只是它的薄包装，
+所以"能跑通"这件事可以在没有容器、没有数据库、没有网络的情况下复现。
 
 退出码约定（供 CI 与脚本判断，而不是靠解析 stdout）：
     0 成功      1 参数/用户错误      2 评测闸门不通过      3 索引为空等前置条件不满足
@@ -32,15 +31,13 @@ EXIT_PRECONDITION = 3
 def make_settings(args: argparse.Namespace) -> Settings:
     """CLI 参数覆盖配置。直接构造 Settings 而不是改环境变量，避免污染进程环境。
 
-    ## 域自报的默认值（这是"双域"真正成立的地方）
+    **域自报的默认值**（这是"双域"真正成立的地方）：`Settings` 的 `normalizer` /
+    `embedding_model` / `embedding_dim` 是域相关的——clinic 域用 jieba 预分词 + 中文
+    模型（512 维），k8s 域用原样归一化 + 英文模型（384 维）。这组取值由 `DomainPack`
+    自报，本函数在用户**没有显式指定**时套用。
 
-    `Settings` 的 `normalizer` / `embedding_model` / `embedding_dim` 是**域相关**的：
-    clinic 域必须用 jieba 预分词 + 中文模型（512 维），k8s 域用原样归一化 +
-    英文模型（384 维）。这组取值由 `DomainPack` 自报，本函数在用户**没有显式指定**时套用。
-
-    判据是 `model_fields_set`：环境变量与 `.env` 写过的字段会出现在里面，
-    所以 `KUBEDOCS_EMBEDDING_MODEL=xxx` 仍然优先于域默认值——
-    域提供的是**默认**，不是**强制**。
+    判据是 `model_fields_set`：环境变量与 `.env` 写过的字段会出现在里面，所以
+    `KUBEDOCS_EMBEDDING_MODEL=xxx` 仍然优先于域默认值——域提供的是**默认**，不是**强制**。
     """
     overrides: dict[str, object] = {}
     if getattr(args, "domain", None):
@@ -66,10 +63,9 @@ def make_settings(args: argparse.Namespace) -> Settings:
 def apply_domain_defaults(settings: Settings) -> Settings:
     """把域包自报的归一化/嵌入默认值套到 `Settings` 上（**不覆盖**显式取值）。
 
-    为什么需要它：`--domain` 原先只换了索引目录，语料、归一化器与嵌入模型
-    仍然是 k8s 默认值——于是 `--domain clinic ingest` 会把英文文档按
-    identity 归一化、用英文模型编码，灌进 clinic 的索引。
-    那正是"双域"看起来成立、实际不成立的原因。
+    只换索引目录是不够的：语料、归一化器与嵌入模型都得跟着域一起换。
+    否则 `--domain clinic ingest` 会把英文文档按 identity 归一化、用英文模型编码，
+    灌进 clinic 的索引。
     """
     from kubedocs.domains import load_all
     from kubedocs.domains.base import DomainRegistry
@@ -138,7 +134,7 @@ def _index_label(settings: Settings) -> str:
         return f"{settings.database_url}（schema={settings.domain}）"
     if settings.store == "milvus":
         # 块行/全文在 SQLite，向量在 Milvus 的本地文件里——两个位置都要说清楚，
-        # 否则"索引到底在哪"这个问题会变成一次翻源码。
+        # 否则"索引到底在哪"要翻源码才知道。
         return f"{settings.sqlite_path}（块行+全文） + {settings.milvus_path}（向量）"
     return str(settings.sqlite_path)
 
@@ -337,10 +333,9 @@ def cmd_stats(args: argparse.Namespace) -> int:
         if args.verify:
             payload["fts_integrity"] = store.verify_fts()
             # 向量侧体检：**三个后端的方法名不一样**——`sqlite-vec` / `milvus` 叫
-            # `verify_vec`，`pgvector` 叫 `verify_hnsw`。只试 `verify_vec` 会让
-            # pgvector 那一路的向量体检永远是空的（方法存在却没人调）。
-            # 注意**不要**预先塞一个 None：那会让"这个后端没有向量体检"打印成
-            # 「向量一致性 : None」，比不打印更误导。
+            # `verify_vec`，`pgvector` 叫 `verify_hnsw`，两个都要试，否则 pgvector
+            # 那一路的向量体检永远是空的。注意**不要**预先塞一个 None：那会让
+            # "这个后端没有向量体检"打印成「向量一致性 : None」，比不打印更误导。
             for name in ("verify_vec", "verify_hnsw"):
                 checker = getattr(store, name, None)
                 if callable(checker):
@@ -419,10 +414,9 @@ def cmd_serve(args: argparse.Namespace) -> int:
 def _add_globals(p: argparse.ArgumentParser, default: object) -> None:
     """全局参数（放在主解析器与每个子解析器上，两处都能写）。
 
-    为什么两边都要加：只挂在主解析器上时，`kubedocs ingest --index-dir X`
-    会被判为"无法识别的参数"——用户几乎必然这么写一次。
-    子解析器上的副本用 `default=SUPPRESS`：不写就**不设属性**，
-    从而不会用 None 覆盖掉主解析器已经解析到的值（这是 argparse 的经典坑）。
+    两边都要加：只挂在主解析器上时，`kubedocs ingest --index-dir X` 会被判为
+    "无法识别的参数"。子解析器上的副本用 `default=SUPPRESS`，不写就**不设属性**，
+    从而不会用 None 覆盖掉主解析器已经解析到的值。
     """
     p.add_argument("--index-dir", default=default, help="索引根目录（默认 data/index）")
     p.add_argument("--corpus-dir", default=default, help="语料目录（默认 data/raw/k8s-docs）")
@@ -526,16 +520,15 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv: list[str] | None = None) -> int:
     # 必须在任何第三方库（LiteLLM / huggingface_hub）读到 os.environ **之前**导出 .env，
-    # 否则 .env 里的密钥到不了模型调用（详见 config.load_env_file 的说明）。
+    # 否则 .env 里的密钥到不了模型调用（原因见 `config.load_env_file`）。
     from kubedocs.config import load_env_file
     from kubedocs.observability import configure_logging
 
     load_env_file()
     parser = build_parser()
     args = parser.parse_args(argv)
-    # `--log-level` / `KUBEDOCS_LOG_LEVEL` 在这里真正生效。
-    # 此前它只进了 Settings（并只被 `uvicorn.run(log_level=...)` 用来设 uvicorn 自己的级别），
-    # 本项目自己的 logger 完全不受它影响——一个"设了没反应"的开关。
+    # `--log-level` / `KUBEDOCS_LOG_LEVEL` 在这里生效：configure_logging() 设的是
+    # 本项目自己的 root logger 级别（uvicorn 另有自己的级别参数，由 cmd_serve 传入）。
     configure_logging(make_settings(args))
     t0 = time.perf_counter()
     try:
@@ -554,14 +547,9 @@ def main(argv: list[str] | None = None) -> int:
         print("已中断", file=sys.stderr)
         return 130
     if rc == EXIT_OK:
-        # `--json` 的契约是"stdout 上只有一份机器可读的 JSON"。这条收尾计时是
-        # **人类可读旁白**，因此与 `harness.run_eval` 的 `emit()` 同一约定：`--json`
-        # 时改道 stderr。
-        # 不这么做的后果是实测过的：`eval --json` 的 stdout 是合法 JSON 之后再补一行
-        # 「完成，用时 32.1s」，于是 `json.loads` / `ConvertFrom-Json` 整体报
-        # `Invalid JSON primitive: 成，用时 32.1s`——机器读不到任何东西。
-        # 这不是 eval 独有的：search / ask / stats / docs 的 `--json` 分支都是
-        # `print(json.dumps(...)); return EXIT_OK`，同样会被这行污染。
+        # `--json` 的契约是"stdout 上只有一份机器可读的 JSON"，所以这条人类可读的
+        # 收尾计时在 `--json` 时改道 stderr。否则 `json.loads` 会因为多出这一行而
+        # 整体失败，机器读不到任何东西；search / ask / stats 的 `--json` 分支同理。
         stream = sys.stderr if getattr(args, "json", False) else sys.stdout
         print(f"\n完成，用时 {time.perf_counter() - t0:.1f}s", file=stream)
     return rc

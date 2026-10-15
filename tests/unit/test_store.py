@@ -1,4 +1,6 @@
-"""存储层测试：FTS5 外内容表删除顺序、rowid 回收后的向量对齐、MATCH 注入面。"""
+"""SQLite 存储的单元测试：FTS5 外内容表删除顺序、rowid 回收后的向量对齐、MATCH 表达式与元信息守卫。
+
+守的契约：MATCH 只留词元，删除或重建后两个通道都不再召回被删的块，维度或嵌入模型不符必须拒绝。"""
 
 from __future__ import annotations
 
@@ -49,7 +51,6 @@ def _upsert(store: SqliteStore, doc_id: str, n: int, axis: int, text_prefix: str
     store.finalize()
 
 
-# --------------------------------------------------------------------- MATCH 表达式
 class TestBuildMatchExpr:
     def test_strips_fts_operators(self):
         # `-` 会被 FTS5 解释成 NOT，必须只留词元
@@ -79,13 +80,12 @@ class TestBuildMatchExpr:
         assert "pod" in expr
 
 
-# --------------------------------------------------------------------- 基本读写
 def test_upsert_and_keyword_search(store: SqliteStore):
     _upsert(store, "a", 2, axis=0, text_prefix="kubelet eviction")
     hits = store.keyword_search("kubelet", 10)
     # 两个块都含该词，都该被召回（同一文档的多块命中是正常的）
     assert [cid for cid, _ in hits] == ["a::0000", "a::0001"]
-    assert [rank for _, rank in hits] == [1, 2]  # 名次从 1 起且连续
+    assert [rank for _, rank in hits] == [1, 2]
     assert store.keyword_search("nonexistentterm", 10) == []
 
 
@@ -102,7 +102,6 @@ def test_fts_verify_ok_after_upsert(store: SqliteStore):
     assert store.verify_fts() == "ok"
 
 
-# --------------------------------------------------------------------- 最容易出事的两处
 class TestExternalContentDelete:
     """FTS5 外内容表：删除顺序反了会让索引永久不一致，且只在后续查询才暴露。"""
 
@@ -138,9 +137,9 @@ class TestRowidRecycling:
     def test_vector_row_stays_aligned_after_rowid_reuse(self, store: SqliteStore):
         _upsert(store, "a", 2, axis=0)
         _upsert(store, "b", 2, axis=1)
-        store.delete_docs({"b.md"})  # b 的 rowid 是最大的，会被回收
+        store.delete_docs({"b.md"})  # b 的 rowid 最大，会被回收后交给新块复用
         store.finalize()
-        _upsert(store, "c", 2, axis=2)  # 新块很可能拿到 b 空出的 rowid
+        _upsert(store, "c", 2, axis=2)
         store.finalize()
 
         # 若对齐错了，这里会拿到别的块的向量（余弦为 0），名次就乱了
@@ -174,7 +173,6 @@ class TestRowidRecycling:
             s2.close()
 
 
-# --------------------------------------------------------------------- 元信息守卫
 class TestMetaGuards:
     def test_dim_mismatch_refused(self, tmp_path):
         SqliteStore(

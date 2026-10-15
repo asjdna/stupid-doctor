@@ -1,19 +1,23 @@
-"""从 OpenCMKG 原始三元组推导卡片缺失的科室标签。
+"""从 OpenCMKG 原始三元组推导卡片缺失的科室标签，写 `data/clinic/department_map.json`。
 
-背景：``data/clinic/cards.json`` 里有 12,863 张卡片的「建议就诊科室」是「未标注」，
-且这些卡片的 ``diseases`` 字段就是「暂无」——即**卡片生成阶段丢掉了关系**。
-本脚本回到原始 ``triples.txt``（``head,relation,tail`` CSV）重新推导，
-输出一张可审计的 ``key -> departments`` 映射表，供分诊检索使用。
-
-推导优先级（source 字段记录来源，便于人工抽检）：
-  direct   : 实体本身有 ``*_belong_department`` 关系
-  disease  : 实体是疾病，经 ``disease_belong_department`` 得到
-  symptom  : 实体是症状，经「症状-疾病」关系找到疾病，再取疾病的科室
+`data/clinic/cards.json` 里大量卡片的「建议就诊科室」是「未标注」（`diseases` 也「暂无」），
+因为卡片生成阶段丢掉了关系；本脚本回到原始 `triples.txt`（`head,relation,tail` CSV）
+重新推导，输出可审计的 `key -> departments` 映射表，供分诊检索使用。
 
 用法::
 
-    python scripts/clinic_derive_departments.py --report-only   # 只看覆盖率
-    python scripts/clinic_derive_departments.py                  # 写映射表
+    python scripts/clinic_derive_departments.py --report-only   # 只打印覆盖率与样例
+    python scripts/clinic_derive_departments.py                 # 写出映射表
+
+前置条件：`--triples` 默认 `data/raw/OpenCMKG/triples.txt`（`data/raw/` 不入库，新克隆里
+没有，需用 `--triples` 指定自己的副本）；`--cards` 指向已构建的卡片语料。
+
+输出：`--out`（默认 `data/clinic/department_map.json`）以 `meta` 记录各补全来源计数与置信度
+说明，`map` 是 `key -> {departments, source, confidence}`。`source` 给出推导路径便于抽检：
+`direct`/`via_disease`/`alias:<别名>`（`confidence: high`）或 `fuzzy:<key>:<相似度>`
+（图谱补不齐时才用，Jaccard ≥ 0.50，`confidence: medium`，需人工抽检）。
+
+退出码：0 成功 / 1 找不到 `--triples`。
 """
 
 from __future__ import annotations
@@ -28,18 +32,6 @@ REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO / "src"))
 
 DEFAULT_TRIPLES = REPO / "data" / "raw" / "OpenCMKG" / "triples.txt"
-"""原始三元组的位置（**仓库相对路径，不是某台机器的绝对路径**）。
-
-`data/raw/` 被 `.gitignore` 排除，所以新克隆里这里**是空的**——脚本会打印
-"找不到原始三元组"并退出，那时用 `--triples` 指到你自己的副本即可：
-
-    # 上游 OpenCMKG 的 triples.txt（`head,relation,tail` CSV）
-    # 原型仓库里也有一份：medical-agent/data/raw/OpenCMKG/triples.txt
-    python scripts/clinic_derive_departments.py --triples /path/to/triples.txt
-
-> 早期这里写死了开发机的绝对路径。那对新克隆是**必然失败且看不出原因**，
-> 所以改成仓库相对路径 + 显式报错。
-"""
 DEFAULT_CARDS = REPO / "data" / "clinic" / "cards.json"
 DEFAULT_OUT = REPO / "data" / "clinic" / "department_map.json"
 
@@ -56,7 +48,7 @@ def load_triples(path: Path) -> list[tuple[str, str, str]]:
             parts = line.split(",")
             if len(parts) < 3:
                 continue
-            # 尾部可能自带逗号（如治疗描述），这里只取最后两段之外的全部作为 head
+            # 尾部可能自带逗号（如治疗描述），故只把最后两段当成 relation/tail
             rel, tail = parts[-2], parts[-1]
             head = ",".join(parts[:-2])
             head, rel, tail = head.strip(), rel.strip(), tail.strip()
@@ -88,13 +80,12 @@ def main() -> int:
     dept_rel = [r for r in rel_counts if r.endswith(_DEPT_REL_SUFFIX)]
     print(f"\n科室类关系：{dept_rel}")
 
-    # 实体 -> 科室（直接）
     ent_depts: dict[str, list[str]] = defaultdict(list)
     for head, rel, tail in triples:
         if rel.endswith(_DEPT_REL_SUFFIX) and tail not in ent_depts[head]:
             ent_depts[head].append(tail)
 
-    # 症状（或任意实体）-> 疾病
+    # 实体 -> 疾病：两个方向的关系都归一到这个方向
     ent_diseases: dict[str, list[str]] = defaultdict(list)
     for head, rel, tail in triples:
         if rel.endswith("_belong_disease") or rel in ("disease_has_symptom",):
@@ -132,13 +123,12 @@ def main() -> int:
         if key in result and len(samples) < 15:
             samples.append(f"{key} -> {'/'.join(result[key]['departments'])} ({result[key]['source']})")
 
-    # 未标注 key 到底在不在图谱里？
+    # 未标注 key 有多少根本不在图谱里（决定补全的天花板）
     heads_any = {h for h, _, _ in triples}
     in_kg = sum(1 for k in unlabeled if k in heads_any)
     print(f"\n未标注 key 中出现在三元组头部的：{in_kg:,} / {total:,} ({in_kg / max(total, 1):.1%})")
     print(f"  => 完全没有图谱记录的：{total - in_kg:,} ({1 - in_kg / max(total, 1):.1%})")
 
-    # SameAs 别名归并
     samas: dict[str, list[str]] = defaultdict(list)
     for head, rel, tail in triples:
         if rel == "SameAs":
@@ -161,7 +151,7 @@ def main() -> int:
                 break
     print(f"SameAs 别名可补全：{alias_fixed:,} ({alias_fixed / max(total, 1):.1%})")
 
-    # 模糊归并：无法从图谱补全的，回溯到最相似的已标注 key（记录相似度供人工抽检）
+    # 模糊归并：图谱补不齐的回溯到最相似的已标注 key，记录相似度供人工抽检
     from kubedocs.clinical.triage import RetrievalTriage
 
     cand = [k for k in unlabeled if k not in result]

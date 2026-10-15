@@ -1,23 +1,16 @@
 """`ToolCaller` 的真实实现：把 LiteLLM 的 function calling 接到工具循环上。
 
-## 为什么必须有这个文件
+`tool_loop.py` 只定义 `ToolCaller` 协议，本模块把注册好的工具以 `tools=` 交给真实模型，
+并把回包解析成循环需要的形式。
 
-`tool_loop.py` 只定义了 `ToolCaller` **协议**，没有任何实现——
-也就是说工具循环写好了、工具也注册好了，但**没有东西把 `tools=` 交给真实模型**。
-整条链路仍然差最后一段。这个文件就是那一段。
+调用方必须知道的契约：
 
-## 三个容易出错的地方
-
-1. **`arguments` 是 JSON 字符串**，不是 dict。模型返回的是字符串，
-   必须 `json.loads`；解析失败不能让循环崩，要把它当成"参数非法"交给循环处理
-   （`arguments` 留空 dict，错误写进内容里由循环回灌）。
-2. **`tool_calls` 可能是 `None`**（只是普通回答）。必须区分"要调工具"与"直接作答"。
-3. **成本拿不到不该阻断，但也绝不能报成 0 就完事**：未知模型算不出价时，
-   这里返回 `cost_priced=False`，由工具循环交给预算按**保守上限**计入。
-   曾经的写法是 `except: self.cost = self.cost`（一个**字面意义上的空操作**），
-   等于把这次调用悄悄记成免费——预算闸门因此永远拦不住（见 SECURITY.md 的 S-2）。
-   注意"真免费"（本地模型的定价就是 0）与"算不出价"是两件事，前者仍然是
-   `cost_priced=True`：实测 litellm 1.102.1 对 `ollama/llama3` 正常返回 `0.0`。
+1. `arguments` 是模型给出的 **JSON 字符串**，这里 `json.loads` 成 dict；解析失败不抛异常，
+   而是以 `{"__parse_error__": ...}` 作为参数交给循环回灌，让模型自己改；
+2. `tool_calls` 可能是 `None`（只是普通回答），此时返回空列表，调用方据此区分
+   "要调工具"与"直接作答"；
+3. 返回值里的 `cost_priced=False` 表示**这次算不出价**，不是 0 元：工具循环会把它交给预算
+   按保守上限计入。模型真定价 0（如本地模型）仍然是 `cost_priced=True`。
 """
 
 from __future__ import annotations
@@ -34,7 +27,7 @@ class LiteLLMToolCaller:
     `tools` 为空时**不带 tools 参数**：有些供应商在 `tools=[]` 时会报错，
     而这个实现同时要服务"纯对话"（无工具）场景。
 
-    返回值额外多了两个键：`cost_usd` 与 `cost_priced`（见模块文档第 3 条）。
+    返回值额外多了两个键：`cost_usd` 与 `cost_priced`（含义见模块文档第 3 条）。
     """
 
     def __init__(self, settings: Settings) -> None:
@@ -76,9 +69,8 @@ class LiteLLMToolCaller:
             priced = raw_cost is not None
             cost = float(raw_cost) if priced else 0.0
         except Exception:  # noqa: BLE001 - 未知模型算不出价：不阻断主流程，但**不报成 0**
-            # 实测 litellm 1.102.1 对未登记模型抛
-            # `Exception: This model isn't mapped yet`。这里只负责把"没算出来"如实标出来，
-            # 金额由 tool_loop -> DailyBudget 按保守上限计入（不能当成免费）。
+            # 这里只负责把"没算出来"如实标出，金额由 tool_loop -> DailyBudget 按保守上限计入
+            # （不能当成免费）。
             cost, priced = 0.0, False
             self.unpriced_calls += 1
         self.cost += cost

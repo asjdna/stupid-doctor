@@ -169,8 +169,7 @@ class TestGate:
         assert any("嵌入模型变了" in f for f in fails)
 
     def test_top_k_change_refuses_comparison(self):
-        """拿 hit@20 去比基线的 hit@10 会**变绿**（hit 随 k 单调上升），
-        等于给了「把 --top-k 改大以掩盖退化」这条后门——必须拒绝。"""
+        """hit 随 k 单调上升，拿 hit@20 比基线的 hit@10 会变绿，等于留了后门。"""
         fails = _hard(check_gate(_base(), _current(top_k=20), allow_drift=False))
         assert any("top_k 不一致" in f for f in fails)
 
@@ -179,11 +178,9 @@ class TestGate:
         assert _hard(check_gate(_base(), _current(top_k=10), allow_drift=False)) == []
 
     def test_corpus_sha_change_refuses_comparison(self):
-        """**核心回归**：语料换了就必须拒绝，而不是"块数差得不多所以照比"。
+        """语料换了就必须拒绝比较，不能因为块数差在容差内就照比。
 
-        修之前 `corpus_sha` 只被计算与落盘、从未被比较，实际把关的只是 2% 的块数容差；
-        实测（2026-10-14）重拉上游语料后文档 1720→1722、块数 18811→18822（+0.058%），
-        落在容差内 ⇒ **静默通过、一个字都不打印**，而文档却声称闸门会拒绝跨语料比较。
+        只比对块数容差时，换语料会静默通过；指纹变了就一律拒绝。
         """
         fails = _hard(check_gate(_base(), _current(corpus_sha="deadbeef"), allow_drift=False))
         assert any("语料指纹变了" in f for f in fails)
@@ -271,11 +268,10 @@ def test_run_eval_end_to_end_writes_baseline(settings, store, embedder, tmp_path
 
 
 def test_run_eval_gate_passes_then_fails_on_regression(settings, store, embedder, tmp_path):
-    """端到端验证闸门真的会红：基线冻结后把基线抬高，当前分数必须被判为回归。
+    """端到端验证闸门真的会红：抬高基线后当前分数必须被判为回归。
 
-    标注集刻意放一条**问不到**的查询（must_contain 合法，但问题指向干扰文档，
-    且 top_k=1 让目标文档挤不进结果），这样实际 hit 是 0.5，给"抬高基线"留出
-    可比较的空间——否则当前分数已是 1.0，基线无论怎么抬都不可能触发下降判定。
+    标注集刻意含一条问不到的查询（top_k=1 时目标文档挤不进结果），实际 hit=0.5，
+    否则当前分数已是 1.0，基线怎么抬都触发不了下降判定。
     """
     _corpus_with_two_docs(settings)
     ingest(store, embedder, settings)
@@ -368,12 +364,7 @@ def test_hashing_embedder_is_deterministic():
 
 # ------------------------------------------------- `--json` 不得绕过闸门（回归测试）
 class TestJsonDoesNotBypassGate:
-    """缺陷回归：`--json` 曾经抢在 `--gate` 之前 `return EXIT_OK`。
-
-    后果不是"输出格式不对"，而是**退出码失去意义**：`eval --gate --json` 恒为 0，
-    闸门连比较都没做。任何用 `--json` 卡闸门的自动化都在看假绿灯。
-    因此这里的断言钉的是**退出码本身**，而不是"打印了什么"。
-    """
+    """`--json` 不得绕过 `--gate`：退出码必须逐位相同，否则自动化在看假绿灯。"""
 
     @staticmethod
     def _fixture(settings, store, embedder, tmp_path):
@@ -477,13 +468,7 @@ class TestJsonDoesNotBypassGate:
 
 # ------------------------------------------- 人读路径的输出不得重复（回归测试）
 class TestHumanReadableOutputIsNotDuplicated:
-    """缺陷回归：表格与"未命中"列表曾被**逐行重复的两段代码**打印两遍。
-
-    第一段用内建 `print()`、第二段用 `emit()`，两段都包在 `if not args.json` 里。
-    带 `--json` 时两段都不执行，所以"用 `--json` 跑评测"的自动化**永远看不到**
-    这个缺陷；只有人眼读 stdout 才会发现整张表连"未命中"列表出现了两次。
-    这也解释了为什么它能在 767 个测试全绿的情况下存活。
-    """
+    """人读输出不得重复：表格与"未命中"列表在 stdout 各只出现一次。"""
 
     @staticmethod
     def _fixture(settings, store, embedder, tmp_path):

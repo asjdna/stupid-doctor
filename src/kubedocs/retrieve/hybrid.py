@@ -1,20 +1,17 @@
-"""混合检索：FTS5(BM25) + 向量近邻 -> RRF 融合 ->（可选）cross-encoder 精排。
+"""混合检索：FTS5(BM25) + 向量近邻 → RRF 融合 →（可选）cross-encoder 精排。
 
-## 两路为什么都需要
+两路互补：
 
-- **全文路（BM25）** 强在**精确词元**：`kubelet`、`--eviction-hard`、
-  `topologySpreadConstraints` 这类标识符，向量模型经常把它和别的词压得很近；
-  而 BM25 只要出现就命中。用户查报错信息、参数名时全靠它。
-- **向量路** 强在**改述**：用户问"pod 一直重启怎么办"，文档里写的是
-  "CrashLoopBackOff" 和 "restart policy"，字面不等但语义相邻。纯 BM25 会漏。
+- **全文路（BM25）** 强在精确词元：`kubelet`、`--eviction-hard`、
+  `topologySpreadConstraints` 这类标识符只要出现就命中，查报错信息与参数名靠它；
+- **向量路** 强在改述：问"pod 一直重启怎么办"，文档里写的是 "CrashLoopBackOff"
+  与 "restart policy"，字面不等但语义相邻，纯 BM25 会漏。
 
-两路召回后按名次做 RRF 融合（理由见 `fusion.py` 的模块文档：免标定、跨语料稳）。
+两路召回后按名次做 RRF 融合（免标定、跨语料稳定，理由见 `fusion.py`）。
 
-## 降级必须是"有记录的降级"
-
-嵌入模型不可用时（没装、没下到、爆内存），这里**不会**让查询失败：退化成纯
-BM25 并把原因写进 `diagnostics["degraded"]`。原因很重要——一个静默变成纯关键词
-的 RAG 系统，在评测里表现为"分数莫名其妙掉了几个点"，排查成本极高。
+嵌入模型不可用时查询不会失败：退化成纯 BM25，并把原因写进
+`diagnostics["degraded"]`。降级必须留下记录——静默变成纯关键词检索的系统，
+在评测里只表现为"分数莫名掉了几个点"，很难定位。
 """
 
 from __future__ import annotations
@@ -128,11 +125,10 @@ class HybridRetriever:
                 )
             try:
                 hits = self.store.dense_search(qv, limit)
-            except Exception as e:  # noqa: BLE001 - 存储层不可用也必须降级，见下面的说明
-                # **存储层的失败同样要降级并记录**：此前 try 只包住 embedder.encode，
-                # 于是 sqlite-vec 行数不一致 / 维度不符这类 StoreError 会直接抛出，
-                # 既没有纯全文回退，也没有 diagnostics.degraded 里的原因——
-                # 与 README「向量路不可用 → 降级为纯全文检索并记录原因」相反。
+            except Exception as e:  # noqa: BLE001 - 存储层不可用同样降级，不向上抛
+                # 存储层的失败（sqlite-vec 行数不一致、维度不符等）也必须走同一条降级
+                # 路径：返回空结果并在 diagnostics["degraded"] 里留下原因，交由上层用
+                # 纯全文结果兜底。
                 return (
                     [],
                     {"n": 0, "ms": round((time.perf_counter() - t0) * 1000, 1)},
@@ -155,8 +151,7 @@ class HybridRetriever:
     ) -> SearchResult:
         """跑一次检索。
 
-        `channels` 用来做**单路消融**：只跑一路才能证明"融合确实比单路好"。
-        没有这个开关，"混合检索"就只是一个无法验证的主张。
+        `channels` 取 `("bm25", "dense")` 的子集即可只跑一路，用于单路消融对比。
         """
         top_k = top_k or self.settings.top_k
         degraded: list[str] = []

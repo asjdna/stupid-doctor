@@ -152,10 +152,13 @@ class ClinicPack:
             report.chunks_written += len(chunk_slice)
             report.chunks_embedded += len(chunk_slice)
         report.elapsed_s = 0.0
-        report.notes.append(
-            "clinic 索引完成。若用的是 hashing 占位向量，**只有 FTS5 中文 BM25 通道有效**；"
-            "要启用稠密路需用 bge-small-zh 重跑一次全量编码。"
-        )
+        note = f"clinic 索引完成：嵌入器 {embedder.name}（{embedder.dim} 维）。"
+        if embedder.name.startswith("hashing"):
+            note += (
+                " hashing 是占位向量，本次只有词法（BM25）通道真正参与排序；"
+                "要启用稠密路，改用 bge 重跑一次全量编码。"
+            )
+        report.notes.append(note)
         return report
 
     def retriever(self, store: Store, embedder: Embedder, settings: Settings) -> HybridRetriever:

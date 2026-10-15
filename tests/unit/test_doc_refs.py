@@ -1,30 +1,18 @@
-"""`scripts/check_doc_refs.py` 的契约测试：**证明这个门禁真的会咬人**。
+"""`scripts/check_doc_refs.py` 的契约测试：门禁必须真的会咬人，而不只是"打印通过"。
 
-## 为什么必须有反例
+正例是当前仓库的全部引用；反例全部在 `tmp_path` 里造临时文档与临时目标文件，
+**不改真实文档**。覆盖的判据：
 
-一个只能"打印通过"的检查器等于没有检查器。本文件里最有价值的是
-`TestWrongContentIsCaught`：它在 `tmp_path` 里造一份**锚点指向错误内容**的文档
-（散文说 `run_tool_loop()`，锚点却指到另一个函数的行），检查器必须**非零退出**。
-如果哪天有人把内容判据删掉、退化成"只看行号越界"，这条会立刻变红。
-
-反例全部在 `tmp_path` 里造临时文档与临时目标文件，**不改真实文档**——
-为了造反例去改 SECURITY.md，最后一定会把假锚点提交进去。
-"真实文档现在全通过" 由 `TestCurrentDocs` 覆盖（只读，不写）。
-
-## 覆盖的判据
-
-- 正例：当前仓库的全部引用通过，白名单条目不报错；
-- 反例：锚点指向错误内容（有候选标识符，但一个都没命中）；
-- 反例：一句里既有普通词又有强候选时，只认强候选；
-- 反例：目标文件不存在、行号越界、缩写路径有歧义；
-- 反例：散文里没有可校验的标识符、又不在白名单里（不许静默跳过）；
-- 反例：白名单钉住的 `expect` 内容漂走了（白名单不是免死金牌）；
-- 功能：无文件名的续写引用沿用同段上文的目标文件；没上文时算失败。
+- 锚点指向错误内容、一句里有强候选时只认强候选；
+- 目标文件不存在、行号越界、缩写路径有歧义、裸续写引用没有归属；
+- 散文里没有可校验标识符时必须显式登记白名单；
+- 白名单钉住的 `expect` 漂走了仍然失败；无文件名的续写引用沿用同段上文的目标文件。
 """
 
 from __future__ import annotations
 
 import importlib.util
+import re
 import sys
 from pathlib import Path
 from types import ModuleType
@@ -35,24 +23,21 @@ from kubedocs.config import repo_root
 
 SCRIPT = repo_root() / "scripts" / "check_doc_refs.py"
 
-# 本文件自己也落在检查器的扫描面里（`tests/**/*.py`）。所以文档里那种
-# `文件:行号` 引用必须**在运行时拼出来**，不能在源码里写成字面量——
-# 否则这些测试夹具会先被检查器抓到（实测踩过：13 处"目标文件不存在"）。
+# 本文件自己也在扫描面里（`tests/**/*.py`）：`文件:行号` 引用必须在运行时拼出来，
+# 写成字面量会先被检查器当成真引用校验。
 _TICK = "`"
 
 
 def _ref(target: str, spec: str) -> str:
-    """拼出一个反引号引用（target 加冒号加行号，例如 src/svc/alpha.py 的 10-11 行）。"""
+    """拼出一个反引号引用（目标文件加冒号加行号）。"""
     return f"{_TICK}{target}:{spec}{_TICK}"
 
 
 def _load_script() -> ModuleType:
     """按路径加载脚本模块（`scripts/` 不是包，没有 `__init__.py`）。
 
-    ⚠️ 必须先把模块登记进 `sys.modules` 再 `exec_module`：脚本里有
-    `@dataclass` 与 `from __future__ import annotations`，dataclasses 解析字符串注解时
-    会去 `sys.modules[cls.__module__]` 里查；不登记就是 `None.__dict__` 的
-    AttributeError（实测踩过）。
+    必须先登记 `sys.modules` 再 `exec_module`：`@dataclass` 解析字符串注解时会去
+    `sys.modules[cls.__module__]` 里查，不登记就是 `None.__dict__` 的 AttributeError。
     """
     spec = importlib.util.spec_from_file_location("_check_doc_refs_script", SCRIPT)
     assert spec is not None and spec.loader is not None
@@ -89,53 +74,69 @@ class TestCurrentDocs:
         out = capsys.readouterr().out
         assert code == 0, out
         assert "结果：通过" in out
-        # 别让"零引用"伪装成通过：扫描面必须真的有东西
-        assert "引用处数   : 0" not in out
+        # 别让"扫描面塌了"伪装成通过：参与扫描的文件数必须真的成规模。
+        # 刻意不校验引用条数——文档不写 `文件:行号` 是正常形态，条数为 0 不等于没在扫。
+        match = re.search(r"扫描文档\s*:\s*(\d+) 个文件", out)
+        assert match is not None, out
+        assert int(match.group(1)) > 100, out
 
-    def test_whitelisted_entries_are_reported_not_swallowed(
+    def test_whitelist_listing_prints_every_reason(
         self, script: ModuleType, capsys: pytest.CaptureFixture[str]
     ) -> None:
-        """白名单必须**被打印出来**（含条数与理由），否则就是静默跳过。
+        """白名单必须**被打印出来**（含条数与理由），否则豁免就是静默的。
 
-        断言的是**不变量**（脚本里登记的每条 `reason` 都出现在输出里），
-        而不是某个固定措辞——原先断言 `"白名单：第"`，措辞一改就变成假失败
-        （实际发生过：重写白名单理由时 5 条都带了理由，这条测试却红了）。
+        断言的是不变量（脚本里登记的每条 `reason` 都出现在输出里），而不是某个固定措辞。
         """
-        _run(script, repo_root())
+        assert int(script.main(["--root", str(repo_root()), "--whitelist"])) == 0
 
         out = capsys.readouterr().out
-        assert "白名单     :" in out
-        assert script.WHITELIST, "白名单不该是空的（空表会让这条测试退化成恒真）"
+        assert f"白名单 {len(script.WHITELIST)} 条" in out
         for white in script.WHITELIST.values():
             assert white.reason in out, f"白名单条目没有把理由打印出来：{white.reason[:40]}"
 
-    def test_whitelist_listing_matches_the_table(
-        self, script: ModuleType, capsys: pytest.CaptureFixture[str]
-    ) -> None:
-        assert int(script.main(["--root", str(repo_root()), "--whitelist"])) == 0
-        out = capsys.readouterr().out
-        assert f"白名单 {len(script.WHITELIST)} 条" in out
+
+class TestWhitelistIsNotAFreePass:
+    """白名单只免掉"散文里没有可校验标识符"这一条，**不免内容核对**。"""
+
+    def test_whitelisted_anchor_must_satisfy_expect(self, script: ModuleType, tmp_path: Path) -> None:
+        target = "src/svc/alpha.py"
+        _write(tmp_path, target, "def alpha() -> int:\n    return 1\n")
+        _write(tmp_path, "README.md", f"# 说明\n\n见 {_ref(target, '2')}。\n")
+        key = ("README.md", f"{target}:2")
+
+        hit = script.check_paths(
+            tmp_path,
+            ["README.md"],
+            whitelist={key: script.White(reason="散文里只有这个锚点", expect="return 1")},
+        )
+        assert [f.status for f in hit.whitelisted] == ["white"]
+        assert hit.whitelisted[0].anchor.text == f"{target}:2"
+
+        drifted = script.check_paths(
+            tmp_path,
+            ["README.md"],
+            whitelist={key: script.White(reason="同上", expect="return 2")},
+        )
+        assert [f.status for f in drifted.failures] == ["fail"]
+        assert "锚点已漂移" in drifted.failures[0].detail
 
 
 class TestMissingFileRefsAreCaught:
     """反例：引用了**不存在的 `.md` 文件**必须非零退出。
 
-    这是本检查器此前的**整类盲区**：`文件:行号` 校验要求"路径 + 冒号 + 数字"，
-    所以只写文件名的引用完全不进入校验——`docs/adr/0005-milvus-后端.md` 曾经
-    并不存在、12 处代码引用它，而门禁一路绿灯。下面的反例把这个能力钉住：
-    如果哪天有人把文件引用检查删掉，这几条会立刻变红。
+    只写文件名的引用不进入 `文件:行号` 校验，所以这一类必须单独把关；
+    删掉这段检查，下面的反例会立刻变红。
     """
 
     def test_dangling_docs_path_fails(self, script: ModuleType, tmp_path: Path) -> None:
-        # ⚠️ 路径必须在**运行时拼**：本文件自己也落在检查器的扫描面里
-        # （`tests/**/*.py`），写成字面量会让这些假引用先被真仓库的检查抓到。
-        a = "docs/adr/" + "9999-nonexistent.md"
-        b = "docs/adr/" + "8888-nope.md"
+        # 路径必须在运行时拼：本文件也在扫描面里，字面量会被检查器先抓到
+        a = "docs/" + "9999-nonexistent.md"
+        b = "docs/" + "8888-nope.md"
         _write(tmp_path, "README.md", f"# 说明\n\n见 `{a}` 与 [另一份]({b})。\n")
         assert _run(script, tmp_path) == 1
 
     def test_existing_docs_path_passes(self, script: ModuleType, tmp_path: Path) -> None:
-        real = "docs/adr/" + "0001-real.md"
+        real = "docs/" + "0001-real.md"
         _write(tmp_path, real, "# 真文件\n")
         _write(tmp_path, "README.md", f"# 说明\n\n见 `{real}`。\n")
         assert _run(script, tmp_path) == 0
@@ -153,15 +154,14 @@ class TestMissingFileRefsAreCaught:
     def test_schematic_paths_are_not_flagged(self, script: ModuleType, tmp_path: Path, token: str) -> None:
         """精度换召回：这几种"看着像路径、其实是示意/外部"的写法不报错。
 
-        宽规则实测一次抓出 11 处、其中只有 1 处是真的——噪声门禁会被无视，
-        那比没有门禁更糟。代价（裸文件名的悬空引用查不出）写在脚本的注释里。
+        宽规则会抓出大量示意路径，而噪声门禁会被无视——那比没有门禁更糟。
         """
         _write(tmp_path, "README.md", f"# 说明\n\n例如 `{token}`。\n")
         assert _run(script, tmp_path) == 0
 
 
 class TestWrongContentIsCaught:
-    """反例（本次最关键的一类）：锚点**指到了别的函数**上。"""
+    """反例：锚点**指到了别的函数**上——内容判据的核心。"""
 
     def test_anchor_pointing_at_the_wrong_function_fails(
         self, script: ModuleType, tmp_path: Path, capsys: pytest.CaptureFixture[str]
@@ -278,7 +278,7 @@ class TestStructuralFailures:
     def test_bare_line_reference_inherits_the_previous_file(
         self, script: ModuleType, tmp_path: Path, capsys: pytest.CaptureFixture[str]
     ) -> None:
-        """SECURITY.md 第 283-284 行就是这种写法（只有冒号与行号，沿用上一句的 compose 文件）。"""
+        """只有冒号与行号的续写引用沿用上一句的目标文件，是文档里的常见写法。"""
         _write(
             tmp_path,
             "docs/design.md",
@@ -332,11 +332,10 @@ class TestUnverifiableRefsNeedTheWhitelist:
         assert "散文里只有这个锚点" in report.whitelisted[0].detail
 
     def test_whitelist_survives_lines_inserted_above_it(self, script: ModuleType, tmp_path: Path) -> None:
-        """**核心回归**：在文档上方插行不该让豁免失效。
+        """在文档上方插行不该让豁免失效：白名单的键不含"引用所在的行号"。
 
-        键里原先带"引用所在的行号"，于是任何在上方插入内容的编辑都会让豁免失效并报
-        "锚点已漂移" —— 而真正防漂移的是 `expect`（它校验**目标文件**在锚点处的内容）。
-        实测被这个机制拦下 4 次，每次都是纯重算开销。位置不是身份。
+        键里放行号，任何上方插入内容的编辑都会让豁免失效并报"锚点已漂移"；
+        真正防漂移的是 `expect`（它校验**目标文件**在锚点处的内容）。位置不是身份。
         """
         _write(tmp_path, "docs/security.md", self._doc())
         _write(tmp_path, "svc/alpha.py", "# 本文件尚未在本机实测。\n")

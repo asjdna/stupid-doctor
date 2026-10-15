@@ -1,7 +1,6 @@
-"""CLI 测试：参数位置、退出码、子命令串起来能跑。
+"""CLI 契约测试：全局参数位置、退出码、子命令能否串起来跑。
 
-单测覆盖的是各模块内部逻辑；这里覆盖的是**接线**——参数名写错、退出码写错、
-子命令之间不兼容这类问题，只有从命令行入口跑一遍才会暴露。
+参数名写错、退出码写错、子命令不兼容这类接线问题，只有从命令行入口跑一遍才暴露。
 全部走哈希向量，不下载模型、不联网。
 """
 
@@ -169,9 +168,7 @@ class TestFullPipeline:
 
         assert main(_args(tmp_path, "stats", "--verify", "--json")) == EXIT_OK
         captured = capsys.readouterr()
-        # 这里以前写的是 `out.split("完成")[0]`——那是在**迁就缺陷**：`main()` 结尾的
-        # 「完成，用时 Xs」旁白混在 stdout 的 JSON 后面。现在它按约定走 stderr，
-        # 所以断言写成"stdout 能被 json.loads 直接吃掉"，让回归无处可藏。
+        # 收尾旁白按约定走 stderr，所以断言写成"stdout 能被 json.loads 直接吃掉"
         assert "完成，用时" in captured.err
         payload = json.loads(captured.out)
         assert payload["n_chunks"] > 0
@@ -200,12 +197,10 @@ class TestFullPipeline:
 
 
 class TestJsonStdoutIsPureJson:
-    """回归：`--json` 时 stdout 上只允许有 JSON，`main()` 的收尾旁白也不例外。
+    """`--json` 时 stdout 上只允许有 JSON，`main()` 的收尾旁白一律走 stderr。
 
-    `main()` 结尾无条件 `print("完成，用时 Xs")` 曾把旁白补在任何 JSON 之后，
-    于是 `kubedocs eval --json | jq`（或 PowerShell 的 `ConvertFrom-Json`）整体解析失败
-    ——**所有** `--json` 子命令的机器可读输出都报废，而单测当时是用
-    `out.split("完成")[0]` 绕过它的，正好把这个缺陷挡住了。
+    否则 `... | jq`（或 PowerShell 的 `ConvertFrom-Json`）整体解析失败，
+    所有 `--json` 子命令的机器可读输出都报废。
     """
 
     def test_timing_line_goes_to_stderr_in_json_mode(self, tmp_path, capsys):
@@ -229,18 +224,13 @@ class TestJsonStdoutIsPureJson:
 
 
 class TestStatsVerifyCallsTheVectorChecker:
-    """`stats --verify` 必须真的做**向量侧**体检，而且要认两种方法名。
+    """`stats --verify` 必须真的调用后端的向量体检方法，且两种方法名都要认。
 
-    缺陷形态：早先只 `getattr(store, "verify_vec")`，而 `pgvector` 的方法叫
-    `verify_hnsw` —— 于是三个后端里有一个的向量体检**永远是空的**，
-    方法存在却没人调，`stats --verify` 照样打印"通过"。
+    只认 `verify_vec` 会让 `verify_hnsw` 那样的后端永远体检不到，`stats --verify` 照样打印"通过"。
     """
 
     class _FakeStore:
-        """只实现 `stats --verify` 用到的那几个方法。
-
-        `method=None` 表示"这个后端没有任何向量体检方法"。
-        """
+        """只实现 `stats --verify` 用到的方法；`method=None` 表示后端没有向量体检方法。"""
 
         def __init__(self, method: str | None) -> None:
             self._method = method

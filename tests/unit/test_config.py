@@ -11,11 +11,7 @@ from kubedocs.config import Settings, env_file_path, load_env_file, repo_root
 
 
 class TestPathAnchoring:
-    """相对路径必须锚定仓库根，绝不锚定进程 cwd。
-
-    这是上一代项目踩过的坑：包被移动一层后，`__file__` 相对路径静默指向空目录，
-    表现为"库里明明有数据却搜不到"，排查成本极高。
-    """
+    """相对路径必须锚定仓库根，绝不锚定进程 cwd；锚错时包被移走一层就静默指向空目录。"""
 
     def test_relative_paths_resolve_under_repo_root(self):
         s = Settings(index_dir="data/index", corpus_dir="data/raw/k8s-docs")
@@ -48,8 +44,7 @@ class TestPathAnchoring:
 class TestEffectiveEmbeddingModel:
     """索引里记的必须是**真正决定向量空间**的标识。
 
-    否则一次 hashing 运行与一次真实模型运行会记成同一个模型名，
-    闸门就会拿两种完全不同质量的运行互相比——静默的错误结论。
+    否则 hashing 运行与真实模型运行会记成同一个模型名，闸门就拿两种质量互相比。
     """
 
     def test_hashing_reports_its_own_identity(self):
@@ -91,12 +86,10 @@ def test_llm_fallback_list_parsing():
 
 
 class TestLoadEnvFile:
-    """回归：`.env` 必须被**导出到 os.environ**，否则第三方库读不到密钥。
+    """`.env` 必须被**导出到 os.environ**，否则第三方库读不到密钥。
 
-    pydantic-settings 只把 .env 填进 Settings 对象，不碰 os.environ；
-    而 LiteLLM、huggingface_hub 以及本项目自己的 has_api_key() 都读 os.environ。
-    结果：`cp .env.example .env` 填好密钥后，模型调用仍报"未配置密钥"，
-    README 描述的流程静默失效。这个缺陷被"回答层从未跑真实 LLM"掩盖了很久。
+    pydantic-settings 只把它填进 Settings 对象，而 LiteLLM、huggingface_hub 与本项目的
+    has_api_key() 都读 os.environ——只填对象会让密钥流程静默失效。
     """
 
     def test_values_are_exported(self, tmp_path, monkeypatch):

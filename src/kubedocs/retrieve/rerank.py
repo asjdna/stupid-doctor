@@ -1,20 +1,15 @@
 """精排（可选）：cross-encoder 对 RRF 的候选做二次打分。
 
-## 它解决 RRF 的什么短板
+RRF 只看名次、不看块的内容，"包含答案的那一块"和"只是词面相似的一块"可能并列。
+cross-encoder 把 (query, chunk) 拼成一对一起编码，能做真正的交互式相关性判断，
+所以"召回 → 融合 → 精排"是常见的三段式流程。
 
-RRF 只看名次，**完全不管块的内容**。所以"包含答案的那一块"和"只是词面相似
-的一块"在 RRF 里可能并列。cross-encoder 把 (query, chunk) 拼成一对一起编码，
-能做真正的交互式相关性判断——这也是"混合召回 + cross-encoder 精排"成为
-工业标准三段式（recall → fuse → rerank）的原因。
+默认关闭，理由有三：它是**串行**的（每个候选一次前向，20 个候选比一次向量检索
+慢两个数量级）；需要额外模型（bge-reranker-base 约 1.1GB）；收益必须在评测集上
+量出来才算数。
 
-## 为什么默认关闭
-
-1. 它是**串行**的：每个候选一次前向，20 个候选比一次向量检索慢两个数量级；
-2. 它需要额外模型（bge-reranker-base 约 1.1GB）；
-3. 它的收益必须在评测集上量出来才作数——没测之前默认关，是这个项目的纪律。
-
-失败一律降级为"保持 RRF 顺序并记录诊断"，绝不因为精排不可用而让整个查询失败：
-精排是锦上添花，召回才是生命线。
+精排失败一律降级为"保持 RRF 顺序并记录诊断"，不让整个查询失败：精排是锦上添花，
+召回才是生命线。
 """
 
 from __future__ import annotations
@@ -24,7 +19,7 @@ from typing import Protocol
 
 
 class Reranker(Protocol):
-    """精排器接口：输入候选（已按 RRF 排序），输出重排后的候选。"""
+    """精排器接口：给一个查询和若干候选文本打相关性分。"""
 
     def score(self, query: str, texts: Sequence[str]) -> list[float]: ...
 
@@ -58,8 +53,7 @@ class CrossEncoderReranker:
 def apply_rerank(reranker: Reranker, query: str, texts: Sequence[str]) -> tuple[list[float], str | None]:
     """给候选打分；不可用时返回 (空列表, 原因)，由调用方保持原序。
 
-    把"失败"表达成返回值而不是异常：调用点需要的是"降级并记录"，
-    而不是把异常往上扔给用户。
+    把失败表达成返回值而不是异常：调用点要的是"降级并记录"，不是中断查询。
     """
     try:
         return reranker.score(query, texts), None
