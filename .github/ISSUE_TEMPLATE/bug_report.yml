@@ -1,26 +1,21 @@
 name: 🐛 Bug 报告
-description: 报告一个可复现的缺陷（检索、回答、评测闸门、CLI、API、agent 循环等）
+description: 报告一个可复现的问题（检索、回答、分诊、评测闸门、CLI、API、Agent 循环等）
 title: "[Bug] "
 labels: ["bug"]
 body:
   - type: markdown
     attributes:
       value: |
-        ## 先说三件事
-
-        1. **安全漏洞不要走这里。** 请在仓库的 `Security` → `Advisories` →
-           `Report a vulnerability` 里私密上报（见 `SECURITY.md`），
-           公开 issue 里不要贴可利用细节。
-        2. **绝对不要贴出 API key、`.env` 内容、`llm_spend.json` 或任何凭据。**
-           贴日志前先把相关行删掉。
-        3. 这个项目的纪律是"没跑过的就不写已完成"。请**如实填写**下面哪一步跑过、
-           哪一步没跑——"我没跑过 ingest"是完全合格的回答，比编一个更省双方时间。
+        > **安全漏洞请不要走这里。** 请通过仓库 `Security` → `Advisories` →
+        > `Report a vulnerability` 私密上报（见 [SECURITY.md](../../SECURITY.md)）。
+        >
+        > **不要贴 API key、`.env` 内容或任何凭据。** 贴日志前先删掉相关行。
 
   - type: textarea
     id: what-happened
     attributes:
       label: 发生了什么
-      description: 你期望的结果 vs 实际结果。有报错就把**完整** traceback 贴上来（去掉密钥）。
+      description: 期望结果 vs 实际结果。有报错请贴完整 traceback（去掉密钥）。
       placeholder: |
         期望：...
         实际：...
@@ -30,10 +25,10 @@ body:
   - type: textarea
     id: repro
     attributes:
-      label: 最小复现步骤
-      description: 越具体越好（完整命令 + 参数）。能用 `python -m kubedocs.cli ...` 表达最好。
+      label: 复现步骤
+      description: 越具体越好（完整命令与参数）。
       placeholder: |
-        1. python -m kubedocs.cli --provider hashing ingest --limit-files 100
+        1. python -m kubedocs.cli --domain clinic ingest
         2. python -m kubedocs.cli search "..." --explain
         3. 看到 ...
     validations:
@@ -42,44 +37,25 @@ body:
   - type: dropdown
     id: domain
     attributes:
-      label: 用的是哪个域
-      description: 两个域的内核相同、但语料与归一化器完全不同，这一步经常直接定位问题。
+      label: 哪个域
+      description: 两个域的语料与归一化器不同，这一步常能直接定位问题。
       options:
-        - k8s_docs（Kubernetes 官方文档，英文）
-        - clinic（医疗问诊 / 挂号，中文）
+        - k8s_docs（Kubernetes 官方文档）
+        - clinic（医疗问诊 / 挂号）
         - 两个域都涉及
         - 不确定 / 还没到域的层面
     validations:
       required: true
 
-  - type: input
-    id: python-version
+  - type: textarea
+    id: env
     attributes:
-      label: Python 版本
-      description: 请贴 `python -V` 的输出（本项目要求 >= 3.10，CI 用 3.10）。
-      placeholder: "Python 3.10.10"
-    validations:
-      required: true
-
-  - type: input
-    id: os
-    attributes:
-      label: 操作系统
-      placeholder: "Windows 11 / Ubuntu 22.04 / ..."
-    validations:
-      required: true
-
-  - type: dropdown
-    id: ingest
-    attributes:
-      label: 跑过 ingest（建索引）吗
-      description: 很多"搜不到"其实是索引没建或建了一半；`index_dir/<domain>/` 下应当有
-        `kubedocs.db` 与 `chunk_vectors.npy`。
-      options:
-        - 跑过全量 ingest（真实语料 + bge 嵌入）
-        - 跑过，但只用了 --limit-files 或 hashing 向量
-        - 没跑过（索引为空，或不知道）
-        - 用的是已有的索引，不确定它是怎么建的
+      label: 环境
+      description: Python 版本、操作系统、向量后端（`KUBEDOCS_STORE`），以及是否跑过 ingest。
+      render: text
+      placeholder: |
+        Python 3.10.10 / Windows 11 / KUBEDOCS_STORE=sqlite-vec
+        跑过全量 ingest（bge 嵌入）
     validations:
       required: true
 
@@ -87,8 +63,7 @@ body:
     id: stats
     attributes:
       label: 索引体检输出（`python -m kubedocs.cli stats --verify`）
-      description: 如果建过索引，请贴这一步的输出。索引规模变化会让评测闸门拒绝比较，
-        所以这个数字很关键。
+      description: 如果建过索引，请贴这一步的输出。
       render: text
       placeholder: |
         n_chunks=... embedding_model=... FTS 一致性自检: ok
@@ -98,51 +73,18 @@ body:
   - type: textarea
     id: gate-output
     attributes:
-      label: 门禁输出（`make check` 或分开跑的三条命令）
+      label: 检查命令的输出
       description: |
-        请贴**真实输出**，不要只写"绿的"。没有 make 就分开跑：
+        `python scripts/ci_local.py`，或分开跑：
         `python -m ruff check .` / `python -m mypy src scripts` / `python -m pytest tests/unit`
-        （直接调 pytest 时**不要**再加 `-q`：`addopts` 里已有一个，再叠会吞掉汇总行）。
       render: text
     validations:
       required: false
-
-  - type: dropdown
-    id: llm-key
-    attributes:
-      label: 配置了 LLM 密钥吗（**只说有没有，不要贴值**）
-      description: "没有密钥时 `/ask` 只返回检索结果、`/chat` 回退到确定性图——这是设计行为，
-        不是 bug；但如果你以为配了却没生效，那才是 bug。"
-      options:
-        - 配了，且确认生效（回答里带 [n] 引用）
-        - 配了，但看起来没生效（回答为空 / 提示未配置密钥）
-        - 没配（也不用配）
-        - 不确定
-    validations:
-      required: true
-
-  - type: dropdown
-    id: embedding-provider
-    attributes:
-      label: 嵌入用的是什么
-      description: 用 `hashing` 向量得到的结果**不能**用来判断检索质量（它只擅长字面重合）。
-      options:
-        - bge（真实模型，BAAI/bge-small-en-v1.5）
-        - hashing（离线确定性向量，仅供管道自检）
-        - api（远端嵌入接口）
-        - 不确定
-    validations:
-      required: true
 
   - type: checkboxes
     id: confirm
     attributes:
       label: 提交前确认
       options:
-        - label: 上面贴出的内容里**没有** API key、`.env` 内容或任何凭据
+        - label: 上面贴出的内容里没有 API key、`.env` 内容或任何凭据
           required: true
-        - label: 我报告的是**当前 `main`** 上的行为（或注明了具体的 commit 短哈希）
-          required: true
-        - label: 我知道这个项目还没有 remote、CI 从未在真实 runner 上跑过，
-            所以"CI 应该是绿的"不构成证据
-          required: false

@@ -1,7 +1,5 @@
 """clinic 域包：把医疗域接上检索与工具，并注册进平台。
 
-## 这个域包做了什么
-
 | 环节 | 实现 |
 |---|---|
 | 语料 | `data/clinic/cards.json`（由 `scripts/clinic_build_cards.py` 从上游派生；不入库） |
@@ -12,14 +10,13 @@
 
 ## 稠密路是"可选的第二遍"
 
-全量 31592 张卡片用 bge-small-zh 编码约需一小时（本机 CPU 实测约 8.5 块/秒）。
-所以索引分两遍：
+全量 31592 张卡片用 bge-small-zh 编码约需一小时，所以索引分两遍：
 
     python -m kubedocs.cli --domain clinic --provider hashing ingest   # 秒级，只有 BM25 有效
     python -m kubedocs.cli --domain clinic --hf-offline ingest         # 一小时后，稠密路也可用
 
-**第一遍不是"假数据"**：FTS5 的中文 BM25 是真实有效的检索通道（已用单测验证中文查询命中），
-稠密路只是在它之上再加一路召回。这一点在 `notes` 里说明，避免把降级当成完整能力。
+**第一遍不是"假数据"**：FTS5 的中文 BM25 是真实有效的检索通道，
+稠密路只是在它之上再加一路召回。别把降级当成完整能力。
 """
 
 from __future__ import annotations
@@ -59,9 +56,8 @@ def cards_to_inputs(
         if not text:
             continue
         doc_id = f"{kind}/{key}"
-        # 注意前缀里已经带了 `/clinic/`，路径里就**不要**再写一遍——
-        # 此前写成 `f"clinic/{kind}/{key}.md"`，引用 URL 会变成
-        # `https://kubedocs.local/clinic/clinic/disease/xxx/`（多一层）。
+        # 前缀里已经带了 `/clinic/`，路径里就**不要**再写一遍：
+        # 否则引用 URL 会多出一层（`https://kubedocs.local/clinic/clinic/disease/xxx/`）。
         url = source_url_for(f"{kind}/{key}.md", "https://kubedocs.local/clinic/")
         digest = hashlib.blake2b(text.encode("utf-8"), digest_size=8).hexdigest()
         docs.append(
@@ -92,9 +88,8 @@ class ClinicPack:
     )
     # 中文必须预分词，否则 FTS5 的 unicode61 只能按标点切分（见 normalize.py）
     normalizer_name = "chinese"
-    # 中文语义向量必须用中文模型：bge-small-en 对中文只会退化成噪声。
-    # 注意维度不同（zh 是 512、en 是 384）——所以它必须随域一起切换，
-    # 否则 clinic 索引里的向量矩阵与查询向量乘不上。
+    # 中文语义向量必须用中文模型。注意维度不同（zh 是 512、en 是 384）——
+    # 它必须随域一起切换，否则 clinic 索引里的向量矩阵与查询向量乘不上。
     embedding_model = "BAAI/bge-small-zh-v1.5"
     embedding_dim = 512
 
@@ -131,8 +126,7 @@ class ClinicPack:
         """把卡片灌入 clinic 域自己的索引。
 
         `limit_files` 在这里的含义是"只取前 N 张卡片"，便于冒烟与测试。
-        `batch_files` 是每次编码的卡片数（默认 512；实测 64~128 附近吞吐最好，
-        用 `--batch-files` 可调）。
+        `batch_files` 是每次编码的卡片数（默认 512，可用 `--batch-files` 调）。
         """
         log: Callable[[str], None] = progress if progress is not None else (lambda _m: None)
         report = IngestReport()
@@ -174,16 +168,11 @@ class ClinicPack:
         return [make_search_tool(None, domain=self.name), make_citation_check_tool()]
 
     def eval_sets(self) -> list[Path]:
-        """**刻意返回空**——但理由与原先写的不一样了，如实更正：
+        """**刻意返回空**。
 
-        原注释说"clinic 的金标集要在 P4 才建"。现在 `data/eval/clinic_gold.jsonl`
-        （37 条）与 `data/eval/clinic_baseline.json` **都已经存在**，`scripts/eval_clinic.py --gate`
-        也在跑（当前红，退出码 2，原因见 SECURITY.md S-4）。
-
-        仍然在这里返回空，是因为这个字段的语义是"**`cli eval` 那套检索金标**"，
-        而 clinic 的金标是另一种形状（`查询 -> 期望科室/期望红线判定`），
-        由 `scripts/eval_clinic.py` 直接按路径读，**不走这个协议字段**。
-        把一个形状不同的文件挂在这里，等于让 `domains` 输出一个
+        这个字段的语义是"**`cli eval` 那套检索金标**"，而 clinic 的金标是另一种形状
+        （`查询 -> 期望科室/期望红线判定`），由 `scripts/eval_clinic.py` 直接按路径读，
+        **不走这个协议字段**。把一个形状不同的文件挂在这里，等于让 `domains` 输出一个
         "看起来能 `cli eval`、实则不行"的承诺——那正是本字段要防的事。
         """
         return []
@@ -193,19 +182,16 @@ class ClinicPack:
     ) -> dict[str, list[str]]:
         """症状 -> 候选。供假设打分器使用。
 
-        ## 为什么默认**只取科室**，不取疾病
+        ## 默认**只取科室**，不取疾病
 
-        早期版本把疾病与科室一起放进候选，实测分诊命中率 **0%**，返回的是
-        「减压病」「铍中毒」这类噪声：一个症状（如"咳嗽"）在知识图谱里关联几十种疾病，
-        而只关联两三个科室——打分是等权累加，科室必然被疾病数量淹没。
-
-        两个理由让"只取科室"成为正确设计，而不只是调参：
+        一个症状（如"咳嗽"）在知识图谱里关联几十种疾病，而只关联两三个科室；
+        打分是等权累加，把疾病一起放进候选会让科室被疾病数量淹没。两个理由让
+        "只取科室"成为正确设计：
 
         1. **导诊的产出本来就是科室**（该挂哪个科），不是疾病诊断；
-        2. 本域有明确边界：**不下诊断结论**。把疾病候选排到前面，等于绕开这条边界。
+        2. 本域有明确边界：**不下诊断结论**。把疾病候选排到前面等于绕开这条边界。
 
-        疾病侧信息仍然保留在卡片正文里（检索轨会用它生成接地回答），
-        只是不参与规则轨的排序。
+        疾病侧信息仍保留在卡片正文里（检索轨会用它生成接地回答），只是不参与规则轨排序。
         """
         links: dict[str, list[str]] = {}
         cards = self.load_cards()

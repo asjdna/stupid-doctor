@@ -1,6 +1,7 @@
 """挂号服务（`BookingService`）：把"分诊结果"接到"号源系统"上。
 
 组合两件事：
+
 1. `AppointmentProvider` —— 号源从哪来（可换 SQLite / Mock / 真实 HIS）
 2. 科室归一化 —— agent 说出的科室名要能对上号源系统的科室名
 

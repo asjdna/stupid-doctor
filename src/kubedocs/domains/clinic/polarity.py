@@ -1,37 +1,38 @@
 """极性判断（正/反方向）：区分「确有症状 present」vs「否认症状 absent」vs「可能有 possible」。
 
 混合双轨：
-- 规则快路径（本模块）：否定词 + 作用域（列举延续 + 转折截断 + 假否定/非否定白名单 + 双否定识别），
-  确定性判断某短语的极性，零延迟、可离线。
-- LLM 慢路径（由 clinic 域的问诊节点在复杂否定时调用）：规则拿不准的复杂否定交 LLM。
 
-> 移植说明：本模块自 clinic 域原样移植（原 medical-agent 项目），零外部导入、判定逻辑一字未改。
-> 它是急诊红线安全性的根基——`is_reportable` 的三维门控决定了「我老公胸痛」「去年胸痛」
-> 不会把患者本人送进急诊。移植时只改了本段对 LLM 慢路径的路径引用。
+- 规则快路径（本模块）：否定词 + 作用域（列举延续 + 转折截断 + 假否定/非否定白名单 +
+  双否定识别），确定性判断某短语的极性，零延迟、可离线；
+- LLM 慢路径：规则拿不准的复杂否定交 LLM（由 clinic 域的问诊节点调用）。
+
+它是急诊红线安全性的根基——`is_reportable` 的三维门控决定了「我老公胸痛」「去年胸痛」
+不会把患者本人送进急诊。
 
 ## ConText 的三个维度
 
-临床语境判定不是"一个极性"就够的。参考 ConText（Chapman 2009，medspaCy 的
-`medspacy.context` 是它的 Python 实现）与 i2b2/VA 2010 断言标注指南，本模块把语境拆成三维：
+临床语境判定不是"一个极性"就够的。本模块参考 ConText 与 i2b2/VA 2010 断言标注指南，
+把语境拆成三维：
 
-| 维度 | 取值 | 不建模的后果（实测） |
+| 维度 | 取值 | 不建模的后果 |
 |---|---|---|
 | **断言状态 status** | present / absent / possible / hypothetical | 「如果发烧的话要不要去医院」被当成现症 |
 | **经验者 experiencer** | self / other | 「我老公胸痛，我没事」**触发急诊红线**，把患者本人送进急诊 |
 | **时间性 temporality** | present / past | 「我去年胸痛过一次，现在好了」按现症**触发急诊红线** |
 
-⚠️ 中文没有现成的 ConText 规则可用（medspaCy 的语言表只有 en/fr/nl），所以三维都得自己写。
+中文没有现成的 ConText 规则可用，所以三维规则都得自己写。
 
 **作用域约定**：三维一律采用「**所有出现处**都命中才算数」——与 `is_negated` 同一约定。
 医学安全偏向"宁可留着"：只要有一处是本人/现在/非假设，就按本人/现在/非假设处理，
 避免把患者自己的症状误判成别人的或过去的而漏掉。
 
 对外主 API：
-- is_negated(text, phrase) -> bool：True = 该短语在**所有出现处**均为 absent（应剔除）；
+
+- `is_negated(text, phrase) -> bool`：True = 该短语在**所有出现处**均为 absent（应剔除）；
   False = 至少一处为 present 或 possible（保留）。医学安全偏向保守——不轻易丢弃「可能有」。
-- polarity(text, phrase) -> str：首处出现的三值极性 present/absent/possible，供单测与自省。
-- assertion(text, phrase) -> dict：四值状态 + 经验者 + 时间性（三维一次拿全）。
-- is_reportable(text, phrase) -> bool：能否作为「患者当前主诉」上报（急诊红线/病历用它）。
+- `polarity(text, phrase) -> str`：首处出现的三值极性 present/absent/possible，供单测与自省。
+- `assertion(text, phrase) -> dict`：四值状态 + 经验者 + 时间性（三维一次拿全）。
+- `is_reportable(text, phrase) -> bool`：能否作为「患者当前主诉」上报（急诊红线/病历用它）。
 """
 
 from __future__ import annotations
@@ -76,10 +77,9 @@ REVERSAL_WORDS = [
     "倒是",
     "又有",
     "并有",
-    # 下面两个是**用原型用例实测补上的**（`data/eval/prototype/symptom_status_gold.jsonl`）：
-    #   · ss-034「无腹泻，其实是肚子疼」——缺 "其实"，否定作用域盖过逗号，把"肚子疼"判成 absent；
-    #   · ss-035「无胸痛、无呼吸困难，仅有轻微头晕」——缺 "仅"，"头晕"同样被判成 absent。
-    # 补这两个词后 status 一致率 43/45 → 45/45（见 `scripts/eval_prototype_cases.py`）。
+    # 下面两个是补上的转折词（原型用例集的对照结果）：
+    #   · 「无腹泻，其实是肚子疼」——缺 "其实"，否定作用域盖过逗号，把"肚子疼"判成 absent；
+    #   · 「无胸痛、无呼吸困难，仅有轻微头晕」——缺 "仅"，"头晕"同样被判成 absent。
     "其实",
     "仅",
 ]
@@ -239,7 +239,7 @@ def _scan_scope(text: str, start: int, limit: int) -> int:
 
     ⚠️ 逗号**不是**分句边界，这是有意的：`无发热、无咳嗽` 与 `无发热，无咳嗽`
     都该让"无"盖住后面那一段。真正该收束作用域的是**转折词**（`但没有`、`其实是`）。
-    所以缺的转折词会让否定"越界"——用原型用例实测到两处（见下表），补词即可，
+    所以缺的转折词会让否定"越界"——补词即可，
     不要把逗号当成边界（那会把 `无发热，无咳嗽` 判反）。
     """
     k = start

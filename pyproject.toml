@@ -27,7 +27,7 @@ dependencies = [
     # 要加缓存/限流时，再连同真实分支一起引回来。
     # 本地/CI 默认后端（KUBEDOCS_STORE=sqlite-vec）的向量表。
     # 注意：vec0 是**穷举扫描**而非 ANN（实测在本项目 18861×384 上比 numpy 暴力慢约 11 倍），
-    # 选它换的是「向量与块行同事务、可增删、不常驻内存」，不是延迟——见 docs/adr/0004。
+    # 选它换的是「向量与块行同事务、可增删、不常驻内存」，不是延迟——见 docs/DECISIONS.md。
     "sqlite-vec>=0.1.9",
     # 模型
     "litellm>=1.50",               # 多供应商路由/重试/回退/成本统计
@@ -63,7 +63,7 @@ dependencies = [
 
 [project.optional-dependencies]
 milvus = [
-    # 可选后端（见 docs/adr/0005）。**故意不放进 dependencies**：它与 pgvector/sqlite-vec
+    # 可选后端（见 docs/DECISIONS.md）。**故意不放进 dependencies**：它与 pgvector/sqlite-vec
     # 互斥，装它只会给默认路线增加体积。`MilvusStore` 是惰性导入，不装也能跑默认后端。
     "pymilvus>=2.4",
     "milvus-lite>=2.4",

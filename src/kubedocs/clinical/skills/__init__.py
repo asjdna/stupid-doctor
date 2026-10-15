@@ -24,7 +24,7 @@ __all__ = [
 def default_registry(*, booking_backend: BookingBackend) -> SkillRegistry:
     """装配默认 skill 集合。
 
-    目前只有挂号。后续（方案 §6 之外）如果要加"查报告""改约""取消号"，
+    目前只有挂号。后续如果要加"查报告""改约""取消号"，
     在这里各注册一行即可；流程与确认语义由框架统一保证。
     """
     registry = SkillRegistry()

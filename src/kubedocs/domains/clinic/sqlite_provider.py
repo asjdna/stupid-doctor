@@ -2,7 +2,7 @@
 
 ## 完整性交给数据库，而不是应用层自觉
 
-号源系统唯一不能妥协的性质是**并发下不超卖**。把这件事放在 Python 里做
+号源系统唯一不能妥协的性质是**并发下不超卖**。在 Python 里做
 （先 SELECT 余号、再在内存里减一、再 UPDATE）在 FastAPI 线程池下必然出错：
 两个请求会同时读到"还剩 1"，然后各写各的。
 
@@ -11,23 +11,18 @@
     UPDATE schedules SET remaining = remaining - 1
      WHERE department=? AND date=? AND time_slot=? AND remaining > 0
 
-`cursor.rowcount == 1` 才算拿到号。这条 UPDATE 在 SQLite 的写事务里是原子的，
-`remaining > 0` 的判断与递减发生在同一条语句内，中间没有窗口。
+`cursor.rowcount == 1` 才算拿到号。`remaining > 0` 的判断与递减在同一条语句内，
+中间没有窗口。
 
-再加三层数据库级兜底（任何绕过本类的写入路径也守得住）：
-
-- `CHECK(remaining >= 0 AND remaining <= total)` —— 余号不可能为负
-- `UNIQUE(department, date, time_slot)` —— 不可能出现重复号源行
-- `UNIQUE(department, date, queue_no)` —— 排队号在同科室同天不重复
+再加三层数据库级兜底，任何绕过本类的写入路径也守得住：
+`CHECK(remaining >= 0 AND remaining <= total)`（余号不可能为负）、
+`UNIQUE(department, date, time_slot)`（不会出现重复号源行）、
+`UNIQUE(department, date, queue_no)`（排队号在同科室同天不重复）。
 
 ## 排队号怎么取
 
-`MAX(queue_no) + 1`（同科室同天）在写事务内计算。`UNIQUE(department, date, queue_no)`
+`MAX(queue_no) + 1`（同科室同天）在写事务内计算；`UNIQUE(department, date, queue_no)`
 保证即使算错也会被数据库拒绝，而不是发出两个相同的排队号。
-
-> 表结构移植自 clinic 域（原 medical-agent 项目）的 `db/schema_booking.py`，
-> 保留其全部约束与理由。改动有两处：① 患者表在本域内自带（原项目挂在 users 上）；
-> ② 触发器的"父行必须存在"兜底保留。
 """
 
 from __future__ import annotations

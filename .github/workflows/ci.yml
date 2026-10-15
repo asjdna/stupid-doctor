@@ -1,27 +1,15 @@
 name: CI
 
-# 工业项目的 CI 应当回答两个问题：
-# 1) "换个干净环境还能装起来并跑通吗" —— 装依赖走 pyproject，在 ubuntu 上跑
-# 2) "改动有没有让质量下降" —— lint/type/test/管道自检/质量闸门全部**阻塞**（非零码即失败）
-#
-# 三个 job，各管一件事（别合并）：
-#   · quality   静态检查 + 单元测试；带 pgvector service，所以需要真实 Postgres 的用例**真跑**
+# 三个作业，各管一件事：
+#   · quality   静态检查 + 单元测试；带 pgvector service，需要真实 Postgres 的用例真跑
 #   · pipeline  全链路自检：全量语料 + 确定性哈希向量（离线、快、不下载模型）
-#   · gate      检索质量闸门：真实嵌入模型 + 与冻结基线同口径的索引，指标退化就红
+#   · gate      检索质量闸门：真实嵌入模型 + 与冻结基线同口径的索引，指标退化即失败
 #
-# ## 为什么闸门**不能**直接加在 pipeline 那一步上（本次改动最要紧的一条，已实测）
+# 闸门必须单独一个作业：它比较的是冻结基线，而基线绑定了嵌入模型。
+# pipeline 用哈希向量（模型名不同、向量空间不可比），在那里跑闸门会被正确地拒绝，
+# 表现为"永远红"——红着的门没有人会再看，所以分成两步。
 #
-# `cli eval --gate` 比较的是**冻结基线**，而基线绑定了嵌入模型
-# （data/eval/retrieval_baseline.json 的 embedding_model = BAAI/bge-small-en-v1.5）。
-# pipeline job 刻意用 hashing（不下载模型），索引里记的模型名会是 `hashing-384`：
-# 本机实测用 `--provider hashing` 建索引后跑 `eval --top-k 10 --gate` →
-# 打印「嵌入模型变了（BAAI/bge-small-en-v1.5 -> hashing-384），向量空间不可比」，退出码 2；
-# 即使忽略这一关，hashing 的 hybrid hit@10 = 0.6200 也远低于基线的 0.8400。
-# 也就是说：把 `--gate` 加在 hashing 那一步上，CI 会**永远红**——那是假红，
-# 比没有闸门更糟（红着的门没人会再看）。所以闸门单独一个 job，用真实模型跑。
-#
-# ⚠️ 别在这里写死"当时是多少块"：块数随上游语料变动（实测 2026-10-14 重拉后
-#    文档 1720→1722、块数 18811→18822），写死的数字会腐烂，而腐烂的注释会被当成现状。
+# 注意：不要在这里写死语料块数，它会随上游文档更新而变化。
 
 on:
   push:
@@ -38,21 +26,11 @@ jobs:
     name: 静态检查 + 单元测试
     runs-on: ubuntu-latest
     timeout-minutes: 20
-    # 需要真实 Postgres 的用例此前在 CI 里一直是 skip 的——"测过"与"没测"在日志里长得一样。
-    # 起了这条 service 之后它们必须真跑。
-    # 判据用**数量关系**而不是写死的通过数（那个数会随用例增删而腐烂）：
-    #   `pytest -rs` 的汇总里，Postgres 可达时**不该出现** pgvector 那一族的 skip。
-    # 另外两条容易被忽略的事实：
-    #   · tests/unit/test_store_contract.py 的 `pgvector` 参数在库不可达时**根本不出现在参数化里**
-    #     （不是 skip，是"悄悄消失"，见该文件顶部注释）——那 18 条用例同样以这条 service 为前提；
-    #   · probe() 只要求"连得上 + pg_available_extensions 里有 vector"，扩展本身由
-    #     PgVectorStore._ensure_schema() 建（service 的 POSTGRES_USER 在官方镜像里是超级用户）。
-    #   · **镜像必须是带 pg_search 的那个**（2026-10-11 换）：pgvector 后端的关键字路已从
-    #     ts_rank 换成 pg_search 的真 BM25，不带 pg_search 的镜像会让 _setup_fts() 走
-    #     DEGRADED 分支——那样这 18+15 条 pgvector 用例测的是降级路，不是产品路。
-    #     这里**不需要**额外的 -c：service 每次都是全新 initdb，而 ParadeDB 镜像的
-    #     postgresql.conf.sample 里已经写了 `shared_preload_libraries='pg_search,...'`（实测）。
-    #     沿用已有数据目录的场景（compose 里那份）才必须显式传，见 docker-compose.yml。
+    # 起 Postgres service，让需要真实数据库的用例真正执行——否则它们会被跳过，
+    # 而"跳过的测试"和"通过的测试"在日志里长得一样。
+    # 用 `pytest -rs` 的汇总判断：数据库可达时不应出现 pgvector 那一族的 skip。
+    # 镜像需自带 pg_search：关键字检索路用的是它的 BM25，缺了会退化为降级路径，
+    # 那样这些用例测的就不是产品路径了。
     services:
       postgres:
         image: paradedb/paradedb:0.26.1-pg16
@@ -80,51 +58,28 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install -e ".[dev]"
-      # 单元测试**不需要**模型与网络：这是刻意的设计（纯函数 + 依赖注入），
-      # 让反馈回路保持在秒级。需要真实模型的评测见下面的 gate job 与 README。
-      # **不要再叠加 `-q`**：pyproject 的 addopts 里已经有一个 `-q`，两个叠成 `-qq`
-      # 会把 "N passed" 汇总行一起吞掉（CI 日志里就看不到实际通过数了）。
-      # `-p no:cacheprovider` 与 `make test`、CONTRIBUTING.md 的命令保持一致（CI 不需要缓存）。
-      # `-rs` 让每条 skip 的**原因**进日志。可接受的 skip **只有**下面这一族，别的一律算回归：
-      #   · milvus 那一族 = `test_milvus_store.py` 整文件 + `test_store_contract.py` 的
-      #     `milvus` 参数 + `test_store_backend.py` 里引用 milvus 的用例。
-      #     **故意不写具体条数**：这个数每次增删用例都会变，而腐烂的数字会被当成现状
-      #     （本仓库已吃过两次亏）。要看实际条数就读 `-rs` 汇总，别读注释。
-      #     理由是 `pymilvus` / `milvus-lite` 属**可选**依赖，
-      #     pyproject.toml 没有声明、CI 也就不装（它们是本地文件模式，不需要服务端）。
-      #     真要在 CI 里跑，就得在这里显式 `pip install "pymilvus>=2.5" "milvus-lite>=2.4"`。
-      #   · **Postgres 曾在这一族里，现在不在**：有 service 了，它们必须真跑。
+      # 单元测试不加载模型、不访问网络：让反馈回路保持在秒级。
+      # 不要叠加第二个 `-q`（pyproject 的 addopts 里已有一个），两个叠起来会吞掉汇总行。
+      # `-rs` 让每条 skip 的原因进日志；可接受的 skip 只有 milvus 那一族
+      # （`pymilvus` / `milvus-lite` 是可选依赖，CI 不装）。
       - name: 单元测试（含需要真实 Postgres 的用例）
         run: pytest tests/unit -p no:cacheprovider -rs
       - name: ruff（阻塞）
         run: ruff check .
-      # 只跑 `ruff check .` 会让"格式已经跑偏"在 CI 里完全不可见：本次接入时
-      # 全仓有 110 个文件待重排，而 CI 一路绿灯。`ruff check` 与 `ruff format --check`
-      # 是两道不同的门（前者管规则，后者管排版），必须都在。
-      # 行尾由 pyproject 的 `[tool.ruff.format] line-ending = "lf"` 定死，
-      # 保证 Windows 开发机与 ubuntu runner 判定一致。
-      # 注意：`make check` 里**也有**这一步（`check: lint fmt type test refs` 里的 `fmt`），
-      # 见 CONTRIBUTING 第 2 节的表。这行注释原先写的是"没有"，与 Makefile 已经不一致。
+      # 两道独立的门：`ruff check` 管规则，`ruff format --check` 管排版。
+      # 行尾由 pyproject 的 `[tool.ruff.format]` 定死，保证不同平台判定一致。
       - name: ruff format --check（阻塞）
         run: ruff format --check .
       - name: mypy（阻塞）
         run: mypy src scripts
-      # 文档里的 `文件:行号` 引用必须**指着它自己声称的东西**，而不只是"文件存在、行号不越界"。
-      # 这不是假想问题：SECURITY.md 的 37 处引用里已有 24 处失效——行号仍然"合法"（没越界），
-      # 位置却偏了 −1 ~ +171 行，指到了别的函数上。主要位移来自 e1307cd 的重写，fcd7a55 的
-      # 全量重排又叠加了 ±1 ~ +25（连只被格式化过的文件也漂了：`config.py:34` → 35、
-      # `api/schemas.py:161` → 160）。
-      # 脚本做内容级校验（引用所在那句散文里的符号名必须出现在锚点范围内）；机器判断不了的
-      # 引用必须逐条登记在脚本内的白名单里并写明理由，运行时会打印条数。
+      # 文档里的 `文件:行号` 引用必须指向它自己声称的内容，而不只是"文件存在、行号不越界"。
+      # 脚本做内容级校验；机器判断不了的引用逐条登记在脚本内的白名单里。
       - name: 文档锚点校验（阻塞）
         run: python scripts/check_doc_refs.py
 
-      # 依赖声明一致性：`src/` 里直接 import 的第三方包必须都写进 pyproject。
-      # 为什么值得一条独立检查：这类缺陷**在本机开发环境永远看不见**——包是通过传递依赖
-      # 凑巧装上的，editable 安装 + 现成 venv 一切正常，`pip install .` 到干净环境才炸。
-      # 2026-10-15 重建容器镜像时连撞两次：`jieba`（clinic 域中文归一化器必需，**没有任何
-      # 已声明依赖会带上它**）与 `system.md`（非 `.py`，默认不进 wheel）。
-      # 后者由 `tests/unit/test_clinical.py::test_prompt_is_declared_as_package_data` 挡。
+      # `src/` 里直接 import 的第三方包必须都写进 pyproject。
+      # 这类问题在本机开发环境看不出来（包可能是靠传递依赖凑巧装上的），
+      # 只有装到干净环境（容器 / CI）才会暴露。
       - name: 依赖声明校验（阻塞）
         run: python scripts/check_deps.py
 
@@ -191,14 +146,9 @@ jobs:
           path: ~/.cache/huggingface
           key: hf-${{ runner.os }}-bge-small-en-v1.5
 
-      # 语料与索引**一起缓存、同一个键**：它俩共同构成"冻结基线口径"的可复现载体
-      # （基线绑定了 `corpus_sha` 与 `embedding_model`；语料一变指纹就变，闸门会正确地
-      # 拒绝比较——ADR-0002 说的问题正是这个，所以把口径钉在缓存里而不是每次重拉 main）。
-      # ⚠️ **上游语料取自 `main`、没有钉版本**，所以"每次重拉"必然漂移；这个缓存键
-      # 是 CI 侧的唯一防线，而本地没有等价保护（本地重拉就会改变指纹并（正确地）让闸门变红）。
-      # 键里**只有**切块/嵌入/标注集，故意**不含** retrieve/ 与 store/：那两处正是闸门要守的
-      # 东西，把它们放进键里会让缓存每次都失效、每个 PR 都重编码 35 分钟，等于用缓存把闸门绕过去。
-      # 改了切块/嵌入/标注集 → 键变 → 重建；那种情况下基线本来就该重新冻结（CONTRIBUTING 第 5 节）。
+      # 语料与索引一起缓存、共用同一个键：它们共同构成"冻结基线口径"的可复现载体。
+      # 键里只放切块、嵌入与标注集——不放 retrieve/ 与 store/，因为那两处正是闸门要守的东西，
+      # 放进去会让缓存每次都失效，等于用缓存把闸门绕过去。
       - name: 缓存语料与真实索引
         id: idx
         uses: actions/cache@v4
@@ -219,20 +169,11 @@ jobs:
       - name: 标注集预检（对原始语料）
         run: python scripts/check_gold.py
 
-      # 这里**不**把索引灌进 pgvector（`python scripts/load_pgvector.py --index-dir data/index
-      # --domain k8s_docs`）：那要给本 job 再起一条 Postgres service，并且每次 run 都得把
-      # 1.9 万块重灌一遍（分钟级 → 十分钟级），而它验证的是"镜像完整性"、与质量闸门无关。
-      # 生产后端的**契约**已由 quality job 里那一族 pgvector 用例覆盖（`test_pgvector_store.py`
-      # 整文件 + `test_store_contract.py` 的 `pgvector` 参数；**不写死条数**，理由同 quality job）。
-      # pgvector 的**指标**对照冻结基线
-      # **已经不是红的**：2026-10-11 关键字路换成 pg_search 真 BM25 后 hit@10 = 0.8600、退出码 0
-      # （ADR-0004 第十节）。这里仍然**不**把 pgvector 灌进这个 job——那要给本 job 再起一条
-      # Postgres service 并每次重灌上万块，而它验证的是镜像完整性、与质量闸门无关。
+      # 这里不把索引灌进 pgvector：那要给本作业再起一条 Postgres service，
+      # 且每次都要重灌上万块，而它验证的是镜像完整性，与质量闸门无关。
+      # pgvector 后端的契约已由 quality 作业里那一族用例覆盖。
       - name: 质量闸门（指标退化 → 退出码 2 → CI 红）
-        # 比 hit@10 / mrr@10（容差各 0.02），并拒绝跨标注集/跨模型/跨语料的比较：
-        # 语料身份由 `corpus_sha` 精确判定（逃生口 `--allow-corpus-drift`），不再是
-        # "块数差得不多就照比"——那个近似曾让 +0.058% 的语料漂移**静默通过**（2026-10-14 实测）。
-        # 本机实测（同一份冻结索引）：`eval --top-k 10 --gate` → hybrid hit@10 = 0.8400，退出码 0。
-        # 负例（闸门真的会红）：`eval --top-k 20 --gate`（拿 hit@20 去比基线的 hit@10）→ 退出码 2；
-        # 缺字段的旧格式基线（没有 top_k / corpus_sha）同样退出码 2——**缺字段不等于"不用比"**。
+        # 比对 hit@10 / mrr@10（容差各 0.02），并拒绝跨标注集、跨模型、跨语料的比较：
+        # 语料身份由 `corpus_sha` 精确判定，逃生口是 `--allow-corpus-drift`。
+        # 缺少必需字段的基线一样退出码 2——缺字段不等于"不用比"。
         run: python -m kubedocs.cli eval --top-k 10 --gate

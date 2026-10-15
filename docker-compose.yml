@@ -1,70 +1,29 @@
-# 一条命令起全栈：db(ParadeDB/pg_search) + api
+# 一条命令起全栈：db（Postgres + pgvector + pg_search）与 api。
 #
-# 这里曾有 `cache`(redis:7.4) 与 `langfuse`(profile obs) 两个服务，本次删除：
-#   · `cache`：pyproject 声明了 `redis` 依赖，但 **src/ scripts/ tests/ 里零处使用**
-#     （`Settings.redis_url` 也没有读者）——一个没人连的容器只是噪声；
-#   · `langfuse`：仓库没有任何 Langfuse 调用代码（也没有该依赖），
-#     而项目真正实现的观测路径是 **OTel（console/otlp）+ Prometheus `/metrics`**，
-#     它们都不需要这两个服务。
+# 两条使用路径互为并列：本机直跑（不需要 Docker）与 compose 全栈。
+# 相关说明见 README 与 docs/ARCHITECTURE.md。
 #
-# ✅ 本文件已在 2026-10-13/14 于本机实跑（`docker compose up -d`，db + api 均 healthy）；
-#    仍然成立的两条保留意见：
-#      · `db` 容器**没有**被重建过（`up -d` 报的是 "Running"），沿用着原有的数据卷——
-#        这是**有意**的，那个卷里的索引是有价值的资产。所以"全新 initdb 从零起"这条
-#        路径没有在本机走过（镜像自带的 `postgresql.conf.sample` 里有 preload 配置，
-#        而 `command:` 里的 `-c` 是给**沿用旧数据目录**的场景兜底的，两条路都覆盖到了，
-#        但只有后者实测过）。
-#      · **镜像没有从零重建成功**：外网大文件下载反复停滞（详见 README「Docker 全栈实测」）。
-#        那次容器验证是挂载当前源码跑的（`_kd_verify.yml`），所以修复本身被完整验证了，
-#        而"干净环境一次构建成功"仍未跑通。
-#    历史记录：`db` 服务早先做过**等价演练**（同镜像 + 同卷 + 同 `-c`，独立容器/端口），
-#    见 docs/adr/0004 第十节。
-#
-# 版本都**钉死**：工业项目里 "latest" 会让半年后的自己无法复现。
+# 版本都钉死：不写 latest，否则半年后无法复现。
 
 name: kubedocs
 
 services:
   db:
-    # 生产检索库：**ParadeDB 官方镜像** = Postgres 16 + pgvector + pg_search（真 BM25）。
-    #
-    # 为什么不再用 `pgvector/pgvector:pg16`：Postgres 核心只有 `ts_rank`（TF 加权，
-    # 无 IDF、无文档长度归一化——**不是 BM25**），而关键字路的排序质量就靠 BM25。
-    # 实测 hybrid hit@10：ts_rank 0.7400（低于冻结基线 0.8400）→ pg_search 0.8400
-    # （见 docs/adr/0004 第十节，含原始命令与输出）。
-    #
-    # 版本钉死（不用 latest，理由与文件头一致）：
-    #   · `0.26.1`：`USING paradedb` / `pdb.match_disjunction` / 表达式字段的 `alias=`
-    #     / `pdb.chinese_compatible('stemmer=english')` 都是这一版实测出来的语法，
-    #     换版本必须重跑 ADR 第十节那组数字；
-    #   · `pg16`：本机 `dbdata` 卷是 PG16 初始化的，PG 主版本之间数据目录不兼容——
-    #     换 PG17/18 就等于要求全量 dump/restore。
-    #
-    # 实测 2026-10-11：本镜像**沿用 pgvector:pg16 初始化的那个卷**起来后，
-    # 18861 块一块不少、无需 dump/restore（演练明细见 ADR 第十节）。
-    # ✅ 2026-10-14 补测：`docker compose up -d api` 对该容器报 `Running`，
-    # 即它**没有**被重建，卷与索引都还在（仍是有意为之：那份索引是资产）。
-    # 当前 status 的自检命令：
-    #   docker compose exec db psql -U kubedocs -d kubedocs -c 'select count(*) from k8s_docs.chunks'
-    # 换镜像后第一次构造 store 会自动补建 BM25 索引（幂等，见 PgVectorStore._setup_fts）。
+    # Postgres 16 + pgvector + pg_search（真 BM25）。关键字检索路的排序质量依赖 BM25，
+    # 而 Postgres 核心只有 ts_rank（无 IDF、无文档长度归一化），因此用这个镜像。
+    # 版本钉死：不用 latest，半年后才复现得出来；主版本与已有数据目录绑定，不轻易更换。
+    # 换镜像后首次构造 store 会自动补建 BM25 索引（幂等）。
     image: paradedb/paradedb:0.26.1-pg16
-    # ⚠️ 这一行对**沿用已有数据目录**的场景是必需的：pg_search 是 preload 型扩展。
-    # 镜像自带的 `postgresql.conf.sample` 里已经写了 `shared_preload_libraries=...`
-    # （全新 initdb 因此自带，实测），但**已有数据目录用的是它自己那份 postgresql.conf**，
-    # 那里面没有——实测 `CREATE EXTENSION pg_search` 会直接报
-    # `pg_search must be loaded via shared_preload_libraries`。
-    # 显式传 `-c` 覆盖，两种数据目录（新建 / 沿用）都能起来。
-    # 代价：新库上会覆盖掉镜像默认的 `pg_cron,pg_stat_statements`——本仓库两处都没用
-    #（连 CREATE EXTENSION 都没做过），所以是有意为之。
+    # pg_search 是 preload 型扩展。镜像自带的 postgresql.conf.sample 已包含该配置，
+    # 但**沿用已有数据目录**时用的是那份旧的 postgresql.conf，因此需要显式传入。
+    # 代价是新库上会覆盖镜像默认的 pg_cron / pg_stat_statements，本仓库未使用它们。
     command: ["postgres", "-c", "shared_preload_libraries=pg_search"]
     environment:
       POSTGRES_USER: kubedocs
       POSTGRES_PASSWORD: kubedocs
       POSTGRES_DB: kubedocs
-      # 中文/英文混排的全文检索：这里语料是英文，BM25 侧的分词器固定为
-      # `pdb.chinese_compatible('stemmer=english')`（英文 Snowball 词干 + 中文单字，
-      # 见 src/kubedocs/store/pgvector_store.py 的模块文档）；换中文语料时靠
-      # 应用层归一化器（KUBEDOCS_NORMALIZER=chinese）在入库/查询两侧切词。
+      # 全文检索的中文兼容分词：英文用 Snowball 词干，中文按单字切；
+      # 中文语料另由应用层归一化器（KUBEDOCS_NORMALIZER=chinese）在入库与查询两侧切词。
       POSTGRES_INITDB_ARGS: "--encoding=UTF8 --locale=C"
     ports:
       - "5432:5432"
@@ -82,42 +41,31 @@ services:
       context: .
       dockerfile: Dockerfile
       args:
-        # 受限网络下先 `export APT_MIRROR=mirrors.aliyun.com` 与
-        # `export PIP_INDEX_URL=https://pypi.tuna.tsinghua.edu.cn/simple` 再 build。
-        # 不设时留空 = 走 Debian / PyPI 官方源（与加这两个参数之前完全一致）。
+        # 受限网络下可指定镜像源：
+        #   export APT_MIRROR=mirrors.aliyun.com
+        #   export PIP_INDEX_URL=https://pypi.tuna.tsinghua.edu.cn/simple
+        # 留空则使用 Debian / PyPI 官方源。
         APT_MIRROR: ${APT_MIRROR:-}
         PIP_INDEX_URL: ${PIP_INDEX_URL:-}
-        # 装 **CPU-only torch** 是可选的，而且**必须连版本一起给**（见 Dockerfile 说明：
-        # PEP 440 里 `2.14.1` 比 `2.9.1+cpu` 新，只给 find-links 的话 pip 照样挑 CUDA 版）：
+        # 可选：装 CPU 版 torch，镜像体积从约 10 GB 降到约 2.3 GB。
+        # 两个变量必须一起给（只给 find-links 时 pip 仍会挑 CUDA 版）：
         #   export TORCH_CPU_FIND_LINKS=https://mirrors.aliyun.com/pytorch-wheels/cpu/
         #   export TORCH_CPU_VERSION=2.9.1+cpu
-        # 两个都留空（默认）= 走 pip 默认源，即 CUDA 版 torch，实测镜像 **9.91 GB**。
-        # 为什么不把官方 CPU 源设成默认：本机实测 `download.pytorch.org`
-        # **TCP 可达但 HTTP 传输挂死**（与 deb.debian.org 同一形态）——
-        # 宁可默认大，也不能默认挂。
         TORCH_CPU_FIND_LINKS: ${TORCH_CPU_FIND_LINKS:-}
         TORCH_CPU_VERSION: ${TORCH_CPU_VERSION:-}
-        # 置 1 = 在 builder 里装 build-essential + libpq-dev（默认不装：
-        # 依赖全是 wheel，而那一层在受限网络下实测要 >18 分钟）。
+        # 置 1 时在 builder 阶段安装 build-essential 与 libpq-dev（默认不装，依赖都是 wheel）。
         BUILD_TOOLS: ${BUILD_TOOLS:-}
     env_file:
       - .env
     environment:
-      # **这一行是必需的，不是可选的**：`Settings.store` 默认值是 `sqlite-vec`，
-      # 而它**不读** `database_url`。只设 DATABASE_URL 不设 STORE 的话，api 会去读
-      # bind-mount 进来的 `./data/index/<domain>/kubedocs.db`，把旁边那个灌满
-      # 18811 块的 Postgres 晾着——`db` 服务白起。实测后果：SQLite 跑在 Windows
-      # bind-mount 上会报 `OperationalError: disk I/O error`，而 `/healthz` 仍然
-      # 返回 200、`n_chunks` 却是 0（"服务是绿的但什么都搜不到"的老毛病）。
-      # "设了却没人读的配置"正是本仓库明确反对的假开关，所以这里必须成对给出。
+      # 必须与 DATABASE_URL 成对给出：Settings.store 的默认值是 sqlite-vec，
+      # 而它不读 database_url。只设 DATABASE_URL 不设 STORE 会让 api 去读嵌入式索引，
+      # 把旁边那个填满数据的 Postgres 晾着。
       KUBEDOCS_STORE: pgvector
-      # 容器内互访用服务名（.env 里的示例值就是按 compose 写的）
+      # 容器内互访用服务名
       KUBEDOCS_DATABASE_URL: postgresql://kubedocs:kubedocs@db:5432/kubedocs
-      # **必须显式给出挂载点**：容器里包是 `pip install .` 装进 venv 的，
-      # `config.repo_root()` 的"上溯三层"会落到 `/opt/venv/lib/python3.10`，
-      # 于是 `data/` 指向一个不存在、也写不进去的目录——而 `/healthz` 照样 200
-      # （"索引不可用"按设计不算存活失败），表现为"服务是绿的但什么都搜不到"。
-      # 见 `config.repo_root()` 的说明。
+      # 必须显式给出挂载点：容器里包是安装进 venv 的，默认的仓库根推断会落到
+      # venv 目录，导致 data/ 指向不存在的位置（表现为服务健康但检索为空）。
       KUBEDOCS_REPO_ROOT: /app
     ports:
       - "8080:8080"
@@ -125,9 +73,8 @@ services:
       db:
         condition: service_healthy
     volumes:
-      # 语料与模型缓存持久化：否则每次重建容器都要重下 16MB 语料 + 模型。
-      # 挂载点必须与 Dockerfile 的 `HF_HOME` **一致**，而且要在 app 用户读得到的位置：
-      # 容器是非 root（USER app），`/root` 是 0700 —— 挂到那里等于"模型对 app 不可读"。
+      # 语料与模型缓存持久化：避免每次重建容器都重下语料与模型。
+      # 挂载点必须与 Dockerfile 的 HF_HOME 一致，且在非 root 用户可读的位置。
       - ./data:/app/data
       - hfcache:/home/app/.cache/huggingface
     healthcheck:

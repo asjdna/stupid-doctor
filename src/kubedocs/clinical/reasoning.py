@@ -1,24 +1,17 @@
-"""大模型主判：证据 → 契约化输出（方案 §2、§7 的 `reason` 节点）。
+"""大模型主判：证据 → 契约化输出。
 
-## 三条职责，界限要清楚
+三条职责，界限要清楚：
 
 1. **装配**：把系统提示词 + 证据 + 已采集信息 + 患者原话交给模型；
-2. **校验**：把模型返回的 JSON 解析成 `ClinicalAssessment`，并用 `validate_against()`
-   检查"依据是否存在、检查/用药有没有出处"；
-3. **降级**：模型不可用或输出不可解析时，**不许凭空生成**，而是退回到
-   "只用证据能支撑的东西"（见 `_fallback`）。
+2. **校验**：把模型返回的 JSON 解析成 `ClinicalAssessment`，并检查依据是否存在、
+   检查/用药有没有出处；
+3. **降级**：模型不可用或输出不可解析时**不许凭空生成**，只退回到
+   "证据能支撑的东西"（见 `_fallback`）。
 
-## 降级时的关键词表，必须写明白它**不再是什么**
-
-按"处方权归大模型"这条底层决定，急重症现在由模型按**病症 + 严重程度**判断，
-输出到 `red_flags`（见 `contracts.RedFlag` 与 `prompts/system.md` R1）。
-关键词表（`domains.clinic.redline.RiskGuard`）因此**退出了判断链**：
-它不进提示词、不影响 `urgency`、不触发急诊横幅。
-
-它只剩一个用途：**模型不可用时**给它一句保守的对话提示（见 `_fallback`）。
-理由：那时没有"模型判断"这回事，而在决策者缺席时什么都不说，
-等于让"模型挂了"变成"急症漏判"。注意这只是**提示**——
-`degraded` 非空，前端据此不弹横幅，所以它不会冒充模型结论。
+急重症由模型按**病症 + 严重程度**判断并输出到 `red_flags`（见 `contracts.RedFlag`），
+所以关键词表（`domains.clinic.redline.RiskGuard`）**退出了判断链**：
+它不进提示词、不影响 `urgency`、不触发急诊横幅。它只剩一个用途——模型不可用时
+给一句保守的对话提示。注意那只是**提示**：`degraded` 非空，前端据此不弹急诊横幅。
 """
 
 from __future__ import annotations
@@ -49,8 +42,7 @@ class LLMClient(Protocol):
     """最小 LLM 接口：**返回文本**。
 
     仓库既有客户端（`generate.LiteLLMClient`）的 `complete()` 返回的是 `LLMResult`
-    **对象**而不是 `str`，所以要经 `LiteLLMAdapter` 才能接进来。这个差异必须收在
-    显式适配器里，理由见那个类的文档。
+    **对象**而不是 `str`，所以要经 `LiteLLMAdapter` 才能接进来。
     """
 
     def complete(self, system: str, user: str) -> str: ...
@@ -59,11 +51,8 @@ class LLMClient(Protocol):
 class BudgetedClient:
     """给 LLM 客户端套上**同一本日预算账**（与 CLI `ask` / `/ask` / `/chat` 共用）。
 
-    ## 为什么这一层是必需的，而不是"锦上添花"
-
-    `ClinicalReasoner` 直接调模型。少了这一层，它就是一条**能无限花钱的产品路径**——
-    而 S-2 那一整轮工作（预留、原子账本、算不出价按保守上限计）就是为了让花费有上限。
-    新增一条产品路径却绕过那个闸，等于把之前的活儿作废。
+    必须有这一层：`ClinicalReasoner` 直接调模型，少了它这就是一条**能无限花钱的
+    产品路径**——新增产品路径却绕过预算闸，等于把已有的花费上限作废。
 
     用 `reserve()` 而不是 `check()`：预留把"这次在途调用"按保守金额算进本次判断，
     否则 N 个并发会各自通过 `check()` 然后各自 `record()`，上限被冲过 N 倍。
@@ -88,9 +77,9 @@ class BudgetedClient:
     def complete_with_tools(self, messages: list[dict[str, Any]], tools: list[dict[str, Any]]) -> object:
         """工具循环里的每一次调用**都要过同一本日预算账**。
 
-        为什么不能省：工具循环一次问诊会调模型 1~N 次（N 由模型决定）。
-        如果只有最后那次计费，前面每轮检索取证都是**免费**的——
-        那等于给了一条"模型可以自己决定花多少钱"的路径，与 S-2 那一整轮工作的目的相反。
+        工具循环一次问诊会调模型 1~N 次（N 由模型决定）。如果只有最后那次计费，
+        前面每轮检索取证都是**免费**的——那等于给了一条"模型可以自己决定花多少钱"
+        的路径，与预算闸的目的相反。
         """
         with self._budget.reserve():
             result = self._client.complete_with_tools(messages, tools)  # type: ignore[attr-defined]
@@ -104,15 +93,11 @@ class BudgetedClient:
 class LiteLLMAdapter:
     """把仓库既有的 LLM 客户端适配成本层要求的 `complete(...) -> str`。
 
-    ## 为什么不直接在 reasoner 里读 `.text`
-
-    **实测踩过这个坑**：reasoner 直接对返回值调 `.strip()`，而真实客户端返回的是
-    `LLMResult`，于是抛 `AttributeError` —— 整条主判**安静地走了降级**：
-    表面上"有回答"，实际上一次模型判断都没发生。
-
-    若在 reasoner 里写 `getattr(result, "text", ...)` 兜底，这个差异就会继续藏在业务
-    代码里，而"接错了客户端"永远表现为"模型输出不合契约"。所以差异收在这个
-    **能被单测钉住**的适配器里，且类型不对时**大声抛**。
+    真实客户端返回的是 `LLMResult` 对象而不是 `str`。若在 reasoner 里对返回值做
+    `getattr(result, "text", ...)` 兜底，这个差异就会继续藏在业务代码里，
+    而"接错了客户端"永远表现为"模型输出不合契约"——整条主判会**安静地走降级**：
+    表面上"有回答"，实际上一次模型判断都没发生。所以差异收在这个**能被单测钉住**
+    的适配器里，且类型不对时**大声抛**。
 
     预算闸不在这里做：它需要 `LLMResult` 的成本字段，属于"客户端包装"的职责，
     见 `BudgetedClient`。两个适配器各管一件事，可以单独替换。
@@ -201,7 +186,7 @@ class ClinicalReasoner:
             logger.warning("按 R3 丢弃无依据建议：%s", "、".join(enforced.dropped))
         if evidence.red_line_positive and not assessment.red_flags:
             # 关键词表命中了，但模型既没判出急重症、也没把它写进 red_flags。
-            # **这只是"记一笔"，不是推翻模型**：判断权在模型手上（见 system.md R1），
+            # **这只是"记一笔"，不是推翻模型**：判断权在模型手上，
             # 程序只负责把这种不一致留痕，好让人能回头查"是不是漏了一个真急症"。
             problems.append(
                 f"关键词表命中「{evidence.red_line.word if evidence.red_line else '?'}」，"
@@ -211,8 +196,6 @@ class ClinicalReasoner:
 
     def _fallback(self, evidence: EvidenceBundle, intake: IntakeState) -> ClinicalAssessment:
         """降级产物：只用证据能支撑的内容，**不引入任何模型知识**。
-
-        ## 关键词表在这里的唯一用途
 
         主判不可用时**没有"模型判断"这回事**，所以这里不退化成沉默：
         若关键词表命中，就给一句保守的"请立即就医"提示（并把命中的词说出来，

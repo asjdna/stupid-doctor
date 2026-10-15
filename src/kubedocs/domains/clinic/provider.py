@@ -1,7 +1,7 @@
 """号源系统对接契约（`AppointmentProvider`）。
 
 这层存在的唯一理由：**把"挂号"和"号源从哪来"分开**。
-kubedocs 现在提供两个实现，它们的差别只在存储：
+仓库里有两个实现，差别只在存储：
 
 | 实现 | 用途 | 特点 |
 |---|---|---|
@@ -9,9 +9,6 @@ kubedocs 现在提供两个实现，它们的差别只在存储：
 | `MockAppointmentProvider` | 单测替身 | 进程内字典，快、无 IO、可注入故障 |
 
 接真实 HIS 时只需再实现这个 ABC，`BookingService` 与 agent 工具层都不用改。
-
-> 契约移植自 clinic 域（原 medical-agent 项目）的 `hospital/provider.py`。
-> 原项目就有"换真实系统只实现这个接口"的说明，说明这个缝当初就是按复用设计的。
 """
 
 from __future__ import annotations

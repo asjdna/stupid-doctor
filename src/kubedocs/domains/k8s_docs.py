@@ -2,7 +2,7 @@
 
 这一层刻意做得**很薄**——它不重新实现任何检索逻辑，只是把既有的
 `ingest` / `HybridRetriever` / 金标集声明成 `DomainPack` 要求的形状。
-薄的代价是没有，好处是：内核看到的只有协议，看不见 Kubernetes。
+好处是内核看到的只有协议，看不见 Kubernetes。
 """
 
 from __future__ import annotations
@@ -58,7 +58,7 @@ class K8sDocsPack:
         return HybridRetriever(store, embedder, settings)
 
     def tools(self) -> list[object]:
-        # 工具的 schema 化在 P2 做；P0 只需要域能注册与自省。
+        # k8s 域目前不向 agent 暴露工具，只需能被注册与自省。
         return []
 
     def eval_sets(self) -> list[Path]:
