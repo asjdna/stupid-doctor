@@ -54,6 +54,14 @@
 - C2 的 top-3 81.7% 已越过 80%，但它是 `human_verified=false` 的派生金标，
   **不据此宣布达标**——它证明的是"语料补充有效"，不是"分诊达到上线准确率"。
 
+### Known gap — 补全的收益目前**只在评测里生效**
+
+- `RetrievalTriage` 是**依赖注入**进 `ClinicalPipeline` 的，而产品路径里**还没有装配它的地方**
+  （`clinical/__init__.py` 只导出、不构造）。所以"接上映射表能 +14 点"这个结论，
+  **线上路径现在拿不到**。推荐写法已写进 `RetrievalTriage` 的类文档：
+  `RetrievalTriage(department_map=load_department_map(min_confidence="high"))`。
+  这与"临床管线尚未接到 HTTP"是同一个装配缺口，不另开条目。
+
 ### Changed — 分诊语料补充（根因、做法与实施）
 
 - **查清了 12,863 张「未标注」卡片的根因**：不是解析问题，是 `cards.json` 生成阶段

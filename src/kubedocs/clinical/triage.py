@@ -235,6 +235,21 @@ class RetrievalTriage:
     `known_departments` 只用于约束输出（把投票结果收敛到系统里真实存在的科室）；
     留空表示不约束——金标里的科室名与号源系统的科室名未必一致，评测时不该因为
     一个名字对不上就把正确答案判错。
+
+    ## 推荐构造方式（**产品路径请照这个来**）
+
+    ```python
+    RetrievalTriage(department_map=load_department_map(min_confidence="high"))
+    ```
+
+    实测：带 `high` 档映射表时，71 条口语金标上 top-1 35→44、top-3 48→58（67.6%→81.7%）。
+    不传 `department_map` 时行为与历史版本一致（只解析卡片正文），
+    这是为了**评测可比性**保留的默认值，不是推荐配置。
+
+    > ⚠️ **已知缺口（如实记录）**：本类由调用方**依赖注入**进 `ClinicalPipeline`，
+    > 而产品路径当前还没有装配它的地方（`clinical/__init__.py` 只导出、不构造）。
+    > 也就是说：**补全映射表目前只在评测里生效，线上路径尚未用上**。
+    > 装配时务必按上面的推荐写法传入 `department_map`，否则这次补全的收益拿不到。
     """
 
     _DIRECT_WEIGHT = 3.0
