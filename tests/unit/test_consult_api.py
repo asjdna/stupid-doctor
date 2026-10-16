@@ -9,6 +9,9 @@
    （用独立的 `test_consult_*` schema，不碰真实库的 `clinical` schema），
    `/consult/status` 能看到行数在涨。这几条要连真 Postgres：不可达时**只跳过它们**
    （探测写法与 `tests/unit/test_pgvector_store.py` 一致），其余用例照跑。
+6. **挂号写路径**：`/consult/booking/confirm` 与 `/consult/booking/cancel` 是全仓库唯一的
+   挂号写入口。这里测的是它们的**对外语义**（单子一次性、归属、409 话术、关联留档），
+   号源用进程内实现，不连库。
 """
 
 from __future__ import annotations
@@ -107,11 +110,17 @@ class _FakePipeline:
         intake = state if state is not None else IntakeState()
         self.seen.append(question)
         self.histories.append(history)
+        # 主键由**管线**生成（真实管线在 `advance` 里给每一轮打 `uuid4`），HTTP 层只是把它
+        # 记进会话、再回给前端。替身不生成它的话，"挂号关联指向哪一轮就诊"那条路径
+        # 会因为 encounter_id 恒为空而永远测不到真东西。
+        encounter_id = uuid.uuid4().hex
         # 判定依据必须是该会话自己的状态（用跨会话计数器会让"会话隔离"那条测试假阴性）
         if "duration" not in intake.filled:
             intake.filled["duration"] = "两天"
-            return ClinicalTurn(action="ask", message="这种情况持续多久了？", intake=intake)
-        return ClinicalTurn(
+            turn = ClinicalTurn(action="ask", message="这种情况持续多久了？", intake=intake)
+            turn.encounter_id = encounter_id
+            return turn
+        turn = ClinicalTurn(
             action="answer",
             message="根据您的描述，建议到呼吸内科就诊。",
             assessment=_assessment(),
@@ -123,6 +132,8 @@ class _FakePipeline:
             red_line_positive=self.red_line,
             intake=intake,
         )
+        turn.encounter_id = encounter_id
+        return turn
 
 
 class _Runtime:
@@ -605,3 +616,198 @@ class TestPageIsDialogueOnly:
             "p.medications",
         ):
             assert field not in page_html, f"前端不应再渲染 {field}"
+
+
+# ===========================================================================
+# 挂号写路径
+# ===========================================================================
+class _BookingStore:
+    """只记挂号关联的存储替身（问诊落库那部分由上面连真库的用例覆盖）。
+
+    `ConsultRuntime._link_booking` 用 `getattr(store, "add_booking")` 探测能力，
+    所以这里只要给出那两个方法就够；**故意不实现 `upsert_patient` 等**，
+    好让"运行时调了它不该调的东西"直接炸出来。
+    """
+
+    def __init__(self) -> None:
+        self.links: list[Any] = []
+        self.status: list[tuple[str, str]] = []
+
+    def add_booking(self, record: Any) -> None:
+        self.links.append(record)
+
+    def set_booking_status(self, ticket_no: str, status: str) -> None:
+        self.status.append((ticket_no, status))
+
+
+def _client_with_booking(client_factory: Any, store: Any = None) -> tuple[TestClient, Any]:
+    """建一个 client，并取出它的运行时（用来直接往待确认单存储里放一张单子）。
+
+    为什么可以直接塞：待确认单的**生产者**是模型调用的 `propose_booking`，那需要一次真实
+    的模型调用；而这些用例要验的是**消费者**（两个写端点）的语义，所以从共同的那份存储
+    入手是最短的真路径——单子仍然是服务端建的、仍然是一次性的。
+    """
+    client = client_factory(_FakePipeline(), store=store)
+    # 运行期是**首个请求时**才建的（路由闭包里的惰性构造），所以先敲一下状态端点再取。
+    assert client.get("/consult/status").status_code == 200
+    return client, client.app.state.consult_runtime
+
+
+def _propose(
+    runtime: Any, *, patient_id: str = "p1", department: str = "呼吸内科", slot: str = "上午"
+) -> Any:
+    return runtime.pending().propose(
+        patient_id=patient_id,
+        department=department,
+        date="2026-05-06",
+        time_slot=slot,
+        fee=35,
+        patient_name="张三",
+        remaining=8,
+    )
+
+
+class TestBookingConfirm:
+    def test_confirm_books_and_returns_a_ticket(self, client_factory: Any) -> None:
+        client, rt = _client_with_booking(client_factory)
+        p = _propose(rt)
+        r = client.post(
+            "/consult/booking/confirm",
+            json={"proposal_id": p.proposal_id, "session_id": "s1", "patient_id": "p1"},
+        )
+        assert r.status_code == 200, r.text
+        body = r.json()
+        ticket = body["ticket"]
+        assert ticket["department"] == "呼吸内科"
+        assert ticket["date"] == "2026-05-06"
+        assert ticket["time"] == "上午"
+        assert ticket["ticket_no"]
+        assert body["message"] and "凭据号" in body["message"]
+        # `trace_id` 在未启用 OTel 时是空串（`span()` 是空操作），这里只要求字段在位：
+        # 它的用途是"启用追踪后能把这次确认与 span 对上"，而不是"必须永远非空"。
+        assert "trace_id" in body
+
+    def test_proposal_is_one_shot(self, client_factory: Any) -> None:
+        """双击 / 刷新重放只能成功一次——否则一次点击会变成两张号。"""
+        client, rt = _client_with_booking(client_factory)
+        p = _propose(rt)
+        payload = {"proposal_id": p.proposal_id, "session_id": "s1", "patient_id": "p1"}
+        assert client.post("/consult/booking/confirm", json=payload).status_code == 200
+        again = client.post("/consult/booking/confirm", json=payload)
+        assert again.status_code == 409
+        assert "失效" in again.json()["detail"]
+
+    def test_another_patient_cannot_confirm(self, client_factory: Any) -> None:
+        """单子只属于提议它的人：换个人拿同一个单号确认必须被拒。"""
+        client, rt = _client_with_booking(client_factory)
+        p = _propose(rt, patient_id="p1")
+        r = client.post(
+            "/consult/booking/confirm",
+            json={"proposal_id": p.proposal_id, "session_id": "s1", "patient_id": "p2"},
+        )
+        assert r.status_code == 409
+        assert "不属于" in r.json()["detail"]
+
+    def test_unknown_proposal_is_a_readable_409(self, client_factory: Any) -> None:
+        client, _ = _client_with_booking(client_factory)
+        r = client.post(
+            "/consult/booking/confirm",
+            json={"proposal_id": "nope", "session_id": "s1", "patient_id": "p1"},
+        )
+        assert r.status_code == 409
+        assert "重新" in r.json()["detail"]
+
+    def test_confirm_links_the_ticket_to_the_session_last_encounter(self, client_factory: Any) -> None:
+        """挂号与就诊是**单向**关联：号里记下"是哪一轮问诊挂出来的"。"""
+        store = _BookingStore()
+        client, rt = _client_with_booking(client_factory, store=store)
+        # 先走一轮问诊，让会话记住 encounter_id
+        client.post("/consult", json={"question": "我咳嗽", "session_id": "s1", "patient_id": "p1"})
+        p = _propose(rt)
+        r = client.post(
+            "/consult/booking/confirm",
+            json={"proposal_id": p.proposal_id, "session_id": "s1", "patient_id": "p1"},
+        )
+        assert r.status_code == 200
+        assert len(store.links) == 1, "确认后必须留下一条挂号关联"
+        link = store.links[0]
+        assert link.ticket_no == r.json()["ticket"]["ticket_no"]
+        assert link.encounter_id, "关联要指向具体哪一轮就诊"
+        assert link.fee == 35 and link.department == "呼吸内科"
+
+
+class TestBookingCancel:
+    def test_cancel_releases_and_第二次是_409(self, client_factory: Any) -> None:
+        """退号成功；再退一次必须报错（重复退号会凭空多出一个号）。"""
+        store = _BookingStore()
+        client, rt = _client_with_booking(client_factory, store=store)
+        p = _propose(rt)
+        ticket = client.post(
+            "/consult/booking/confirm",
+            json={"proposal_id": p.proposal_id, "session_id": "s1", "patient_id": "p1"},
+        ).json()["ticket"]
+        no = ticket["ticket_no"]
+
+        first = client.post(
+            "/consult/booking/cancel",
+            json={"ticket_no": no, "session_id": "s1", "patient_id": "p1"},
+        )
+        assert first.status_code == 200, first.text
+        assert first.json()["cancelled"]["status"] == "cancelled"
+        assert store.status == [(no, "cancelled")], "退号后要把关联表里的状态跟上"
+
+        again = client.post(
+            "/consult/booking/cancel",
+            json={"ticket_no": no, "session_id": "s1", "patient_id": "p1"},
+        )
+        assert again.status_code == 409
+        assert "重复" in again.json()["detail"] or "已经退过" in again.json()["detail"]
+
+    def test_another_patient_cannot_cancel(self, client_factory: Any) -> None:
+        client, rt = _client_with_booking(client_factory)
+        p = _propose(rt)
+        ticket = client.post(
+            "/consult/booking/confirm",
+            json={"proposal_id": p.proposal_id, "session_id": "s1", "patient_id": "p1"},
+        ).json()["ticket"]
+        r = client.post(
+            "/consult/booking/cancel",
+            json={"ticket_no": ticket["ticket_no"], "session_id": "s1", "patient_id": "p2"},
+        )
+        assert r.status_code == 409
+        assert "别人" in r.json()["detail"]
+
+
+class TestAppointmentsEndpoint:
+    def test_lists_only_the_callers_own_tickets(self, client_factory: Any) -> None:
+        client, rt = _client_with_booking(client_factory)
+        mine = _propose(rt, patient_id="p1")
+        client.post(
+            "/consult/booking/confirm",
+            json={"proposal_id": mine.proposal_id, "session_id": "s1", "patient_id": "p1"},
+        )
+        theirs = _propose(rt, patient_id="p2")
+        client.post(
+            "/consult/booking/confirm",
+            json={"proposal_id": theirs.proposal_id, "session_id": "s2", "patient_id": "p2"},
+        )
+
+        body = client.get("/consult/appointments", params={"patient_id": "p1"}).json()
+        assert body["count"] == 1
+        assert body["appointments"][0]["patient_id"] == "p1"
+
+    def test_cancelled_tickets_stay_in_the_list(self, client_factory: Any) -> None:
+        """退掉的号是历史，删掉就没法回答"我上周是不是退过一个号"。"""
+        client, rt = _client_with_booking(client_factory)
+        p = _propose(rt)
+        ticket = client.post(
+            "/consult/booking/confirm",
+            json={"proposal_id": p.proposal_id, "session_id": "s1", "patient_id": "p1"},
+        ).json()["ticket"]
+        client.post(
+            "/consult/booking/cancel",
+            json={"ticket_no": ticket["ticket_no"], "session_id": "s1", "patient_id": "p1"},
+        )
+        body = client.get("/consult/appointments", params={"patient_id": "p1"}).json()
+        assert body["count"] == 1
+        assert body["appointments"][0]["status"] == "cancelled"

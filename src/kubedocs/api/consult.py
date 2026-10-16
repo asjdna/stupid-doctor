@@ -437,11 +437,16 @@ class ConsultRuntime:
         2. 再用单子上的参数取号（号源层用一句条件更新占号，并发不超卖）；
         3. 最后写挂号关联（就诊 → 号，单向）。关联写失败**不回滚挂号**：号已经挂出去了，
            退掉它比少一条关联更糟。失败留 warning，`/consult/status` 能看到关联行数。
+
+        **取单与占号必须在同一个 `try` 里**：两者都会抛 `BookingError`（单子过期 / 不是本人 /
+        号被占满 / 停诊），而这四件事对界面是同一类结果——**409 + 一句人话**。只兜住占号
+        那一段的话，"单子过期"会以未捕获异常的形态变成 500，而它恰恰是最常见的一种
+        （患者想了两分钟才点确认）。
         """
         from kubedocs.domains.clinic.provider import BookingError
 
-        proposal = self._pending.take(proposal_id, patient_id=patient_id)
         try:
+            proposal = self._pending.take(proposal_id, patient_id=patient_id)
             ticket = self.booking().book(
                 proposal.department,
                 proposal.patient_id,
@@ -450,8 +455,6 @@ class ConsultRuntime:
                 patient_name=patient_name or proposal.patient_name,
             )
         except BookingError as e:
-            # 科室/时段在提议之后被别人占满、或排班被停诊：这是**可预期**的业务失败，
-            # 端点把它翻成 409 + 一句人话，让界面提示"换一个时段"。
             raise HTTPException(status_code=409, detail=str(e)) from e
         self._link_booking(session_id, ticket)
         # 显式标注：`self.booking()` 返回 Any（号源实现是注入的），直接 return 会把

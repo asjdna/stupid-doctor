@@ -145,6 +145,10 @@ def job_pipeline(*, hf_offline: bool) -> None:
     """全链路自检：全量语料 + 哈希向量。
 
     索引建到临时目录：本地那份 `data/index/<domain>` 重建要很久，不能被 hashing 覆盖。
+
+    **必须显式钉住本地后端**：`--index-dir` 只对本地后端有意义（pgvector 的索引在
+    Postgres 的 schema 里），而默认后端是 pgvector。不钉住的话这一 job 会往真实
+    Postgres 里灌 hashing 的 32 维向量——既污染生产 schema，又根本没在测隔离性。
     """
     del hf_offline  # hashing 不加载模型，与离线无关
     _banner("job: pipeline —— 全量语料 + 哈希向量（不下载模型、不碰真实索引）")
@@ -153,7 +157,7 @@ def job_pipeline(*, hf_offline: bool) -> None:
     if not corpus.is_dir():
         raise JobFailed(f"缺少语料目录 {corpus}；先跑 python scripts/fetch_corpus.py")
 
-    env = {"KUBEDOCS_EMBEDDING_PROVIDER": "hashing"}
+    env = {"KUBEDOCS_EMBEDDING_PROVIDER": "hashing", "KUBEDOCS_STORE": "sqlite-vec"}
     tmp = Path(tempfile.mkdtemp(prefix="kd-ci-pipeline-"))
     print(f"  临时索引目录：{tmp}（跑完即删，真实索引不动）", flush=True)
     try:
@@ -174,11 +178,16 @@ def job_gate(*, hf_offline: bool) -> None:
     """检索质量闸门。
 
     真实索引已存在，所以只跑"预检 + 闸门"两步。**只读**，不重建索引。
+
+    **钉住本地后端**：闸门要能在没有 Docker / 没有 Postgres 的机器上复现，而且它比的是
+    `data/index/` 那份本地索引与冻结基线——换成默认的 pgvector 就变成"比另一份索引、
+    还依赖一个容器"。pgvector 那条路有专门的单测覆盖（`tests/unit/test_pgvector_store.py`）。
     """
     _banner("job: gate —— 真实模型 + 冻结基线（指标退化就红）")
     flag = ["--hf-offline"] if hf_offline else []
-    _run(_py("scripts/check_gold.py"))
-    _run(_py("-m", "kubedocs.cli", *flag, "eval", "--top-k", "10", "--gate"))
+    env = {"KUBEDOCS_STORE": "sqlite-vec"}
+    _run(_py("scripts/check_gold.py"), env=env)
+    _run(_py("-m", "kubedocs.cli", *flag, "eval", "--top-k", "10", "--gate"), env=env)
 
 
 def main(argv: list[str] | None = None) -> int:

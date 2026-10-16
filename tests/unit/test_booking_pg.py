@@ -37,7 +37,6 @@ import pytest
 from kubedocs.config import Settings
 from kubedocs.domains.clinic.booking import BookingService
 from kubedocs.domains.clinic.data.departments import DEFAULT_FEE, DEPARTMENTS, department_fee
-from kubedocs.domains.clinic.mock import MockAppointmentProvider
 from kubedocs.domains.clinic.pg_provider import PERIODS, PgAppointmentProvider, probe
 from kubedocs.domains.clinic.provider import AppointmentProvider, BookingError
 
@@ -622,9 +621,14 @@ def test_booking_service_cancel_returns_provider_result(pg: PgAppointmentProvide
     assert result["status"] == "cancelled"
     assert result["remaining"] == 10, "释放后的余量必须能直接展示"
     assert _remaining(schema, "心内科", _TODAY, "上午") == 10
-    # 不支持取消的实现仍然是一句业务错误（Mock 至今没有 cancel）
+
+    # 不支持取消的实现仍然是一句业务错误。用最小替身构造这种实现：进程内号源现在支持
+    # 取消了，而"没有这个能力的实现必须说人话、不能 AttributeError"这条不变量仍然要守。
+    class _NoCancel:
+        name = "no-cancel"
+
     with pytest.raises(BookingError, match="不支持取消"):
-        BookingService(MockAppointmentProvider()).cancel("X1", "p1")
+        BookingService(_NoCancel()).cancel("X1", "p1")  # type: ignore[arg-type]
 
 
 def test_availability_date_is_never_empty(pg: PgAppointmentProvider) -> None:
