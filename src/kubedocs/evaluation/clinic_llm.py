@@ -127,13 +127,14 @@ class LlmClinicReport:
     """
 
     invariant_violations: list[str] = field(default_factory=list)
-    """**确定性安全不变量**在这一臂里被触发的记录。
+    """**确定性安全不变量**在这一臂里被触发的记录（记录，**不判闸门**）。
 
     **每一条都已经被服务端处置过**（这就是安全门的定义）：`no_medical_advice_without_evidence`
     与 `no_fabricated_booking_action` 会把模型那段散文换成只含事实的回答；
     `emergency_judgment_requires_directive` 会补上固定急救指引。也就是说这些记录说明的是
     **"模型这一轮需要被纠正"**，不是"患者看到了不该看的内容"。
-    两种读法必须分清，否则会把"兜底生效"读成"兜底失效"。处置动作见 `invariant_actions`。
+    两种读法必须分清，否则会把"兜底生效"读成"兜底失效"。处置动作见 `invariant_actions`；
+    真正的硬信号由长期监听按 `alert` 级别报给运维（`evaluation/monitor.py`）。
     """
 
     invariant_actions: list[str] = field(default_factory=list)
@@ -470,17 +471,17 @@ def _absorb_invariants(report: LlmClinicReport, case: ClinicCase, turn: Any) -> 
 
 
 def llm_governance_failures(report: LlmClinicReport) -> list[str]:
-    """判断臂的闸门判定：**只看"这次运行能不能作为证据"与"有没有触发安全不变量"**。
+    """判断臂的闸门判定：**只卡"这次运行能不能作为证据"**。
 
     - **未评测**（`evaluated=False`：没密钥、索引缺失、或调用全失败）⇒ 失败。没测不等于
-      测了没问题，否则"删掉密钥 / 掐断调用"就成了让闸门变绿的手段；
+      测了没问题，否则"删掉密钥 / 掐断索引"就成了让闸门变绿的手段；
     - **有任何一题没被判断过**（`failed_calls` 非空）⇒ 失败：一题没测就是一题没测，
       让它悄悄溜过去，等于给"只让会失败的那几题崩掉"开了后门；
-    - **触发了确定性安全不变量**（`invariant_violations` 非空）⇒ 失败。这些是代码强制
-      执行的底线，触发就是真问题；
-    - 召回率 / 误报率 / 分诊命中率**一律不判**：它们是治理档案里的趋势读数。
-      模型不是确定性的，拿固定分数当合格线只会把正常的波动当成回归，
-      而为了让它变绿去调门限，等于把安全寄托在数字上。
+    - **指标不判**：召回率 / 误报率 / 分诊命中率是治理档案里的趋势读数；
+    - **安全不变量的触发也不判**：三条底线每一条都被服务端处置过（换成只含事实的回答 /
+      补上固定急救指引），所以它说明"模型这一轮需要被纠正"——那是模型质量，不是"这次没测成"。
+      它进报告（`invariant_violations` / `invariant_actions`），并由长期监听按 `alert`
+      报给运维（`evaluation/monitor.py`）。给运维的硬信号在监听那边，不在评测退出码上。
     """
     if not report.evaluated:
         return [
@@ -491,6 +492,4 @@ def llm_governance_failures(report: LlmClinicReport) -> list[str]:
     fails: list[str] = []
     for item in report.failed_calls:
         fails.append(f"LLM 臂：这一题没有得到模型判断 —— {item}")
-    for item in report.invariant_violations:
-        fails.append(f"LLM 臂：触发了确定性安全不变量 —— {item}")
     return fails

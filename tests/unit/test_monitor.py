@@ -368,13 +368,17 @@ class TestMonitorScript:
         code = int(script.main(["--run", "--strict", "--trend-path", str(trend), "--archive", str(tmp_path)]))
         assert code == 1
 
-    def test_eval_failure_propagates_as_an_alert(
+    def test_invariant_firing_reaches_ops_even_though_the_eval_gate_passes(
         self, script: ModuleType, tmp_path: Path, monkeypatch: Any, capsys: Any
     ) -> None:
-        """评测自己的闸门红了（例如不变量被触发）⇒ 监听的退出码也是 1。"""
+        """**分工的落点**：评测闸门对"不变量触发"是绿的（它是记录），监听把它报成 `alert`。
+
+        硬信号因此没有被丢掉，只是搬到了运维那一侧：评测的退出码回答"这次测成了吗"，
+        监听的退出码回答"系统还正常吗"。
+        """
         trend = trend_path(tmp_path)
         fake = self._fake_eval(
-            code=2,
+            code=0,
             records=[
                 record_from_reports(
                     judge=_Report(invariants=["x：emergency_judgment_requires_directive（补）"])
@@ -386,8 +390,19 @@ class TestMonitorScript:
 
         code = int(script.main(["--run", "--trend-path", str(trend), "--archive", str(tmp_path)]))
         out = capsys.readouterr().out
-        assert code == 1
+        assert code == 1, "评测绿了不等于运维看不见：监听必须照样报 alert"
         assert "invariant_fired" in out
+
+    def test_eval_failure_also_fails_the_monitor(
+        self, script: ModuleType, tmp_path: Path, monkeypatch: Any, capsys: Any
+    ) -> None:
+        """评测自己的闸门红了（例如有题目没拿到判断）⇒ 监听的退出码也是 1。"""
+        trend = trend_path(tmp_path)
+        fake = self._fake_eval(code=2, records=[record_from_reports(judge=_Report())], trend=trend)
+        monkeypatch.setattr(script, "_load_eval_main", lambda: fake)
+
+        code = int(script.main(["--run", "--trend-path", str(trend), "--archive", str(tmp_path)]))
+        assert code == 1
 
     def test_follow_loops_the_requested_number_of_rounds(
         self, script: ModuleType, tmp_path: Path, monkeypatch: Any

@@ -79,7 +79,7 @@ class ClinicReport:
     triage_hit: int = 0
     triage_evaluated: bool = False
     triage_missed: list[str] = field(default_factory=list)
-    # 确定性安全不变量：这一轮真正被触发的底线（**唯一会卡闸门的东西**）
+    # 确定性安全不变量：这一轮真正被触发的底线（**全部已被服务端处置**；记录，不判闸门）
     invariant_violations: list[str] = field(default_factory=list)
 
     @property
@@ -243,28 +243,26 @@ def governance_failures(
     failed_calls: Sequence[str] = (),
     label: str = "clinic 评测",
 ) -> list[str]:
-    """闸门判定：返回失败原因列表（空 = 通过）。**只卡两类事**。
+    """闸门判定：返回失败原因列表（空 = 通过）。**只卡一件事：这次运行能不能作为证据**。
 
-    1. **这次运行能不能作为证据**：一条可评测的用例都没有（空集）、或者有题目没拿到模型
-       判断（`failed_calls` 非空）。没跑成不等于跑得好——把"没拿到判断"当成通过，
-       删掉语料或让密钥失效就成了让闸门变绿的手段。
-    2. **有没有触发确定性安全不变量**（`report.invariant_violations`）。这些是被代码
-       强制执行的那几条底线（见 `clinical/safety.py`），触发就是真出了问题，
-       与样本量、与模型水平都无关。
+    - 一条可评测的用例都没有（空集）⇒ 失败：**空集不得满足闸门**；
+    - 有题目没拿到模型判断（`failed_calls` 非空）⇒ 失败：没跑成不等于跑得好——
+      把"没拿到判断"当成通过，删掉语料或让密钥失效就成了让闸门变绿的手段。
 
-    **指标一律不在这里判**：危险信号召回、误报率、分诊命中率都是"要看的数"，
-    它们的值进报告与档案（`to_json()`），由人做趋势判断。把自建小样本的分数写成门限，
-    只会逼着后来者去改门限——那是把安全寄托在数字上，而不是寄托在防护与治理上。
+    **指标不在这里判**（召回、误报、分诊都进报告与档案，由人看趋势），
+    **安全不变量的触发也不在这里判**：那三条底线每一条都被服务端处置过（换成只含事实的
+    回答 / 补上固定急救指引），所以它说明的是"模型这一轮需要被纠正"——那是模型质量，
+    不是"这次没测成"。它照旧进报告（`report.invariant_violations`），并且由**长期监听**
+    （`evaluation/monitor.py`）按 `alert` 级别报出来：给运维的硬信号在那儿，而不在评测的
+    退出码上。把"需要被纠正的次数"当门限，等于让一次模型抖动把整轮评测判成无效。
 
-    `label` 只用在提示语里（规则臂 / LLM 臂的分工不同，读者要能分清是哪一臂）。
+    `label` 只用在提示语里（规则臂 / 判断臂的分工不同，读者要能分清是哪一臂）。
     """
     fails: list[str] = []
     if report.n_cases <= 0 and report.triage_total <= 0:
         fails.append(f"{label}：没有任何可评测的用例 —— 空集不得满足闸门（没测不等于没问题）")
     for item in failed_calls:
         fails.append(f"{label}：这一轮没有拿到模型判断 —— {item}")
-    for item in report.invariant_violations:
-        fails.append(f"{label}：触发了确定性安全不变量 —— {item}")
     return fails
 
 

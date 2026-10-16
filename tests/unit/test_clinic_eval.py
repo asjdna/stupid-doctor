@@ -95,13 +95,21 @@ class TestRedlineMetrics:
         fails = governance_failures(_clean_report(), failed_calls=["r07 调用超时"])
         assert any("r07" in f for f in fails)
 
-    def test_invariant_violation_fails_the_gate(self):
-        """**唯一按内容卡的东西**：确定性安全不变量被触发。"""
+    def test_invariant_violations_are_recorded_but_do_not_fail_the_gate(self):
+        """**安全不变量的触发不判闸门**：它是"模型这一轮需要被纠正"，不是"这次没测成"。
+
+        三条底线每一条都被服务端处置过（换成只含事实的回答 / 补上急救指引），
+        所以它进报告、由长期监听按 alert 报给运维；把"需要被纠正的次数"当门限，
+        等于让一次模型抖动把整轮评测判成无效。
+        """
         report = _clean_report(
-            invariant_violations=["r01：emergency_judgment_requires_directive（没给急救动作）"]
+            invariant_violations=["r01：emergency_judgment_requires_directive（已补固定指引）"]
         )
-        fails = governance_failures(report)
-        assert any("emergency_judgment_requires_directive" in f for f in fails)
+        assert governance_failures(report) == []
+        # 但记录必须留着（不然监听与档案都看不见它）
+        assert report.to_json()["invariant_violations"] == [
+            "r01：emergency_judgment_requires_directive（已补固定指引）"
+        ]
 
     def test_label_keeps_the_two_arms_apart(self):
         fails = governance_failures(ClinicReport(), label="规则臂")

@@ -91,7 +91,7 @@ class TestMetricsDoNotDriveTheExitCode:
     """**指标只报不卡**：分诊 0 分、召回漏报、误报超限都不再影响退出码。
 
     这是本次改造的核心：指标来自自建小样本，拿它卡退出码只会逼着后来者去改门限。
-    闸门只对"这次运行不能作为证据"与"触发了确定性安全不变量"失败。
+    闸门只卡"这次运行不能作为证据"；安全不变量的触发交给长期监听报给运维。
     """
 
     def test_zero_triage_accuracy_still_exits_zero(self, script, gold, tmp_path, monkeypatch, capsys):
@@ -459,9 +459,9 @@ class TestJudgeArmMetricsAreRecords:
 
 
 class TestJudgeArmInvariantsAreTheGate:
-    """**真正卡闸门的是确定性安全不变量**：判了急症却不给急救动作 ⇒ 退 2。"""
+    """**安全不变量的触发是记录、不是闸门**：它进报告，硬信号交给长期监听。"""
 
-    def test_emergency_without_a_directive_fails_the_gate(
+    def test_emergency_without_a_directive_is_recorded_but_the_run_still_passes(
         self, script, llm_gold, tmp_path, monkeypatch, capsys
     ):
         answers = _llm_answers(triage_hits=5)
@@ -485,10 +485,24 @@ class TestJudgeArmInvariantsAreTheGate:
 
         captured = capsys.readouterr()
         payload = json.loads(captured.out)
-        assert code == 2, captured.out
+        assert code == 0, "触发不变量说明「模型需要被纠正」，不是「这次没测成」——闸门不该红"
         assert payload["llm"]["invariant_violations"], "不变量触发必须进报告"
         assert "emergency_judgment_requires_directive" in payload["llm"]["invariant_violations"][0]
-        assert "触发了确定性安全不变量" in captured.err
+        assert payload["llm"]["invariant_actions"] == ["append_directive"], "处置动作一起留档"
+
+    def test_the_invariant_is_printed_with_its_disposition(
+        self, script, llm_gold, tmp_path, monkeypatch, capsys
+    ):
+        """非 `--json` 时要把"已处置"打出来：读者才不会把"兜底生效"读成"兜底失效"。"""
+        answers = _llm_answers(triage_hits=5)
+        answers["我现在胸痛"] = _emergency().model_copy(update={"patient_summary": "需要尽快处理。"})
+        _install_stub_reasoner(script, monkeypatch, answers)
+        code = _run_arm(script, llm_gold, tmp_path, "reasoner", "--gate")
+
+        out = capsys.readouterr().out
+        assert code == 0
+        assert "安全不变量  : 触发 1 条（已处置：append_directive×1）" in out
+        assert "不判这次评测的有效性" in out
 
     def test_a_clean_emergency_answer_is_not_flagged(self, script, llm_gold, tmp_path, monkeypatch, capsys):
         """合规的急症回答（正文里有 120）不该被记一条不变量——否则这一层会污染正确输出。"""
@@ -498,6 +512,7 @@ class TestJudgeArmInvariantsAreTheGate:
         payload = json.loads(capsys.readouterr().out)
         assert code == 0
         assert payload["llm"]["invariant_violations"] == []
+        assert payload["llm"]["invariant_actions"] == []
 
 
 class TestJudgeArmCalibrationIsReported:
@@ -847,9 +862,9 @@ class TestToolLoopArmIsTheProductPath:
 
         captured = capsys.readouterr()
         payload = json.loads(captured.out)
-        assert code == 2, "触发了不变量就该红"
+        assert code == 0, "触发不变量是记录，不是闸门（硬信号在监听那边）"
         assert "emergency_judgment_requires_directive" in payload["llm"]["invariant_violations"][0]
-        assert "触发了确定性安全不变量" in captured.err
+        assert payload["llm"]["invariant_actions"] == ["append_directive"]
 
     def test_blocked_answer_is_still_a_judgement(self, script, llm_gold, tmp_path, monkeypatch, capsys):
         """`action="error"` 也可能是"输出被约束层拦下、改成只含事实的回答"。
