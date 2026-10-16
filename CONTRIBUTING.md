@@ -79,6 +79,13 @@ python scripts/ci_local.py
 评测口径的分层与拒绝比较逻辑定义在 `docs/EVALUATION.md`。
 调整口径时请同时更新基线（`eval --write-baseline`），并在 PR 里说明为什么旧基线不再适用。
 
+clinic 域的门限分两处，改哪一处都要在 PR 里说明理由：
+
+- **规则臂**（`evaluation/clinic.py`）：确定性的，误报率与**冻结基线**比较，靠重建基线更新；
+- **LLM 臂**（`evaluation/clinic_llm.py` 的 `LLM_REDLINE_MIN_RECALL` /
+  `LLM_FALSE_POSITIVE_LIMIT` / `LLM_TRIAGE_MIN_ACCURACY`）：写死的常量，不与基线比较
+  ——模型不是确定性的。改常量等于改闸门，不要为了让某次运行变绿而改。
+
 ## 提交信息
 
 说明**改了什么、为什么**，以及**怎么验证**。涉及行为变更时给出可复现的验证命令。
