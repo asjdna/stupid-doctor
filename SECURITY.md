@@ -49,9 +49,11 @@
 ## 三、数据处理
 
 - 医疗知识卡片语料**不入库**，由部署方按需获取（见 [`NOTICE.md`](NOTICE.md)）。
-- **就诊记录（患者 / 就诊 / 消息）落 SQLite 文件**，默认 `data/index/clinic/records.db`
-  （可用 `KUBEDOCS_CLINIC_RECORDS_DB` 改）。它是**原始数据、重建不出来**，
-  要备份的是那个文件；`ingest` 重建索引不会碰它。
+- **就诊记录（患者 / 就诊 / 消息）落 Postgres 的 `clinical` schema**（连接串
+  `KUBEDOCS_DATABASE_URL`）。它是**原始数据、重建不出来**，要按数据库既有机制备份
+  （含 PITR）；`ingest` 重建索引只动索引 schema，不会碰它。
+- Postgres 不可达时就诊记录降级为不落库（`NoopPersistence` + 一条 warning）：
+  `/consult` 照常可用，但那一轮**查不回来**——运维上要监控这条 warning。
 - 就诊记录用 `patient_id` 归属，**不做认证**：调用方可以在请求里声明任意 `patient_id`
   （见第四节第 7 条）。`institution` 目前只是**保留列**，不做机构隔离。
 - 仍是**进程内存态、重启即丢**的：
@@ -70,8 +72,8 @@
 3. **凭据管理**：密钥通过环境变量或密钥管理服务注入，不要写进镜像或仓库。
 4. **数据库权限**：连接串使用最小权限账号；`docker-compose.yml` 里的示例口令仅供本地使用。
 5. **数据合规**：使用医疗语料前自行确认其授权范围。
-6. **备份与留存**：索引与卡片可重建，不必备份；**就诊记录库必须备份**
-   （默认 `data/index/clinic/records.db`，或 `KUBEDOCS_CLINIC_RECORDS_DB` 指定的位置）——
+6. **备份与留存**：索引与卡片可重建，不必备份；**就诊记录所在的 Postgres 库必须备份**
+   （`KUBEDOCS_DATABASE_URL` 指向的库，记录在 `clinical` schema 里）——
    它是原始数据，丢了重建不出来。仍在进程内存里的是**会话状态与号源**，
    需要持久化时实现一个落库的 `AppointmentProvider` / 会话存储，再自行备份那份数据。
 7. **就诊记录的访问控制**：`GET /consult/encounters?patient_id=...` 按调用方声明的

@@ -9,7 +9,7 @@
     急诊     ← **模型按「病症 + 严重程度」判出的 `red_flags`**（`system.md` R1）
     挂号     ← `default_registry(booking_backend=BookingService(MockAppointmentProvider()))`
     会话     ← 进程内 `IntakeState` + 对话上文（多轮采问的状态属于会话层，不属于流程）
-    就诊记录 ← `SqlitePersistence(settings.clinic_records_path)`（患者 / 就诊 / 消息，**落盘**）
+    就诊记录 ← `PgPersistence(settings.database_url)`（患者 / 就诊 / 消息，落 Postgres 的 `clinical` schema）
 
 ## ⚠️ 急诊红线在本路径上**不是** `RiskGuard`（与图路径相反）
 
@@ -28,9 +28,10 @@
 
 - 会话状态**在进程内**：单进程内存字典，**重启即丢**，多副本部署下同一 `session_id`
   会落到不同实例；有条数上限（`MAX_SESSIONS`），超出按最久未用淘汰。
-- **就诊记录（患者 / 就诊 / 消息）落在 SQLite 文件里**，重启与多副本共享同一份；
+- **就诊记录（患者 / 就诊 / 消息）落在 Postgres（`clinical` schema）里**，重启与多副本共享同一份；
   `GET /consult/encounters` 就是读它（`POST /consult` 的 `encounter_id` 是那里的主键）。
-  落库失败**不影响本轮答复**（管线记 warning 后继续，见 `clinical/pipeline.py`）。
+  **Postgres 不可达时存储降级为 `NoopPersistence`（一条 warning），`/consult` 照常可用**；
+  落库失败**同样不影响本轮答复**（管线记 warning 后继续，见 `clinical/pipeline.py`）。
 - `patient_id` 决定记录挂在谁名下，**不是认证**：调用方可以声明任意值。单机内网可信
   部署下没问题，多用户场景必须由网关按调用方身份限制可读的 `patient_id`（见 SECURITY.md）。
 - `emergency` = 模型这一轮的 `urgency == "emergency"`（由模型判出的 `red_flags` 推出），
@@ -62,7 +63,7 @@ from kubedocs.clinical.persistence import (
     DEFAULT_ENCOUNTER_LIMIT,
     EncounterRecord,
     NoopPersistence,
-    SqlitePersistence,
+    PgPersistence,
 )
 from kubedocs.clinical.pipeline import ClinicalPipeline, ClinicalTurn
 from kubedocs.observability import current_trace_id, span, span_attrs
@@ -185,8 +186,8 @@ class ConsultRuntime:
     def store(self) -> Any:
         """就诊记录库（惰性构造一次并缓存）。
 
-        **不触发管线装配**（那会加载嵌入器）：开一个 SQLite 文件 + 建表是毫秒级的，
-        所以 `/consult/status` 与 `GET /consult/encounters` 都能便宜地拿到它。
+        **不触发管线装配**（那会加载嵌入器）：连一次 Postgres + `CREATE ... IF NOT EXISTS`
+        是毫秒级的，所以 `/consult/status` 与 `GET /consult/encounters` 都能便宜地拿到它。
         """
         with self._lock:
             if self._store is None:
@@ -194,18 +195,25 @@ class ConsultRuntime:
             return self._store
 
     def _build_store(self) -> Any:
-        """按 settings 构造存储。**打不开库也不能让服务起不来**：退回 `NoopPersistence()`
+        """按 settings 构造存储。**数据库不可达也不能让服务起不来**：退回 `NoopPersistence()`
         并留 warning——索引/模型装不上是致命的，记录库装不上只是"这轮不留档"。
+
+        Postgres 没起、口令不对、网络不通都会在这里被挡住：宁可少一条记录，也不能让患者
+        拿不到答复（同一条取舍在 `clinical/pipeline.py` 的 `_persist` 里还有一层兜底）。
         """
         settings = getattr(self._runtime, "settings", None)
-        path = getattr(settings, "clinic_records_path", None)
-        if path is None:
-            # 没有 settings = 测试接缝里的假 runtime：不落盘，也不去碰真实数据目录。
+        dsn = getattr(settings, "database_url", "") if settings is not None else ""
+        if not dsn:
+            # 没有 settings = 测试接缝里的假 runtime：不落库，也不去碰真实数据库。
             return NoopPersistence()
         try:
-            return SqlitePersistence(path)
+            return PgPersistence(dsn)
         except Exception as e:  # noqa: BLE001 - 存储不可用不该拖垮整个问诊服务
-            logger.warning("就诊记录库打不开（%s）：本次起不落盘，问诊不受影响：%s", path, e)
+            logger.warning(
+                "就诊记录库（Postgres）不可用（%s）：本次起不落库，问诊不受影响：%s",
+                type(e).__name__,
+                e,
+            )
             return NoopPersistence()
 
     # ---------------------------------------------------------------- 装配
@@ -560,10 +568,10 @@ def build_consult_router(
 
     @router.get("/consult/status")
     def consult_status(request: Request) -> dict[str, Any]:
-        """运维可见性：会话数、管线是否已装配、补全映射表条数、就诊记录落盘情况。
+        """运维可见性：会话数、管线是否已装配、补全映射表条数、就诊记录落库情况。
 
         **不触发管线装配**（那会加载嵌入器），所以这个端点便宜、可以随便探。
-        存储会惰性构造（开 SQLite 文件 + 建表，毫秒级），这样 `persistence_rows`
+        存储会惰性构造（连 Postgres + 建 schema/表，毫秒级），这样 `persistence_rows`
         是真实读数而不是"还没装配所以显示 0"。
         """
         from kubedocs.clinical.triage import load_department_map
@@ -580,12 +588,15 @@ def build_consult_router(
                 "" if dep_map else "空：data/clinic/department_map.json 缺失 ⇒ 分诊退化为只解析卡片正文"
             ),
             "session_store": "in-process（重启即丢，多副本不共享）",
-            # 就诊记录是**落盘**的：这几行的读数就是"它真的在写"的证明。
+            # 就诊记录是**真的落库**的：这几行的读数就是"它真的在写"的证明。
             "persistence_backend": type(store).__name__,
-            "persistence_path": str(getattr(store, "path", "")),
+            # 落点描述：`PgPersistence` 给的是 `schema@脱敏 DSN`（口令不回显）；
+            # Noop 没有落点，如实给空串。
+            "persistence_path": str(getattr(store, "location", "")),
             "persistence_rows": _store_row_counts(store),
             "persistence_note": (
-                "就诊记录（患者/就诊/消息）已落 SQLite；**备份那个文件**。"
+                "就诊记录（患者/就诊/消息）已落 Postgres（`clinical` schema）；"
+                "备份 / PITR / 权限走数据库既有机制。"
                 "会话状态与号源仍是进程内，重启即丢。"
             ),
             "emergency_flag": (

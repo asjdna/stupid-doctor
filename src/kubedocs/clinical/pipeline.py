@@ -91,8 +91,8 @@ class ClinicalPipeline:
     （工具循环失败时的有限结论、红线留痕、科室兜底）。这份证据的知识条目
     **不进模型上下文**，否则"模型自己决定要不要检索"就名存实亡了。
 
-    `store` 是就诊记录的落点（默认 `NoopPersistence` = 不落盘）。真实部署由 HTTP 层注入
-    `SqlitePersistence`；这里注入而不是模块内 new，是为了单测能塞一个会抛异常的假 store
+    `store` 是就诊记录的落点（默认 `NoopPersistence` = 不落库）。真实部署由 HTTP 层注入
+    `PgPersistence`；这里注入而不是模块内 new，是为了单测能塞一个会抛异常的假 store
     去验证"落库失败不打断问诊"。
     """
 

@@ -267,7 +267,10 @@ python -m kubedocs.cli eval --gate           # 之后每次回归检查（指标
 | `KUBEDOCS_LLM_DAILY_BUDGET_USD` | `2.0` | 日花费上限，账本落在 `data/index/llm_spend.json` |
 | `KUBEDOCS_EMBEDDING_PROVIDER` | `bge` | `hashing` 用于不下载模型的冒烟测试 |
 | `KUBEDOCS_HF_ENDPOINT` | — | 拉模型时的镜像端点（受限网络下有用） |
-| `KUBEDOCS_CLINIC_RECORDS_DB` | `<index_dir>/clinic/records.db` | 就诊记录库（患者/就诊/消息）。**要备份的是这个文件** |
+
+就诊记录（患者 / 就诊 / 消息）不再有单独的库配置：它落在 **Postgres 的 `clinical` schema**
+（连接串就是 `KUBEDOCS_DATABASE_URL`）。Postgres 不可达时 `/consult` 照常可用，只是那一轮
+不留档（会记一条 warning）。
 
 ## 目录结构
 

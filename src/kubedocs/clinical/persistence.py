@@ -1,20 +1,21 @@
-"""就诊记录（患者 / 就诊 / 消息）的持久化：**真的落进一个 SQLite 文件**。
+"""就诊记录（患者 / 就诊 / 消息）的持久化：**真的落进 Postgres 的 `clinical` schema**。
 
-`SqlitePersistence` 是默认实现，`NoopPersistence` 只留给"显式不落盘"的场景（测试、
-临时演示）。存储层自己**不吞异常**：失败如实抛给调用方，由持有产品取舍的那一层决定
+`PgPersistence` 是默认实现，`NoopPersistence` 只留给"显式不落盘"的场景：测试、临时演示，
+以及**数据库不可达时上层选择的降级**（`api/consult.py` 的取舍：宁可这轮不留档，也不能让
+患者拿不到答复）。存储层自己**不吞异常**：失败如实抛给调用方，由持有产品取舍的那一层决定
 （`ClinicalPipeline` 的选择是"记一条 warning 后继续"——见该模块的说明）。
 
-## 为什么单独一个文件，而不是塞进索引库
+## 为什么单独一个 schema，而不是塞进索引库
 
 就诊记录与向量索引是两种性质的数据：
 
 - **索引是派生物**：语料在、脚本在，随时可以重建，丢了只是重跑一次 `kubedocs ingest`；
-  同一个库文件里还混着 FTS 表、向量表与 chunk 元数据，`ingest` 会按域整批改写它们。
+  同一个 schema 里还混着 FTS 表、向量表与 chunk 元数据，`ingest` 会按域整批改写它们。
 - **就诊记录不是派生物**：它是原始数据，重建不出来。丢了就是真的丢了。
 
-所以它落在**自己的文件**里（默认 `<index_dir>/clinic/records.db`）。它放在 `data/index/`
-下只是**部署上就近**（数据都在 `data/` 里、备份一处即可），读写路径与生命周期完全独立：
-`ingest` 只写 `kubedocs.db` / `chunk_vectors.npy`，不会碰它。
+所以它落在**自己的 schema**（默认 `clinical`，与索引 schema 即域名分开）。放在同一个
+Postgres 实例里只是**部署上就近**（备份、PITR、监控一套机制即可），读写路径与生命周期
+完全独立：`ingest` 只写域名 schema，不会碰 `clinical`。
 
 ## 多机构：`institution` 是**保留列**，不是租户隔离
 
@@ -23,29 +24,38 @@
 所有调用点的签名。约定：读路径传**空串 = 不过滤**（当前全部数据都是空机构），
 传非空值时按精确匹配过滤——所以拿一个真实机构名去查，会**查不到**任何东西。
 
-## 线程安全：一条长连接 + 一把锁
+## 线程安全：连接池，没有锁
 
-HTTP 层在线程池里跑轮次（`/consult` 是同步端点），连接因此不能绑死在创建它的线程上
-（`check_same_thread=False`）。代价是**同一个连接对象不允许并发使用**，所以用一把
-`threading.RLock` 把**全部读写**串行化（不只是写：SQLite 的隐式事务是连接级的，
-一边读一边写会让另一侧报"cannot start a transaction within a transaction"）。
+HTTP 层在线程池里跑轮次（`/consult` 是同步端点），所以存储必须能被多线程并发使用。
+这里用 `psycopg_pool.ConnectionPool`（与 `store/pgvector_store.py` 同一套做法）：
+每条连接只属于**当时借到它的那个线程**，用完还池，因此不存在"多个线程共用一个连接对象"
+这件事，也就**不需要 `RLock` 去串行化读写**。
 
-选长连接而不是"每次开一条短连接"：问诊每轮只写 2~3 行，锁竞争可以忽略；而短连接
-每轮都要重开文件、重设 PRAGMA，还要在 Windows 上处理 WAL 文件句柄的释放时机。
-真到了写不动的那天，换 Postgres 实现同一个 `ClinicalStore`，而不是在这里做连接池。
-`busy_timeout` 另开一道保险：多进程（两个 worker）指到同一个文件时，忙等而不是立刻报错。
+SQLite 版的那把锁是**单连接的产物**（一个连接对象不允许并发使用；隐式事务还是连接级的，
+一边读一边写会报 "cannot start a transaction within a transaction"）。换成 Postgres 后
+这两条约束都不在了：事务是每连接独立的，并发写的正确性由 MVCC + 主键/行锁保证——
+锁在这里只会把并发能力重新丢掉，所以删掉。
+
+## 失败与探测
+
+构造时（`ensure_schema()`，幂等）走**直连**建 schema/表/索引，之后再开池：建 schema 是
+一次性动作，且它失败时必须让构造直接抛错（上层据此降级为 `NoopPersistence`），
+不能让一个半开的池留在那里。失败统一抛 `PersistenceError`，消息里带上脱敏后的 DSN 与
+排查方向（`KUBEDOCS_DATABASE_URL` / 数据库可达性）。
 """
 
 from __future__ import annotations
 
 import json
 import logging
-import sqlite3
-import threading
+import re
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from pathlib import Path
 from typing import Any, Protocol
+from urllib.parse import quote, urlsplit, urlunsplit
+
+import psycopg
+from psycopg import sql
 
 from kubedocs.clinical.contracts import ClinicalAssessment
 
@@ -54,53 +64,93 @@ logger = logging.getLogger(__name__)
 DEFAULT_ENCOUNTER_LIMIT = 20
 """`list_encounters` 的默认条数（读路径是给人看的，不需要一次拉几百条）。"""
 
-_SCHEMA = """
-CREATE TABLE IF NOT EXISTS patients (
-    patient_id      TEXT PRIMARY KEY,
-    institution     TEXT NOT NULL DEFAULT '',
-    display_name    TEXT NOT NULL DEFAULT '',
-    attributes_json TEXT NOT NULL DEFAULT '{}',
-    updated_at      TEXT NOT NULL DEFAULT ''
-);
+DEFAULT_SCHEMA = "clinical"
+"""就诊记录所在的 schema。与索引 schema（域名）分开：一个是原始数据，一个是派生物。"""
 
-CREATE TABLE IF NOT EXISTS encounters (
-    encounter_id    TEXT PRIMARY KEY,
-    patient_id      TEXT NOT NULL,
-    institution     TEXT NOT NULL DEFAULT '',
-    chief_complaint TEXT NOT NULL DEFAULT '',
-    created_at      TEXT NOT NULL DEFAULT '',
-    assessment_json TEXT NOT NULL DEFAULT '{}',
-    -- 就诊必须挂在患者上：`PRAGMA foreign_keys=ON` 靠这条约束真的有东西可查。
-    FOREIGN KEY (patient_id) REFERENCES patients(patient_id)
-);
+_IDENT_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
-CREATE TABLE IF NOT EXISTS messages (
-    id           INTEGER PRIMARY KEY AUTOINCREMENT,
-    encounter_id TEXT NOT NULL,
-    role         TEXT NOT NULL,
-    text         TEXT NOT NULL DEFAULT '',
-    institution  TEXT NOT NULL DEFAULT '',
-    created_at   TEXT NOT NULL DEFAULT ''
-    -- 刻意**不加**指向 encounters 的外键：消息是 append-only 的增量写入，管线里
-    -- `append_message` 先于 `save_encounter`（顺序理由见 save_encounter 的说明），
-    -- 加了外键就会把这条正常路径变成"先有鸡还是先有蛋"。
-    -- `PRAGMA foreign_keys=ON` 仍然有东西可查：就诊不许挂在不存在的患者上。
-);
+# 建表 DDL（语句逐条执行，顺序有意义：encounters 的 FK 指向 patients）。
+# 表名通过 `{patients}` 这类占位符注入 `sql.Identifier`（见 `_q`），值一律走 `%s` 绑定。
+#
+# 注意两处刻意的取舍：
+#   · 两个 JSON 列**不写 DEFAULT '{}'**：本模板走 `str.format`，字面量花括号要写成
+#     `{{}}`，维护时极易改错；空值由代码显式传参写入（见 `upsert_patient` /
+#     `save_encounter`），`_assessment_or_none` 也把空串与 `{}` 一视同仁。
+#   · `encounters.seq` 是**内部列**，不在对外契约里：`list_encounters` 需要"同一
+#     `created_at` 时按插入顺序倒序"的稳定兜底，而 Postgres 没有 SQLite 的 `rowid`
+#     （`ctid` 会因 UPDATE 变动、不能当稳定次序）。`bigserial` 只在插入时取值，
+#     `ON CONFLICT DO UPDATE` 不会改它，正好等价于 `rowid`。
+_DDL_STATEMENTS = (
+    "CREATE TABLE IF NOT EXISTS {patients} ("
+    "  patient_id text PRIMARY KEY,"
+    "  institution text NOT NULL DEFAULT '',"
+    "  display_name text NOT NULL DEFAULT '',"
+    "  attributes_json text NOT NULL,"
+    "  created_at text NOT NULL DEFAULT '',"
+    "  updated_at text NOT NULL DEFAULT '')",
+    "CREATE TABLE IF NOT EXISTS {encounters} ("
+    "  encounter_id text PRIMARY KEY,"
+    "  patient_id text NOT NULL REFERENCES {patients}(patient_id),"
+    "  institution text NOT NULL DEFAULT '',"
+    "  chief_complaint text NOT NULL DEFAULT '',"
+    "  assessment_json text NOT NULL,"
+    "  created_at text NOT NULL DEFAULT '',"
+    "  seq bigserial)",
+    # 刻意**不加**指向 encounters 的外键：消息是 append-only 的增量写入，管线里
+    # `append_message` 先于 `save_encounter`（顺序理由见 save_encounter 的说明），
+    # 加了外键就会把这条正常路径变成"先有鸡还是先有蛋"。
+    # 患者上的外键仍然有东西可查：就诊不许挂在不存在的患者上。
+    "CREATE TABLE IF NOT EXISTS {messages} ("
+    "  id bigserial PRIMARY KEY,"
+    "  encounter_id text NOT NULL,"
+    "  role text NOT NULL,"
+    "  text text NOT NULL DEFAULT '',"
+    "  institution text NOT NULL DEFAULT '',"
+    "  created_at text NOT NULL DEFAULT '')",
+    # 读路径就是"某患者最近若干次就诊"：按 (patient_id, created_at) 建索引才不必全表扫。
+    "CREATE INDEX IF NOT EXISTS idx_encounters_patient ON {encounters} (patient_id, created_at)",
+    # 消息按就诊取回，且要保持写入顺序（bigserial id 就是顺序）。
+    "CREATE INDEX IF NOT EXISTS idx_messages_encounter ON {messages} (encounter_id, id)",
+)
 
--- 读路径就是"某患者最近若干次就诊"：按 (patient_id, created_at) 建索引才不必全表扫。
-CREATE INDEX IF NOT EXISTS idx_encounters_patient ON encounters(patient_id, created_at);
--- 消息按就诊取回，且要保持写入顺序（AUTOINCREMENT id 就是顺序）。
-CREATE INDEX IF NOT EXISTS idx_messages_encounter ON messages(encounter_id, id);
-"""
+
+class PersistenceError(RuntimeError):
+    """就诊记录库不可用（连不上 / 建不出 schema / 缺驱动）。
+
+    单独一个类型而不是直接抛 `psycopg.Error`：上层要区分的是"记录库这条路不可用"
+    （据此降级为 `NoopPersistence`）与真正的代码错误，而不是驱动层的具体异常谱系。
+    """
 
 
 def _now() -> str:
     """统一的时间戳：UTC + 秒精度 ISO 字符串。
 
-    用字符串而不是 epoch 数字：直接 `sqlite3` 打开文件排查时人能读；同一格式下
-    **字典序 == 时间序**，`ORDER BY created_at DESC` 直接可用，不必在 SQL 里做转换。
+    用字符串而不是 `timestamptz`：与既有契约（`EncounterRecord.created_at: str`）一致，
+    排查时人能直接读，且同一格式下**字典序 == 时间序**，`ORDER BY created_at DESC`
+    不必在 SQL 里做转换。时间来源也只有一个：写路径，不在读路径二次推断。
     """
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
+
+
+def redact_dsn(dsn: str) -> str:
+    """脱敏 DSN：`/consult/status` 要说清"记录落在哪个库"，但**不能回显口令**。
+
+    尽力而为：URL 形式走 `urlsplit` 重建 netloc；`key=value` 的 conninfo 走正则。
+    解析不出来时返回一句固定文案，而不是把原串（可能带口令）漏出去。
+    """
+    try:
+        parts = urlsplit(dsn)
+    except ValueError:
+        return "<无法解析的 DSN>"
+    if not parts.scheme:
+        return re.sub(r"(?i)(password\s*=\s*)\S+", r"\1***", dsn)
+    userinfo = f"{quote(parts.username)}:***@" if parts.username is not None else ""
+    try:
+        port = f":{parts.port}" if parts.port else ""
+    except ValueError:  # 端口不是数字：仍然要把口令挡掉
+        port = ""
+    netloc = f"{userinfo}{parts.hostname or ''}{port}"
+    return urlunsplit((parts.scheme, netloc, parts.path, parts.query, parts.fragment))
 
 
 def _json_dict(raw: str) -> dict[str, str]:
@@ -156,7 +206,7 @@ class EncounterRecord:
 
 
 class ClinicalStore(Protocol):
-    """产品层需要的持久化能力。实现可以是 SQLite（默认）、Postgres，也可以是 `NoopPersistence`。"""
+    """产品层需要的持久化能力。实现是 `PgPersistence`（默认）或 `NoopPersistence`。"""
 
     def upsert_patient(self, record: PatientRecord) -> None: ...
 
@@ -173,29 +223,105 @@ class ClinicalStore(Protocol):
         ...
 
 
-class SqlitePersistence:
-    """`ClinicalStore` 的真实实现：三张表落进一个 SQLite 文件。
+class PgPersistence:
+    """`ClinicalStore` 的真实实现：三张表落进 Postgres 的 `clinical` schema。
 
-    表结构见 `_SCHEMA`；每条消息一行（append-only），就诊行存主诉与结论 JSON。
+    表结构见 `_DDL_STATEMENTS`；每条消息一行（append-only），就诊行存主诉与结论 JSON。
     `list_encounters` 会把结论 JSON 还原成契约对象、并用消息表重建这次就诊的对话。
+
+    连接走 `psycopg_pool`（见模块文档「线程安全」）；schema 初始化走直连，且**在开池
+    之前**完成——构造失败要立刻抛给上层，而不是留下一个半开的池。
     """
 
-    def __init__(self, path: str | Path) -> None:
-        self.path = Path(path)
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        self._lock = threading.RLock()
-        # check_same_thread=False：连接要跨线程用（HTTP 线程池），并发由 self._lock 挡。
-        self._conn = sqlite3.connect(str(self.path), check_same_thread=False)
-        self._conn.row_factory = sqlite3.Row
-        with self._lock:
-            # WAL：读不阻塞写、写不阻塞读；崩溃后也能从 WAL 恢复到最后一次提交。
-            self._conn.execute("PRAGMA journal_mode=WAL")
-            # 外键约束默认**关着**，必须每个连接显式打开（encounters -> patients）。
-            self._conn.execute("PRAGMA foreign_keys=ON")
-            # 多进程指同一文件时忙等 5 秒再报错，而不是立刻抛 locked。
-            self._conn.execute("PRAGMA busy_timeout=5000")
-            self._conn.executescript(_SCHEMA)
-            self._conn.commit()
+    def __init__(
+        self,
+        dsn: str,
+        *,
+        schema: str = DEFAULT_SCHEMA,
+        pool_min: int = 1,
+        pool_max: int = 10,
+    ) -> None:
+        self.dsn = dsn
+        self.schema = schema
+        self._tbl = {name: sql.Identifier(schema, name) for name in ("patients", "encounters", "messages")}
+        try:
+            from psycopg_pool import ConnectionPool
+        except ImportError as e:  # pragma: no cover - 取决于环境
+            raise PersistenceError(
+                "就诊记录的 Postgres 实现需要 psycopg-pool：pip install 'psycopg[pool]'"
+            ) from e
+        self.ensure_schema()
+        # `timeout` 是**借连接**的上限，不是连接超时：数据库不可达时不该让调用方挂到
+        # 驱动的默认值上（问诊每轮只写 2~3 行，10 秒拿不到连接就已经该降级了）。
+        self._pool = ConnectionPool(
+            conninfo=dsn,
+            min_size=pool_min,
+            max_size=pool_max,
+            open=False,
+            timeout=10.0,
+            name="kubedocs-clinical",
+        )
+        # 不在构造里等连接建好：Postgres 慢启动时 `/consult` 仍要能起来（真连不上会在
+        # 第一次读写时抛错，由管线/端点按既有取舍处理）。
+        self._pool.open(wait=False)
+
+    def _q(self, template: str) -> sql.Composed:
+        """把 `{patients}` / `{encounters}` / `{messages}` 换成 **schema 限定的标识符**。
+
+        表名不是用户输入（`schema` 已按 `_IDENT_RE` 校验过），但与其口头保证"我拼的字符串
+        安全"，不如把引用规则交给驱动：`sql.Identifier` 正是 psycopg 为这件事提供的 API。
+        """
+        return sql.SQL(template).format(**self._tbl)
+
+    # ---------------------------------------------------------------- schema
+    def ensure_schema(self) -> None:
+        """建 schema / 表 / 索引（幂等）。构造时自动跑一次；重复调用是安全的。
+
+        **走直连而不是连接池**：这是一次性动作，且它失败时构造必须直接抛错
+        （上层据此降级为 `NoopPersistence`）。`DROP`/`CREATE` 都不会做——幂等靠的是
+        `IF NOT EXISTS`，已有数据一律原地保留。
+        """
+        if not _IDENT_RE.match(self.schema):
+            raise PersistenceError(f"非法的 schema 名 {self.schema!r}：只允许 [A-Za-z_][A-Za-z0-9_]*")
+        try:
+            with psycopg.connect(self.dsn, connect_timeout=10) as conn:
+                conn.execute(sql.SQL("CREATE SCHEMA IF NOT EXISTS {}").format(sql.Identifier(self.schema)))
+                for stmt in _DDL_STATEMENTS:
+                    conn.execute(self._q(stmt))
+        except Exception as e:  # noqa: BLE001 - 任何失败都要转成"记录库不可用"
+            raise PersistenceError(
+                f"连接/初始化 Postgres 失败（{type(e).__name__}: {e}）；"
+                f"检查 KUBEDOCS_DATABASE_URL 与数据库可达性（当前 {redact_dsn(self.dsn)}）"
+            ) from e
+
+    # ---------------------------------------------------------------- 运维读数
+    @property
+    def location(self) -> str:
+        """`/consult/status` 用的落点描述：`schema@脱敏 DSN`（口令不回显）。"""
+        return f"{self.schema}@{redact_dsn(self.dsn)}"
+
+    def counts(self) -> dict[str, int]:
+        """三张表的行数。给 `/consult/status` 用：运维要能看见它**真的在写**。
+
+        不属于 `ClinicalStore` 协议：计数是运维读数，不是产品能力。
+        """
+        # 三条语句写死而不是循环拼表名：动态 SQL 的注入面为 0，也不与静态检查较劲。
+        with self._pool.connection() as conn:
+            return {
+                "patients": int(conn.execute(self._q("SELECT COUNT(*) FROM {patients}")).fetchone()[0]),
+                "encounters": int(conn.execute(self._q("SELECT COUNT(*) FROM {encounters}")).fetchone()[0]),
+                "messages": int(conn.execute(self._q("SELECT COUNT(*) FROM {messages}")).fetchone()[0]),
+            }
+
+    def close(self) -> None:
+        """关掉连接池（进程退出、测试里模拟"重启"）。关掉后本对象不可再用。"""
+        self._pool.close()
+
+    def __enter__(self) -> PgPersistence:
+        return self
+
+    def __exit__(self, *exc: object) -> None:
+        self.close()
 
     # ---------------------------------------------------------------- 写路径
     def upsert_patient(self, record: PatientRecord) -> None:
@@ -204,23 +330,31 @@ class SqlitePersistence:
         合并规则：空串 / 空字典**不覆盖**已有值。理由是调用点的形态——
         管线每一轮都会 `upsert_patient(PatientRecord(patient_id=...))` 只为把记录挂到
         这个人名下，若按"整行覆盖"实现，它会顺手把别处录的姓名与属性抹成空。
-        同 id 反复写只有一行（主键 + `ON CONFLICT DO UPDATE`）。
+        同 id 反复写只有一行（主键 + `ON CONFLICT DO UPDATE`），`created_at` 保留首次值。
+
+        "属性是不是空的"在 Python 侧判定后作为参数传入（而不是在 SQL 里写 `'{}'`）：
+        SQL 模板走 `str.format`，字面量花括号要写两遍，容易在维护时改错。
         """
         attributes = json.dumps(record.attributes or {}, ensure_ascii=False)
-        with self._lock:
-            self._conn.execute(
-                """
-                INSERT INTO patients (patient_id, institution, display_name, attributes_json, updated_at)
-                VALUES (?, ?, ?, ?, ?)
-                ON CONFLICT(patient_id) DO UPDATE SET
-                    institution = CASE WHEN excluded.institution <> '' THEN excluded.institution ELSE patients.institution END,
-                    display_name = CASE WHEN excluded.display_name <> '' THEN excluded.display_name ELSE patients.display_name END,
-                    attributes_json = CASE WHEN excluded.attributes_json IN ('', '{}') THEN patients.attributes_json ELSE excluded.attributes_json END,
-                    updated_at = excluded.updated_at
-                """,
-                (record.patient_id, record.institution, record.display_name, attributes, _now()),
+        blank = attributes in ("", "{}")
+        now = _now()
+        with self._pool.connection() as conn:
+            conn.execute(
+                self._q(
+                    "INSERT INTO {patients} AS p "
+                    "(patient_id, institution, display_name, attributes_json, created_at, updated_at) "
+                    "VALUES (%s, %s, %s, %s, %s, %s) "
+                    "ON CONFLICT (patient_id) DO UPDATE SET "
+                    "  institution = CASE WHEN excluded.institution <> '' "
+                    "                     THEN excluded.institution ELSE p.institution END, "
+                    "  display_name = CASE WHEN excluded.display_name <> '' "
+                    "                      THEN excluded.display_name ELSE p.display_name END, "
+                    "  attributes_json = CASE WHEN %s THEN p.attributes_json "
+                    "                         ELSE excluded.attributes_json END, "
+                    "  updated_at = excluded.updated_at"
+                ),
+                (record.patient_id, record.institution, record.display_name, attributes, now, now, blank),
             )
-            self._conn.commit()
 
     def append_message(self, *, encounter_id: str, role: str, text: str, institution: str = "") -> None:
         """**追加**一条消息（append-only：这里没有更新与删除）。
@@ -228,13 +362,14 @@ class SqlitePersistence:
         这是对话正文的落点。一次就诊的多条消息靠自增 `id` 保持顺序，
         读回时按它排序，所以"用户说了什么、助手回了什么"不会错位。
         """
-        with self._lock:
-            self._conn.execute(
-                "INSERT INTO messages (encounter_id, role, text, institution, created_at) "
-                "VALUES (?, ?, ?, ?, ?)",
+        with self._pool.connection() as conn:
+            conn.execute(
+                self._q(
+                    "INSERT INTO {messages} (encounter_id, role, text, institution, created_at) "
+                    "VALUES (%s, %s, %s, %s, %s)"
+                ),
                 (encounter_id, role, text, institution, _now()),
             )
-            self._conn.commit()
 
     def save_encounter(self, record: EncounterRecord) -> None:
         """落一次就诊：主诉 + 结论 JSON + 时间。
@@ -246,72 +381,86 @@ class SqlitePersistence:
         N 轮对话只会得到 N 组消息，不会得到 N² 组。
 
         `created_at` 只在插入时生效：重复保存同一次就诊不改变"它是什么时候发生的"。
+
+        三步（确保患者 → 落就诊 → 播种消息）在**一个事务**里：中途失败要么全成、要么
+        全不成——不会留下"就诊行在、消息不在"的半条记录。`_has_messages` 因此必须在
+        同一事务里读（否则并发下两个写入者会同时判"还没有消息"而重复播种）。
         """
         created_at = record.created_at or _now()
         payload = record.assessment.model_dump_json() if record.assessment is not None else "{}"
-        with self._lock:
+        with self._pool.connection() as conn, conn.transaction():
             # 外键指向 patients：落就诊前先确保患者行存在（不覆盖已录的姓名/属性）。
-            self._conn.execute(
-                "INSERT OR IGNORE INTO patients (patient_id, institution, display_name, attributes_json, updated_at) "
-                "VALUES (?, ?, '', '{}', ?)",
-                (record.patient_id, record.institution, created_at),
+            # `attributes_json` 在这里显式传 `'{}'`：空属性由代码写入（DDL 里没有 DEFAULT，
+            # 理由见 _DDL_STATEMENTS 的说明）。
+            conn.execute(
+                self._q(
+                    "INSERT INTO {patients} "
+                    "(patient_id, institution, display_name, attributes_json, created_at, updated_at) "
+                    "VALUES (%s, %s, '', %s, %s, %s) "
+                    "ON CONFLICT (patient_id) DO NOTHING"
+                ),
+                (record.patient_id, record.institution, "{}", created_at, created_at),
             )
-            self._conn.execute(
-                """
-                INSERT INTO encounters
-                    (encounter_id, patient_id, institution, chief_complaint, created_at, assessment_json)
-                VALUES (?, ?, ?, ?, ?, ?)
-                ON CONFLICT(encounter_id) DO UPDATE SET
-                    patient_id = excluded.patient_id,
-                    institution = excluded.institution,
-                    chief_complaint = excluded.chief_complaint,
-                    assessment_json = excluded.assessment_json
-                """,
+            conn.execute(
+                self._q(
+                    "INSERT INTO {encounters} "
+                    "(encounter_id, patient_id, institution, chief_complaint, assessment_json, created_at) "
+                    "VALUES (%s, %s, %s, %s, %s, %s) "
+                    "ON CONFLICT (encounter_id) DO UPDATE SET "
+                    "  patient_id = excluded.patient_id,"
+                    "  institution = excluded.institution,"
+                    "  chief_complaint = excluded.chief_complaint,"
+                    "  assessment_json = excluded.assessment_json"
+                ),
                 (
                     record.encounter_id,
                     record.patient_id,
                     record.institution,
                     record.chief_complaint,
-                    created_at,
                     payload,
+                    created_at,
                 ),
             )
-            if record.transcript and not self._has_messages(record.encounter_id):
-                self._conn.executemany(
-                    "INSERT INTO messages (encounter_id, role, text, institution, created_at) "
-                    "VALUES (?, ?, ?, ?, ?)",
-                    [
-                        (
-                            record.encounter_id,
-                            str(m.get("role", "")),
-                            str(m.get("content", "")),
-                            record.institution,
-                            created_at,
-                        )
-                        for m in record.transcript
-                    ],
-                )
-            self._conn.commit()
+            if record.transcript and not self._has_messages(conn, record.encounter_id):
+                with conn.cursor() as cur:
+                    cur.executemany(
+                        self._q(
+                            "INSERT INTO {messages} "
+                            "(encounter_id, role, text, institution, created_at) "
+                            "VALUES (%s, %s, %s, %s, %s)"
+                        ),
+                        [
+                            (
+                                record.encounter_id,
+                                str(m.get("role", "")),
+                                str(m.get("content", "")),
+                                record.institution,
+                                created_at,
+                            )
+                            for m in record.transcript
+                        ],
+                    )
 
     # ---------------------------------------------------------------- 读路径
     def get_patient(self, patient_id: str, *, institution: str = "") -> PatientRecord | None:
         """按 id 取患者；没有就返回 `None`（"没有这个人"不是错误）。"""
-        sql = (
-            "SELECT patient_id, institution, display_name, attributes_json FROM patients WHERE patient_id = ?"
+        query = (
+            "SELECT patient_id, institution, display_name, attributes_json "
+            "FROM {patients} WHERE patient_id = %s"
         )
         params: list[Any] = [patient_id]
         if institution:
-            sql += " AND institution = ?"
+            query += " AND institution = %s"
             params.append(institution)
-        with self._lock:
-            row = self._conn.execute(sql, params).fetchone()
+        with self._pool.connection() as conn:
+            row = conn.execute(self._q(query), params).fetchone()
         if row is None:
             return None
         return PatientRecord(
-            patient_id=str(row["patient_id"]),
-            institution=str(row["institution"]),
-            display_name=str(row["display_name"]),
-            attributes=_json_dict(str(row["attributes_json"])),
+            patient_id=str(row[0]),
+            institution=str(row[1]),
+            display_name=str(row[2]),
+            attributes=_json_dict(str(row[3])),
         )
 
     def list_encounters(
@@ -320,72 +469,56 @@ class SqlitePersistence:
         """某患者最近若干次就诊，**新 → 旧**，`limit` 是上界。
 
         每条的 `transcript` 由消息表按写入顺序重建，`assessment` 由结论 JSON 还原
-        （含 `red_flags` 等全部字段）。`created_at` 相同的行按插入顺序倒序兜底，
+        （含 `red_flags` 等全部字段）。`created_at` 相同的行按内部 `seq` 倒序兜底，
         所以同一秒内的连续几轮也有稳定次序。
         """
-        sql = (
+        query = (
             "SELECT encounter_id, patient_id, institution, chief_complaint, created_at, assessment_json "
-            "FROM encounters WHERE patient_id = ?"
+            "FROM {encounters} WHERE patient_id = %s"
         )
         params: list[Any] = [patient_id]
         if institution:
-            sql += " AND institution = ?"
+            query += " AND institution = %s"
             params.append(institution)
-        sql += " ORDER BY created_at DESC, rowid DESC LIMIT ?"
+        query += " ORDER BY created_at DESC, seq DESC LIMIT %s"
         params.append(max(1, int(limit)))
 
-        with self._lock:
-            rows = self._conn.execute(sql, params).fetchall()
-            ids = [str(r["encounter_id"]) for r in rows]
+        with self._pool.connection() as conn:
+            rows = conn.execute(self._q(query), params).fetchall()
+            ids = [str(r[0]) for r in rows]
             # 一次把消息全取回来（而不是每条就诊查一次）：limit 已是上界，N+1 不值当。
             transcripts: dict[str, list[dict[str, str]]] = {i: [] for i in ids}
             if ids:
-                placeholders = ",".join("?" * len(ids))
-                for m in self._conn.execute(
-                    # 拼进去的只有问号个数，值仍走参数绑定（`ids` 作为参数传入）
-                    "SELECT encounter_id, role, text FROM messages "  # noqa: S608
-                    f"WHERE encounter_id IN ({placeholders}) ORDER BY id",
-                    ids,
-                ):
-                    transcripts[str(m["encounter_id"])].append(
-                        {"role": str(m["role"]), "content": str(m["text"])}
-                    )
+                for m in conn.execute(
+                    self._q(
+                        "SELECT encounter_id, role, text FROM {messages} "
+                        "WHERE encounter_id = ANY(%s) ORDER BY id"
+                    ),
+                    (ids,),
+                ).fetchall():
+                    transcripts[str(m[0])].append({"role": str(m[1]), "content": str(m[2])})
 
         return [
             EncounterRecord(
-                encounter_id=str(r["encounter_id"]),
-                patient_id=str(r["patient_id"]),
-                institution=str(r["institution"]),
-                chief_complaint=str(r["chief_complaint"]),
-                created_at=str(r["created_at"]),
-                assessment=_assessment_or_none(str(r["assessment_json"])),
-                transcript=transcripts[str(r["encounter_id"])],
+                encounter_id=str(r[0]),
+                patient_id=str(r[1]),
+                institution=str(r[2]),
+                chief_complaint=str(r[3]),
+                created_at=str(r[4]),
+                assessment=_assessment_or_none(str(r[5])),
+                transcript=transcripts[str(r[0])],
             )
             for r in rows
         ]
 
-    # ---------------------------------------------------------------- 运维
-    def counts(self) -> dict[str, int]:
-        """三张表的行数。给 `/consult/status` 用：运维要能看见它**真的在写**。
-
-        不属于 `ClinicalStore` 协议：计数是运维读数，不是产品能力。
-        """
-        with self._lock:
-            return {
-                table: int(self._conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0])  # noqa: S608
-                for table in ("patients", "encounters", "messages")
-            }
-
-    def close(self) -> None:
-        """关掉连接（进程退出、测试里模拟"重启"）。关掉后本对象不可再用。"""
-        with self._lock:
-            self._conn.close()
-
     # ---------------------------------------------------------------- 内部
-    def _has_messages(self, encounter_id: str) -> bool:
-        """这次就诊有没有消息了。调用方必须已持锁。"""
-        row = self._conn.execute(
-            "SELECT 1 FROM messages WHERE encounter_id = ? LIMIT 1", (encounter_id,)
+    def _has_messages(self, conn: Any, encounter_id: str) -> bool:
+        """这次就诊有没有消息了。**必须在 `save_encounter` 的事务里调**（理由见该方法）。
+
+        SQL 里的表名照旧走 `_q` 限定到本 schema：不依赖连接的 `search_path`。
+        """
+        row = conn.execute(
+            self._q("SELECT 1 FROM {messages} WHERE encounter_id = %s LIMIT 1"), (encounter_id,)
         ).fetchone()
         return row is not None
 
@@ -393,8 +526,8 @@ class SqlitePersistence:
 class NoopPersistence:
     """**什么都不存**的实现。
 
-    默认实现是 `SqlitePersistence`（由上层决定用哪个），这个类保留给两类场景：
-    测试里不需要落盘，以及部署方**显式**选择"这轮不留记录"。
+    默认实现是 `PgPersistence`（由上层决定用哪个），这个类保留给两类场景：
+    测试里不需要落库，以及部署方**显式**选择"这轮不留记录"（含数据库不可达时的降级）。
 
     它仍然存在（而不是删掉让类型变成可选）的理由：内存字典会给人"数据存住了"的错觉，
     重启才发现没有；`NoopPersistence` 从命名到行为都不含糊——**这里没有持久化**。
@@ -420,5 +553,8 @@ class NoopPersistence:
         return []
 
     def counts(self) -> dict[str, int]:
-        """没有落盘就没有行数（`/consult/status` 因此能如实显示全 0）。"""
+        """没有落库就没有行数（`/consult/status` 因此能如实显示全 0）。"""
         return {"patients": 0, "encounters": 0, "messages": 0}
+
+    def close(self) -> None:
+        """与 `PgPersistence` 同形（上层可以不区分地关掉它）。"""

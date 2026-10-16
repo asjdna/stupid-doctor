@@ -6,20 +6,28 @@
 3. 降级要说出来：模型没走通时必须回传 `degraded`，不能把兜底文案伪装成模型结论；
 4. 索引不可用是 503 + 可执行指引，不是 500 堆栈。全部用假管线，不联网、不花钱。
 5. **就诊记录真的落库**：`POST /consult` 之后 `GET /consult/encounters` 能把它读回来
-   （用临时 db 路径），`/consult/status` 能看到行数在涨。
+   （用独立的 `test_consult_*` schema，不碰真实库的 `clinical` schema），
+   `/consult/status` 能看到行数在涨。这几条要连真 Postgres：不可达时**只跳过它们**
+   （探测写法与 `tests/unit/test_pgvector_store.py` 一致），其余用例照跑。
 """
 
 from __future__ import annotations
 
 import json
+import logging
 import threading
+import uuid
+from collections.abc import Iterator
 from types import SimpleNamespace
 from typing import Any
 
+import psycopg
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
+from psycopg import sql
 
+from kubedocs.api import consult as consult_module
 from kubedocs.api.consult import (
     DISCLAIMER,
     EMERGENCY_NOTE,
@@ -37,10 +45,40 @@ from kubedocs.clinical.contracts import (
 )
 from kubedocs.clinical.evidence import EvidenceBundle, EvidenceItem, RedLineSignal
 from kubedocs.clinical.intake import IntakeState
-from kubedocs.clinical.persistence import SqlitePersistence
+from kubedocs.clinical.persistence import NoopPersistence, PgPersistence
 from kubedocs.clinical.pipeline import ClinicalPipeline, ClinicalTurn
 from kubedocs.clinical.rag import LocalIndexBackend
 from kubedocs.clinical.reasoning import ClinicalReasoner
+from kubedocs.config import Settings
+
+_DSN = Settings().database_url
+
+
+def _probe(dsn: str, *, timeout: float = 3.0) -> tuple[bool, str]:
+    """这个 Postgres 能不能连（就诊记录不要求 pgvector 之类的扩展）。"""
+    try:
+        with psycopg.connect(dsn, connect_timeout=int(max(1, timeout))) as conn:
+            conn.execute("SELECT 1")
+    except Exception as e:  # noqa: BLE001 - 探测要把任何失败转成原因字符串
+        return False, f"{type(e).__name__}: {e}"
+    return True, ""
+
+
+_PG_OK, _PG_WHY = _probe(_DSN)
+
+_requires_pg = pytest.mark.skipif(
+    not _PG_OK,
+    reason=f"Postgres 不可达，本条未验证：{_PG_WHY}（DSN={_DSN}）",
+)
+
+
+@pytest.fixture
+def pg_schema() -> Iterator[str]:
+    """独立 schema（随机后缀）：**不污染真实库的 `clinical` schema**，结束即删。"""
+    name = f"test_consult_{uuid.uuid4().hex[:10]}"
+    yield name
+    with psycopg.connect(_DSN, connect_timeout=5) as conn:
+        conn.execute(sql.SQL("DROP SCHEMA IF EXISTS {} CASCADE").format(sql.Identifier(name)))
 
 
 def _assessment(urgency: str = "routine", *, red_flags: bool = False) -> ClinicalAssessment:
@@ -404,41 +442,47 @@ def _real_pipeline(store: Any) -> ClinicalPipeline:
     )
 
 
-def test_consult_writes_a_record_that_encounters_reads_back(client_factory: Any, tmp_path: Any) -> None:
+@_requires_pg
+def test_consult_writes_a_record_that_encounters_reads_back(client_factory: Any, pg_schema: str) -> None:
     """**"持久化有作用"的证据**：POST 一轮 → GET /consult/encounters 能查到同一条。
 
-    库落在 `tmp_path`，不碰本机 `data/index`（测试不该在生产数据目录里留文件）。
+    库是**独立的 `test_consult_*` schema**（结束即 `DROP SCHEMA CASCADE`）：不碰真实库的
+    `clinical` schema，测试之间也互不可见。
     """
-    store = SqlitePersistence(tmp_path / "records.db")
-    c = client_factory(_real_pipeline(store), store=store)
+    store = PgPersistence(_DSN, schema=pg_schema)
+    try:
+        c = client_factory(_real_pipeline(store), store=store)
 
-    posted = c.post(
-        "/consult", json={"question": "我咳嗽三天了", "session_id": "s1", "patient_id": "p-1"}
-    ).json()
-    assert posted["action"] == "answer"
-    assert posted["encounter_id"], "响应必须回传就诊记录主键，前端才能对账"
+        posted = c.post(
+            "/consult", json={"question": "我咳嗽三天了", "session_id": "s1", "patient_id": "p-1"}
+        ).json()
+        assert posted["action"] == "answer"
+        assert posted["encounter_id"], "响应必须回传就诊记录主键，前端才能对账"
 
-    got = c.get("/consult/encounters", params={"patient_id": "p-1"}).json()
-    assert got["count"] == 1
-    assert got["persistence_backend"] == "SqlitePersistence"
-    enc = got["encounters"][0]
-    assert enc["encounter_id"] == posted["encounter_id"]
-    assert enc["chief_complaint"] == "我咳嗽三天了"
-    assert enc["created_at"]
-    assert enc["assessment"]["patient_summary"] == "建议到呼吸内科就诊。"
-    assert [m["role"] for m in enc["transcript"]] == ["user", "assistant"]
-    assert enc["transcript"][1]["content"] == posted["message"]
+        got = c.get("/consult/encounters", params={"patient_id": "p-1"}).json()
+        assert got["count"] == 1
+        assert got["persistence_backend"] == "PgPersistence"
+        enc = got["encounters"][0]
+        assert enc["encounter_id"] == posted["encounter_id"]
+        assert enc["chief_complaint"] == "我咳嗽三天了"
+        assert enc["created_at"]
+        assert enc["assessment"]["patient_summary"] == "建议到呼吸内科就诊。"
+        assert [m["role"] for m in enc["transcript"]] == ["user", "assistant"]
+        assert enc["transcript"][1]["content"] == posted["message"]
 
-    # 归属：换个人查就查不到（`patient_id` 是记录归属，不是认证）
-    assert c.get("/consult/encounters", params={"patient_id": "p-2"}).json()["count"] == 0
+        # 归属：换个人查就查不到（`patient_id` 是记录归属，不是认证）
+        assert c.get("/consult/encounters", params={"patient_id": "p-2"}).json()["count"] == 0
 
-    # 运维可见性：状态端点能看到行数真的在涨（会话状态仍是内存态，如实说明）
-    status = c.get("/consult/status").json()
-    assert status["persistence_backend"] == "SqlitePersistence"
-    assert status["persistence_rows"] == {"patients": 1, "encounters": 1, "messages": 2}
-    assert status["persistence_path"].endswith("records.db")
-    assert "in-process" in status["session_store"]
-    store.close()
+        # 运维可见性：状态端点能看到行数真的在涨（会话状态仍是内存态，如实说明）
+        status = c.get("/consult/status").json()
+        assert status["persistence_backend"] == "PgPersistence"
+        assert status["persistence_rows"] == {"patients": 1, "encounters": 1, "messages": 2}
+        # 落点描述是 `schema@脱敏 DSN`：说清落在哪，口令不回显
+        assert status["persistence_path"].startswith(f"{pg_schema}@")
+        assert "***" in status["persistence_path"]
+        assert "in-process" in status["session_store"]
+    finally:
+        store.close()
 
 
 def test_encounters_endpoint_is_empty_without_persistence(client_factory: Any) -> None:
@@ -456,19 +500,26 @@ def test_encounters_limit_is_validated(client_factory: Any) -> None:
     assert c.get("/consult/encounters", params={"limit": 1000}).status_code == 422
 
 
-def test_runtime_builds_the_records_db_from_settings_without_self_deadlock(tmp_path: Any) -> None:
+@_requires_pg
+def test_runtime_builds_the_store_from_settings_without_self_deadlock(
+    pg_schema: str, monkeypatch: Any
+) -> None:
     """`pipeline()` 持锁时会调 `_build()` 去取 store（**同一把锁**）。
 
     锁因此必须是可重入的：普通 `Lock` 会让第一次 `/consult` 直接自锁死（挂住，不报错）。
-    这条测试用带超时的线程把"挂住"变成"5 秒后断言失败"，并在 `tmp_path` 里建库。
+    这条测试用带超时的线程把"挂住"变成"5 秒后断言失败"。
+
+    存储按 settings 里的 `database_url` 真造（证明"有 settings 就该建真库，而不是静默退回
+    Noop"）；`PgPersistence` 被换成**注入独立 schema** 的版本，以免在真实库里建 `clinical`。
     """
 
     class _WithSettings:
-        settings = SimpleNamespace(clinic_records_path=tmp_path / "records.db")
+        settings = SimpleNamespace(database_url=_DSN)
 
         def retriever(self) -> Any:
             return None
 
+    monkeypatch.setattr(consult_module, "PgPersistence", lambda dsn: PgPersistence(dsn, schema=pg_schema))
     rt = ConsultRuntime(_WithSettings())
     got: dict[str, Any] = {}
 
@@ -480,8 +531,29 @@ def test_runtime_builds_the_records_db_from_settings_without_self_deadlock(tmp_p
     worker.start()
     worker.join(timeout=5)
     assert not worker.is_alive(), "持锁取 store 自锁死了：`ConsultRuntime._lock` 必须是 RLock"
-    assert isinstance(got["store"], SqlitePersistence), "有 settings 就该建真库，而不是退回 Noop"
+    assert isinstance(got["store"], PgPersistence), "有 settings 就该建真库，而不是退回 Noop"
     got["store"].close()
+
+
+def test_unreachable_database_degrades_to_noop_instead_of_failing(caplog: Any) -> None:
+    """**核心取舍**：Postgres 不可达时 `/consult` 必须照常可用，只是这轮不留档。
+
+    用一个**解析不了的主机名**（`.invalid` 是保留后缀）：与"防火墙丢包"同样是"库不可达"，
+    但它立刻失败——换成 `127.0.0.1:1` 会白等满 10 秒连接超时，把单测拖慢。
+    """
+
+    class _BadDsn:
+        settings = SimpleNamespace(database_url="postgresql://kubedocs:kubedocs@no-such-host.invalid/db")
+
+        def retriever(self) -> Any:
+            return None
+
+    with caplog.at_level(logging.WARNING, logger="kubedocs.api.consult"):
+        store = ConsultRuntime(_BadDsn()).store()
+
+    assert isinstance(store, NoopPersistence), "连不上库就该降级，而不是让 /consult 起不来"
+    assert store.counts() == {"patients": 0, "encounters": 0, "messages": 0}
+    assert any("不可用" in r.message for r in caplog.records), "降级必须留痕（warning）"
 
 
 @pytest.fixture(scope="module")

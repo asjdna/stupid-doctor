@@ -427,6 +427,7 @@ def cmd_mcp(args: argparse.Namespace) -> int:
         settings=make_settings(args),
         domain=args.domain or "",
         allow_side_effects=args.allow_side_effects,
+        no_warmup=bool(getattr(args, "no_warmup", False)),
     )
 
 
@@ -522,8 +523,8 @@ def build_parser() -> argparse.ArgumentParser:
             "  --domain clinic     号源三件套 + search_docs + check_citations\n"
             "\n"
             "副作用工具（取号）默认**不暴露**；开 --allow-side-effects 后仍必须传 confirm=true。\n"
-            "启动不加载嵌入模型：只有 search_docs 真被调用时才装配检索器（索引不可用时\n"
-            "返回可读的 isError，而不是把服务打挂）。"
+            "启动后台预热检索器：握手不受影响，但第一次 search_docs 不必现付模型加载\n"
+            "（`--no-warmup` 关掉它；索引不可用时返回可读的 isError，而不是把服务打挂）。"
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
         parents=[common],
@@ -532,6 +533,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--allow-side-effects",
         action="store_true",
         help="同时暴露有副作用的工具（**调用时仍必须显式 confirm=true**）",
+    )
+    pm.add_argument(
+        "--no-warmup",
+        action="store_true",
+        help="不在启动后预热检索器（第一次 search_docs 会现付导入与模型加载）",
     )
     pm.set_defaults(func=cmd_mcp)
 

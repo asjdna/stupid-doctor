@@ -442,6 +442,7 @@ def main(
     settings: Settings | None = None,
     domain: str = "",
     allow_side_effects: bool = False,
+    no_warmup: bool = False,
 ) -> int:
     """MCP server 入口：解析参数 → 配日志 → 起 stdio 服务（阻塞到客户端断开）。
 
@@ -472,7 +473,12 @@ def main(
     configure_logging(settings)
     _pin_offline_env(settings)
 
-    server = build_server(target, allow_side_effects=allow, settings=settings, warmup=not args.no_warmup)
+    server = build_server(
+        target,
+        allow_side_effects=allow,
+        settings=settings,
+        warmup=not (args.no_warmup or no_warmup),
+    )
     logger.info(
         "MCP server 启动（域 %s，副作用工具 %s；传输 stdio）",
         settings.domain,
