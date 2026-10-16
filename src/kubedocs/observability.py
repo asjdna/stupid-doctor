@@ -65,6 +65,18 @@ LLM_BUDGET = Gauge(
     f"{_PREFIX}_llm_budget_usd",
     "当日 LLM 花费上限（美元；0 表示不限）",
 )
+SAFETY_INVARIANT_FIRED = Counter(
+    f"{_PREFIX}_safety_invariant_fired_total",
+    "确定性安全不变量被触发的次数（按不变量与入口）",
+    ["invariant", "domain"],
+)
+"""安全门触发计数。
+
+它是**运行期长期监听**的抓手：审计日志（`safety_audit.jsonl`）能回答"发生了什么"，
+但要发现"最近触发变多了"得靠 Prometheus 这种可聚合的计数——告警规则写在它上面，
+而不是让人去 tail 一个 JSONL 文件。每条不变量单独一个标签值，所以"哪一条开始频繁触发"
+一眼可见；`domain` 标签区分 `/consult`（临床管线）与 `/chat`（散文路径）。
+"""
 
 
 def configure_logging(settings: Settings) -> None:

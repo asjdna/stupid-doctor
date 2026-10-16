@@ -304,21 +304,38 @@ def append_audit(index_root: Path, outcome: SafetyOutcome, *, domain: str = "cli
 
     写失败**不让这一轮失败**（与落库同一条纪律：宁可少一条记录，也不能让患者拿不到答复），
     但会记 warning——静默失败等于审计是假的。
+
+    这里同时**打 Prometheus 计数**（`kubedocs_safety_invariant_fired_total`）：审计文件回答
+    "发生了什么"，计数回答"最近是不是变多了"。放在同一个函数里是刻意的——两处各打一次，
+    迟早会出现"记了日志没计数"或反过来的静默漂移。
     """
     if not outcome.fired:
         return 0
     stamp = datetime.now(timezone.utc).isoformat()
     path = audit_path(index_root)
+    written = 0
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
         with path.open("a", encoding="utf-8") as fh:
             for rec in outcome.fired:
                 row = {"ts": stamp, "domain": domain, **rec.to_payload()}
                 fh.write(json.dumps(row, ensure_ascii=False) + "\n")
+                written += 1
     except OSError as e:  # noqa: BLE001 - 磁盘问题不该影响这一轮应答
         logger.warning("安全门审计写入失败（%s）：%s", path, e)
-        return 0
-    return len(outcome.fired)
+    _count_invariants(outcome, domain=domain)
+    return written
+
+
+def _count_invariants(outcome: SafetyOutcome, *, domain: str) -> None:
+    """打 Prometheus 计数。**观测失败不许影响业务**（prometheus 缺了也要能跑）。"""
+    try:
+        from kubedocs.observability import SAFETY_INVARIANT_FIRED
+
+        for rec in outcome.fired:
+            SAFETY_INVARIANT_FIRED.labels(invariant=rec.invariant, domain=domain).inc()
+    except Exception as e:  # noqa: BLE001 - 指标是辅助，不该让安全门自己报错
+        logger.debug("安全门计数失败（不影响业务）：%s", e)
 
 
 def read_audit(index_root: Path, *, limit: int = 50) -> list[dict[str, Any]]:
