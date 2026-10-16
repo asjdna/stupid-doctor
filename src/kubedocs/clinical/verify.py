@@ -141,6 +141,126 @@ def _medical_content(assessment: ClinicalAssessment) -> bool:
     return bool(assessment.exams or assessment.medications or assessment.differentials)
 
 
+def _prose_violations(prose: str, facts: FactSet, *, emergency: bool) -> list[Violation]:
+    """**只做能被事实锚定**的那些检查，结构化契约与散文两条路共用。
+
+    这里的三类是同一类风险：模型宣称了一件服务端没做过的事，或写了一个服务端没给过的值。
+    它们**不需要**结构化契约就能验——依据、金额、凭据号都是事实集里现存的东西，
+    而"说没说过某个动作"在散文里就能认出来。
+    """
+    out: list[Violation] = []
+
+    # **动作幻觉**：声称完成了挂号/退号，而事实集里没有**对应**的那个动作。
+    # 这是本模块存在的首要理由（服务端没挂上、模型宣布挂上）。
+    confirmed = [b for b in facts.completed_bookings() if b.kind == "confirmed"]
+    cancelled = [b for b in facts.completed_bookings() if b.kind == "cancelled"]
+    booked_claim = _BOOKED_CLAIM_RE.search(prose)
+    cancelled_claim = _CANCELLED_CLAIM_RE.search(prose)
+    if booked_claim and not confirmed:
+        out.append(
+            Violation(
+                kind="fabricated_booking",
+                detail=(
+                    f"你的回答里出现了「{booked_claim.group(0)}」这类完成态说法，但服务端本轮"
+                    f"**没有**任何已确认的取号动作（号源动作只能由服务端端点执行）。"
+                    f"请改为「这张单子需要患者确认后才生效」这类与实际状态一致的表述。"
+                ),
+                severity="block",
+            )
+        )
+    if cancelled_claim and not cancelled:
+        out.append(
+            Violation(
+                kind="fabricated_cancellation",
+                detail=(
+                    f"你的回答里出现了「{cancelled_claim.group(0)}」这类说法，但服务端本轮"
+                    f"**没有**任何已退号的记录。请按实际状态说明。"
+                ),
+                severity="block",
+            )
+        )
+
+    # 凭据号幻觉：提到了一个服务端没发过的凭据号。
+    real_tickets = facts.ticket_numbers()
+    for match in _TICKET_LABEL_RE.finditer(prose):
+        token = match.group(1)
+        if token not in real_tickets:
+            out.append(
+                Violation(
+                    kind="unknown_ticket",
+                    detail=(
+                        f"你写的凭据号 {token!r} 不存在"
+                        + (
+                            f"；服务端本轮的凭据号只有 {sorted(real_tickets)}"
+                            if real_tickets
+                            else "（本轮没有任何凭据号）"
+                        )
+                    ),
+                    severity="block",
+                )
+            )
+
+    # 金额幻觉：说了服务端没给过的挂号费。
+    known_numbers = facts.known_numbers()
+    for match in _MONEY_RE.finditer(prose):
+        amount = int(match.group(1))
+        if amount not in known_numbers and amount not in (0, 120):
+            out.append(
+                Violation(
+                    kind="unknown_amount",
+                    detail=(
+                        f"你提到了 {amount} 元，但服务端没有给出过这个金额"
+                        + (
+                            f"（已知：{sorted(known_numbers)}）"
+                            if known_numbers
+                            else "（本轮没有任何费用事实）"
+                        )
+                    ),
+                    severity="warn",
+                )
+            )
+
+    # 红线线索未被解释（warn）：三维门控说这条可作为本人当前主诉，而模型没判急症，
+    # 也没在回答里提过这个词。**不拦**——判断权在模型，但"系统担心过这件事"要留痕。
+    if facts.red_line_is_reportable() and not emergency:
+        for word in facts.red_line_words():
+            if word and word not in prose:
+                out.append(
+                    Violation(
+                        kind="red_line_unexplained",
+                        detail=(
+                            f"关键词表命中「{word}」（三维门控认为可作为患者当前主诉），"
+                            f"但你没判急症、也没在总结里解释为什么不需要紧急处理"
+                        ),
+                        severity="warn",
+                    )
+                )
+    return out
+
+
+def verify_prose(prose: str, facts: FactSet, *, emergency: bool | None = None) -> Verification:
+    """**散文路径**（`/chat` 的工具循环）的输出校验。
+
+    与 `verify()` 的差别是**能验什么**：`/chat` 的输出是一段自由文本，没有
+    `ClinicalAssessment` 那样的结构化契约，所以这里只做**能被事实锚定**的检查——
+    动作幻觉、凭据号、金额、红线未解释。
+
+    **不假装能验的**（诚实地留在这里，而不是用关键词近似一下充数）：
+
+    - *编造依据编号*：散文里没有 `evidence_ids` 字段，认不出它引用了哪个编号；
+    - *科室未接地*：散文里没有科室字段，从文本里"找科室名"会误伤（"不是心内科的问题"）；
+    - *无依据却给医学内容*：判断"这段话算不算医学内容"没有可靠的机械判据，
+      靠关键词表会把"这不是药"也判成用药建议。所以这条**只在结构化路径**上强制
+      （`/consult` 的 `medical_without_evidence`），不在散文上假装有。
+
+    `emergency` 不给时按"正文里有没有可执行的紧急指引"推定：那是**展示层判断**
+    （决定要不要弹横幅），不是医学判断——判断已经写在正文里了。
+    """
+    if emergency is None:
+        emergency = "120" in prose or "急诊" in prose
+    return Verification(violations=_prose_violations(prose, facts, emergency=emergency))
+
+
 def verify(
     assessment: ClinicalAssessment,
     prose: str,
@@ -148,7 +268,7 @@ def verify(
     *,
     emergency: bool | None = None,
 ) -> Verification:
-    """拿事实集校验这一轮输出。**返回而不抛**：调用方要能"带伤降级"。
+    """拿事实集校验**结构化契约路径**（`/consult`）的输出。**返回而不抛**：调用方要能"带伤降级"。
 
     `emergency` 不给时按 `assessment.urgency == "emergency"` 推定；显式传入是为了让
     调用方能按"横幅是否真的弹了"来判定（降级轮次里 `urgency` 可能不可信）。
@@ -185,75 +305,8 @@ def verify(
                 )
             )
 
-    # 3) **动作幻觉**：声称完成了挂号/退号，而事实集里没有**对应**的那个动作。
-    #    这是本模块存在的首要理由（服务端没挂上、模型宣布挂上）。
-    confirmed = [b for b in facts.completed_bookings() if b.kind == "confirmed"]
-    cancelled = [b for b in facts.completed_bookings() if b.kind == "cancelled"]
-    booked_claim = _BOOKED_CLAIM_RE.search(prose)
-    cancelled_claim = _CANCELLED_CLAIM_RE.search(prose)
-    if booked_claim and not confirmed:
-        out.append(
-            Violation(
-                kind="fabricated_booking",
-                detail=(
-                    f"你的回答里出现了「{booked_claim.group(0)}」这类完成态说法，但服务端本轮"
-                    f"**没有**任何已确认的取号动作（号源动作只能由服务端端点执行）。"
-                    f"请改为「这张单子需要患者确认后才生效」这类与实际状态一致的表述。"
-                ),
-                severity="block",
-            )
-        )
-    if cancelled_claim and not cancelled:
-        out.append(
-            Violation(
-                kind="fabricated_cancellation",
-                detail=(
-                    f"你的回答里出现了「{cancelled_claim.group(0)}」这类说法，但服务端本轮"
-                    f"**没有**任何已退号的记录。请按实际状态说明。"
-                ),
-                severity="block",
-            )
-        )
-
-    # 4) 凭据号幻觉：提到了一个服务端没发过的凭据号。
-    real_tickets = facts.ticket_numbers()
-    for match in _TICKET_LABEL_RE.finditer(prose):
-        token = match.group(1)
-        if token not in real_tickets:
-            out.append(
-                Violation(
-                    kind="unknown_ticket",
-                    detail=(
-                        f"你写的凭据号 {token!r} 不存在"
-                        + (
-                            f"；服务端本轮的凭据号只有 {sorted(real_tickets)}"
-                            if real_tickets
-                            else "（本轮没有任何凭据号）"
-                        )
-                    ),
-                    severity="block",
-                )
-            )
-
-    # 5) 金额幻觉：说了服务端没给过的挂号费。
-    known_numbers = facts.known_numbers()
-    for match in _MONEY_RE.finditer(prose):
-        amount = int(match.group(1))
-        if amount not in known_numbers and amount not in (0, 120):
-            out.append(
-                Violation(
-                    kind="unknown_amount",
-                    detail=(
-                        f"你提到了 {amount} 元，但服务端没有给出过这个金额"
-                        + (
-                            f"（已知：{sorted(known_numbers)}）"
-                            if known_numbers
-                            else "（本轮没有任何费用事实）"
-                        )
-                    ),
-                    severity="warn",
-                )
-            )
+    # 3)~5) 散文层面的检查与 `/chat` 共用同一份实现（动作幻觉 / 凭据号 / 金额 / 红线留痕）。
+    out.extend(_prose_violations(prose, facts, emergency=emergency))
 
     # 6) 无依据却给医学内容：检索为空时只能如实说不知道。
     #    急症安全动作例外（见 NO_EVIDENCE_ANSWER 的说明）。
@@ -268,22 +321,6 @@ def verify(
                 severity="block",
             )
         )
-
-    # 7) 红线线索未被解释（warn）：三维门控说这条可作为本人当前主诉，而模型没判急症，
-    #    也没在回答里提过这个词。**不拦**——判断权在模型，但"系统担心过这件事"要留痕。
-    if facts.red_line_is_reportable() and not emergency:
-        for word in facts.red_line_words():
-            if word and word not in prose:
-                out.append(
-                    Violation(
-                        kind="red_line_unexplained",
-                        detail=(
-                            f"关键词表命中「{word}」（三维门控认为可作为患者当前主诉），"
-                            f"但你没判急症、也没在总结里解释为什么不需要紧急处理"
-                        ),
-                        severity="warn",
-                    )
-                )
     return Verification(violations=out)
 
 

@@ -376,6 +376,8 @@ class TestChat:
         assert message["pending_action"] is None
         # 无密钥时那一轮没有依据可言，也没有参考标准面板
         assert message["reference"] is None
+        # 字段仍然存在（空列表）：缺字段会让前端与审计分不清"没有违规"和"没校验"
+        assert message["contract_violations"] == []
         assert [data for name, data in events if name == "tool"] == [], "无密钥时不该有 tool 事件"
 
     def test_the_deterministic_graph_is_not_on_the_request_path(
@@ -431,6 +433,67 @@ class TestChat:
         assert reference, "有密钥的那一轮必须带上面板"
         assert {"red_line", "symptoms", "booking", "known_departments"} <= set(reference)
         assert reference["booking"] == [], "本轮服务端没有挂号动作"
+
+    def test_message_event_carries_contract_violations(
+        self, api_settings: Settings, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """`message` 事件带 `contract_violations`：**编造的挂号不上屏**，但违规要留档。
+
+        这一条以前是漏的：`/chat` 的输出没有经过约束层，于是"没挂上却说挂上"能直接发给
+        患者。现在它与 `/consult` 同口径——患者看到的是服务端拼的事实回答，违规明细进响应。
+        """
+        monkeypatch.setattr("kubedocs.api.app.has_api_key", lambda _model: True)
+        monkeypatch.setattr(ClinicReactRuntime, "has_llm", lambda self: True)
+        monkeypatch.setattr("kubedocs.agent.clinic_react._triage_links", lambda: {"咳嗽": ("呼吸内科",)})
+
+        hallucination = "已经为您挂上呼吸内科的号了，请按时就诊。"
+
+        class _Hallucinating:
+            def __init__(self, _settings: Any) -> None:
+                pass
+
+            def choose(self, messages: list[dict[str, Any]], tools: list[dict[str, Any]]) -> dict[str, Any]:
+                # 两轮都这么答（重生成也编）⇒ 落到"只陈述事实"那一级处置
+                return {"content": hallucination, "tool_calls": []}
+
+        monkeypatch.setattr("kubedocs.agent.llm_tool_caller.LiteLLMToolCaller", _Hallucinating)
+        with TestClient(create_app(api_settings)) as client:
+            resp = client.post("/chat", json={"message": "我挂上了吗", "patient_id": "p-halluc"})
+
+        message = _event(_sse_events(resp.text), "message")
+        assert "已经" not in message["text"], "编造的动作幻觉上屏了"
+        assert message["text"] != hallucination
+        kinds = {v["kind"] for v in message["contract_violations"]}
+        assert "fabricated_booking" in kinds
+        assert message["reference"], "面板留档与违规留档要成对回传"
+
+    def test_clean_turn_reports_an_empty_violation_list(
+        self, api_settings: Settings, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """守规矩的一轮必须报空列表：字段存在且为 `[]`，不是"缺字段"（两者含义不同）。
+
+        这一条同时是**误拦基线**：正确回答不该被约束层改写，也不该凭空多出违规记录。
+        """
+        monkeypatch.setattr("kubedocs.api.app.has_api_key", lambda _model: True)
+        monkeypatch.setattr(ClinicReactRuntime, "has_llm", lambda self: True)
+        monkeypatch.setattr("kubedocs.agent.clinic_react._triage_links", lambda: {"咳嗽": ("呼吸内科",)})
+
+        compliant = "目前没有查到您的挂号记录。需要我帮您预约吗？"
+
+        class _Clean:
+            def __init__(self, _settings: Any) -> None:
+                pass
+
+            def choose(self, messages: list[dict[str, Any]], tools: list[dict[str, Any]]) -> dict[str, Any]:
+                return {"content": compliant, "tool_calls": []}
+
+        monkeypatch.setattr("kubedocs.agent.llm_tool_caller.LiteLLMToolCaller", _Clean)
+        with TestClient(create_app(api_settings)) as client:
+            resp = client.post("/chat", json={"message": "我挂上了吗", "patient_id": "p-clean"})
+
+        message = _event(_sse_events(resp.text), "message")
+        assert message["text"] == compliant, "没有违规却被改写了"
+        assert message["contract_violations"] == []
 
     def test_thread_id_is_respected_and_conversation_continues(self, client: TestClient) -> None:
         """带同一个 thread_id 再来一次 = 续聊：会话属于调用方，服务端按 id 记账。"""

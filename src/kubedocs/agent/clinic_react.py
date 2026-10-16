@@ -44,6 +44,7 @@ from kubedocs.agent.bootstrap import register_domain_tools
 from kubedocs.agent.tool_loop import AgentTurn, run_tool_loop
 from kubedocs.agent.tools import ToolRegistry, ToolSpec
 from kubedocs.clinical.reference import BookingFact
+from kubedocs.clinical.verify import Verification, facts_only_answer, verify_prose
 from kubedocs.config import Settings
 from kubedocs.domains.clinic.data.departments import DEPARTMENTS
 from kubedocs.domains.clinic.redline import RiskGuard
@@ -138,6 +139,13 @@ class ClinicTurn:
     与 `/consult` 的 `reference` 是同一形状、同一装配来源：规则资产说了什么、原话怎么被
     归一、服务端有哪些挂号事实，都可以逐轮对账。**它不是结论**——结论在 `text` 里，
     由模型给出；`reference` 是"依据"的留档。
+    """
+    contract_violations: list[dict[str, str]] | None = None
+    """输出约束层（`clinical/verify.py`）在这一轮拦下的东西。
+
+    与 `reference` **成对**回传：只给"让它看了什么"而没有"它哪里越界了"，事后无法回答
+    "这次是依据不够，还是模型没守规矩"。重生成成功的那些违规**照样在这里**——回正不
+    等于没发生过（与 `/consult` 的 `contract_violations` 同一口径）。
     """
 
 
@@ -350,6 +358,47 @@ class ClinicReactRuntime:
             # 所以这里统一回失败提示：不产出任何兜底内容（没有判断者就没有结论）。
             notes.append("模型没有产出可用回答：只回失败提示，不产出兜底内容")
         answer = turn.answer or LLM_FAILED_MESSAGE
+        emergency = "120" in answer or "急诊" in answer
+
+        # **散文路径同样要被事实约束**：这一条以前是漏的——`/chat` 的输出直接上屏，
+        # 于是"没挂上却说挂上"在对话页可以毫无阻拦地发给患者。
+        violated = verify_prose(answer, facts, emergency=emergency)
+        # 历次尝试的违规**全部留档**（与 `clinical/pipeline.py` 同一条规矩）：第一轮确实
+        # 越界了，不能因为第二轮回正就当没发生——"模型偶尔会编"正是最该被观测到的事。
+        recorded = list(violated.violations)
+        blocked = bool(turn.answer) and not violated.ok()
+        if blocked:
+            logger.warning("对话回答未通过事实校验：%s", violated.kinds())
+            notes.append("回答未通过事实校验：已重生成一次")
+            retry_prompt = build_system_prompt(
+                self.tools, reference=f"{facts.render()}\n\n---\n\n{violated.feedback()}"
+            )
+            retry: AgentTurn = run_tool_loop(
+                message,
+                tools=self.tools,
+                llm=caller,
+                system=retry_prompt,
+                max_steps=5,
+                history=history,
+                budget=self.budget,
+                context={"patient_id": patient_id},
+            )
+            notes.extend(retry.notes)
+            if retry.answer:
+                recheck = verify_prose(retry.answer, facts, emergency=emergency)
+                recorded.extend(recheck.violations)
+                if recheck.ok():
+                    turn = retry
+                    answer = retry.answer
+                    emergency = "120" in answer or "急诊" in answer
+                    blocked = False
+        if blocked:
+            # 第二级：模型那段散文不上屏，改由服务端拼一段只含事实的回答。
+            reason = "、".join(sorted({v.kind for v in Verification(violations=recorded).blocking()}))
+            answer = facts_only_answer(facts, reason=reason)
+            emergency = "120" in answer or "急诊" in answer
+            notes.append("回答连续未通过事实校验：已改为只陈述事实")
+
         return ClinicTurn(
             text=answer,
             tool_calls=[
@@ -364,7 +413,10 @@ class ClinicReactRuntime:
             # **展示层检测**：判断权已经交给模型（结论写在正文里），这里只决定前端要不要
             # 弹急诊横幅。所以它只看模型这段文字里有没有出现「120 / 急诊」——
             # 这是展示逻辑，**不是医学判断**，也不改变回答内容。
-            emergency=("120" in answer or "急诊" in answer),
+            emergency=emergency,
+            contract_violations=[
+                {"kind": v.kind, "severity": v.severity, "detail": v.detail} for v in recorded
+            ],
             steps=turn.steps,
             llm_calls=turn.llm_calls,
             notes=notes,

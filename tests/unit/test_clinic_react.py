@@ -460,3 +460,95 @@ class TestBudgetIsWiredIntoTheToolLoop:
 
         assert turn.text == LLM_FAILED_MESSAGE
         assert any("没有产出可用回答" in n for n in turn.notes or [])
+
+
+def _sequence_caller(monkeypatch: pytest.MonkeyPatch, answers: list[str]) -> list[list[dict[str, Any]]]:
+    """按顺序逐次给出回答的打桩 `ToolCaller`，返回它收到的 messages 列表。
+
+    `_capture_caller` 每次都回同一句，验证不了"重生成后回正"这条分支；这里让第 N 次
+    调用说第 N 句话（每次循环只调一次，因为打桩回答不带 tool_calls）。
+    """
+    seen: list[list[dict[str, Any]]] = []
+
+    class _Sequenced:
+        def __init__(self, _settings: Any) -> None:
+            self.calls = 0
+
+        def choose(self, messages: list[dict[str, Any]], tools: list[dict[str, Any]]) -> dict[str, Any]:
+            seen.append(copy.deepcopy(messages))
+            text = answers[min(self.calls, len(answers) - 1)]
+            self.calls += 1
+            return {"content": text, "tool_calls": []}
+
+    monkeypatch.setattr(ClinicReactRuntime, "has_llm", lambda self: True)
+    monkeypatch.setattr("kubedocs.agent.llm_tool_caller.LiteLLMToolCaller", _Sequenced)
+    return seen
+
+
+HALLUCINATED_BOOKING = "已经为您挂上心内科上午的号了，凭据号 SN999999，请按时就诊。"
+"""一段"没挂上却说挂上"的模型输出：完成态 + 服务端没发过的凭据号。"""
+
+COMPLIANT_ANSWER = "目前没有查到您的挂号记录。需要我帮您预约心内科吗？"
+
+
+class TestProseIsBoundByFacts:
+    """`/chat` 的散文路径必须被事实约束：以前这一路直接上屏，没有任何校验。
+
+    这些用例只验证**约束层有没有生效**（拦下、重生成、替换），不验证模型该说什么。
+    """
+
+    def test_clean_prose_passes_without_a_second_call(self, runtime, monkeypatch):
+        """基线：守规矩的回答照原样上屏，不触发重生成（否则约束层会天天改写正确回答）。"""
+        seen = _sequence_caller(monkeypatch, [COMPLIANT_ANSWER])
+
+        turn = runtime.turn("我挂上了吗", patient_id="p-clean")
+
+        assert len(seen) == 1, "没有违规却重生成了一次"
+        assert turn.text == COMPLIANT_ANSWER
+        assert turn.contract_violations == []
+
+    def test_fabricated_booking_never_reaches_the_patient(self, runtime, monkeypatch):
+        """**关键断言**：两轮都在编 ⇒ 患者看到的不是那段散文，而是只含事实的回答。"""
+        seen = _sequence_caller(monkeypatch, [HALLUCINATED_BOOKING, HALLUCINATED_BOOKING])
+
+        turn = runtime.turn("我挂上了吗", patient_id="p-halluc")
+
+        assert len(seen) == 2, "第一次违规后必须重生成一次（提示词里带违规反馈）"
+        assert "本轮没有产生任何挂号或退号动作" in turn.text
+        assert "SN999999" not in turn.text, "编造的凭据号上屏了"
+        assert "已经" not in turn.text
+        kinds = {v["kind"] for v in turn.contract_violations or []}
+        assert "fabricated_booking" in kinds
+        assert "unknown_ticket" in kinds
+        assert all(v["severity"] == "block" for v in turn.contract_violations or [])
+        assert any("已改为只陈述事实" in n for n in turn.notes or [])
+
+    def test_the_retry_prompt_carries_the_violation_feedback(self, runtime, monkeypatch):
+        """重生成那一次的系统提示必须带上面板**和**违规明细，否则模型只能瞎猜哪里错了。"""
+        seen = _sequence_caller(monkeypatch, [HALLUCINATED_BOOKING, COMPLIANT_ANSWER])
+
+        runtime.turn("我挂上了吗", patient_id="p-feedback")
+
+        retry_system = seen[1][0]["content"]
+        assert "参考标准" in retry_system, "重生成时把面板丢了"
+        assert "已被拦下" in retry_system
+        assert "fabricated_booking" in retry_system or "完成态说法" in retry_system
+
+    def test_a_recovered_retry_is_shown_but_the_first_pass_stays_on_record(self, runtime, monkeypatch):
+        """第二轮回正 ⇒ 展示第二轮的合规回答；第一轮的违规**照样留档**。
+
+        回正不等于没发生过："模型偶尔会编"正是这套架构最需要被观测到的事，
+        抹掉第一次的违规会让运维看到一份"一切正常"的假账（与 `/consult` 同一口径）。
+        """
+        seen = _sequence_caller(monkeypatch, [HALLUCINATED_BOOKING, COMPLIANT_ANSWER])
+
+        turn = runtime.turn("我挂上了吗", patient_id="p-recover")
+
+        assert len(seen) == 2
+        assert turn.text == COMPLIANT_ANSWER
+        assert {v["kind"] for v in turn.contract_violations or []} == {
+            "fabricated_booking",
+            "unknown_ticket",
+        }
+        assert any("已重生成一次" in n for n in turn.notes or [])
+        assert turn.reference is not None, "面板留档与违规留档要成对回传"

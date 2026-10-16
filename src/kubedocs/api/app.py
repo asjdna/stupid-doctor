@@ -452,6 +452,9 @@ class _ChatOutcome:
         self.pending_action = None
         # 图路径没有"参考标准面板"这个东西（它自己就是规则轨），留 None 保持形状一致。
         self.reference = None
+        # 与 `reference` 成对：给它看了什么 + 它哪里越界被拦了（见 `clinical/verify.py`）。
+        # 图路径不接约束层，但**字段形状保持一致**，前端只有一条渲染分支。
+        self.contract_violations: list[dict[str, str]] = []
 
     @classmethod
     def no_llm(cls) -> _ChatOutcome:
@@ -472,6 +475,7 @@ class _ChatOutcome:
         self.unpriced_calls = 0
         self.pending_action = None
         self.reference = None
+        self.contract_violations = []
         return self
 
     @classmethod
@@ -503,6 +507,8 @@ class _ChatOutcome:
         # 这一轮交给模型的参考标准面板（形状与 `/consult` 的 `reference` 一致）：
         # 规则资产说了什么、原话怎么被归一、服务端有哪些挂号事实，都能逐轮对账。
         self.reference = getattr(turn, "reference", None)
+        # 与 `reference` 成对：给它看了什么 + 它哪里越界被拦了（见 `clinical/verify.py`）。
+        self.contract_violations = list(getattr(turn, "contract_violations", None) or [])
         return self
 
 
@@ -624,6 +630,7 @@ async def _chat_events(app: FastAPI, request: ChatRequest, thread_id: str) -> As
             # 原话怎么被归一、服务端有哪些挂号事实。它是"依据"的留档，不是结论。
             # 无密钥时是 None（那一轮没有判断者，也就没有依据可言）。
             "reference": outcome.reference,
+            "contract_violations": outcome.contract_violations,
         },
     )
     yield _sse("done", {"thread_id": thread_id, "ok": True})
