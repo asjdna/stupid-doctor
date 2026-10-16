@@ -122,6 +122,8 @@ class TestMetricsEndpoint:
             "kubedocs_llm_calls_total",
             "kubedocs_llm_cost_usd_total",
             "kubedocs_llm_budget_usd",
+            # 安全门触发计数：运行期长期监听的抓手（告警规则写在它上面）
+            "kubedocs_safety_invariant_fired_total",
         ):
             assert name in resp.text, f"{name} 没出现在 /metrics 里"
 
