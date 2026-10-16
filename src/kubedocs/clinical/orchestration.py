@@ -203,6 +203,9 @@ class ClinicalToolLoop:
 
         **编号由本模块分配**，不信任工具返回的 chunk_id 形状：契约校验要的是
         "模型引用的编号真的存在"，编号必须是单一来源。
+
+        `text` 取**命中的那一段**（`body`），`context` 取它所在的**整节**（`context`）：
+        前者精确、后者完整，缺一个都会让模型在"半句话"和"没有上下文"之间二选一。
         """
         hits = result.get("hits")
         if not isinstance(hits, list):
@@ -218,6 +221,7 @@ class ClinicalToolLoop:
                     id=f"K{n}",
                     kind="knowledge",
                     text=str(hit.get("body") or hit.get("title") or "").strip(),
+                    context=str(hit.get("context") or "").strip(),
                     score=float(hit.get("score") or 0.0),
                     source_url=str(hit.get("source_url") or ""),
                 )

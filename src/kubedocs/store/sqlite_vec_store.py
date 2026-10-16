@@ -10,7 +10,8 @@
 1. **向量表主键就是 `chunk_id`**（`vec0(chunk_id text primary key, ...)`），不绕道
    `chunks.rowid`，因此删除/覆盖都按主键定位，不受 rowid 回收影响。
 2. **向量与块行同事务**：`upsert_docs` 在同一个 `BEGIN IMMEDIATE` 里写 `chunks`、
-   `chunks_fts`、`chunks_vec`，不存在"块在、向量不在"的中间态，`finalize()` 无需重建。
+   `chunks_fts`、`chunks_vec`（父块是基类的普通表 `parents`，也在同一事务里），
+   不存在"块在、向量不在"的中间态，`finalize()` 无需重建。
 3. **全文路与 `sqlite` 后端逐字节相同**（同一个外内容表、同一套 bm25 与列权重），
    换后端时唯一的变量就是向量路，便于定位指标变化。
 4. **不一致就报错，不静默**：块表与向量表行数不一致时，向量路抛 `StoreError` 并给出
@@ -227,6 +228,9 @@ class SqliteVecStore(SqliteStore):
             con.execute(_sql("DELETE FROM {tbl}", tbl=VEC_TABLE))
             con.execute("DELETE FROM chunks")
             con.execute("DELETE FROM documents")
+            # 父块是普通表、在基类里建，向量表清空时必须一并清：重建后没有任何子块会引用
+            # 旧父块，留着它只会让 `parents` 表跨轮次累积（`stats().n_parents` 也会虚高）。
+            con.execute("DELETE FROM parents")
         # 旧实现的侧车矩阵已无对应块，留着只会让"切回 sqlite 后端"读到陈旧数据
         if Path(self.vector_path).exists():
             Path(self.vector_path).unlink()

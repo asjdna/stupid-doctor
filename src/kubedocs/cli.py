@@ -309,9 +309,15 @@ def cmd_stats(args: argparse.Namespace) -> int:
     try:
         st = store.stats()
         meta = store.meta_dump()
+        # **实际生效的后端**，不是配置值：配置 pgvector 而数据库不可达时会降级为本地后端，
+        # 打印配置值会让"我明明配了 pgvector，为什么读到的块数是本地的"变成一个谜。
+        actual_backend = type(store).__name__
+        fallback = str(getattr(store, "fallback_reason", "") or "")
         payload = {
             "domain": settings.domain,
-            "store_backend": settings.store,
+            "store_backend": actual_backend,
+            "store_configured": settings.store,
+            "store_fallback": fallback,
             "normalizer": st.normalizer,
             # 语料位置由域自报：k8s 是一个目录，clinic 是一个 JSON 文件。
             "corpus": str(pack.corpus_root(settings)),
@@ -319,6 +325,7 @@ def cmd_stats(args: argparse.Namespace) -> int:
             "vectors": str(settings.vector_path),
             "n_docs": st.n_docs,
             "n_chunks": st.n_chunks,
+            "n_parents": st.n_parents,
             "mean_chars": round(st.mean_chars, 1),
             "n_with_code": st.n_with_code,
             "embedding_model": st.embedding_model,
@@ -343,9 +350,11 @@ def cmd_stats(args: argparse.Namespace) -> int:
         else:
             print(f"域         : {settings.domain}（归一化器 {st.normalizer}）")
             print(f"语料       : {payload['corpus']}")
-            print(f"存储后端   : {settings.store}")
+            print(f"存储后端   : {actual_backend}（配置 {settings.store}）")
+            if fallback:
+                print(f"            ⚠ 已降级：{fallback}")
             print(f"索引位置   : {_index_label(settings)}")
-            print(f"文档/块数  : {st.n_docs} / {st.n_chunks}")
+            print(f"文档/块数  : {st.n_docs} / {st.n_chunks}（父块 {st.n_parents}）")
             print(f"块均长度   : {st.mean_chars:.1f} 字符")
             print(f"含代码块   : {st.n_with_code}（{100.0 * st.n_with_code / max(st.n_chunks, 1):.1f}%）")
             print(f"嵌入模型   : {st.embedding_model}（{st.embedding_dim} 维）")
@@ -446,7 +455,7 @@ def cmd_schedule(args: argparse.Namespace) -> int:
             )
             return EXIT_OK
         if action == "show":
-            return _schedule_show(provider, args)  # type: ignore[arg-type]
+            return _schedule_show(provider, args)
         if action in ("close", "open"):
             closed = action == "close"
             provider.close_slot(  # type: ignore[attr-defined]

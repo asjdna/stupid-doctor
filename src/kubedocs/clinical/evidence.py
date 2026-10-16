@@ -26,8 +26,16 @@ from kubedocs.clinical.rag import RetrievalBackend
 EvidenceKind = Literal["red_line", "triage", "knowledge"]
 
 _KNOWLEDGE_BODY_CHARS = 400
-"""进上下文的单条正文上限。400 字够判定"这段讲不讲这个问题"，
+"""单条**命中片段**进上下文的正文上限。400 字够判定"这段讲不讲这个问题"，
 又不至于让 10 条命中把上下文塞满（`Settings.max_context_chars` 另有一层总量控制）。"""
+
+_KNOWLEDGE_PARENT_CHARS = 900
+"""单条补充的**整节**（父块）正文上限，比命中片段宽得多。
+
+为什么两条都要给：`text` 是**命中的那一句**（精确，但可能只有半句话），`context` 是它
+所在的**整节**（读得到前后文）。只给前者，模型会拿着被切断的话答题；只给后者再截断，
+就可能把命中那句整段截掉——因为命中位置在小节里的哪里是不确定的。
+所以宁可每条多花几百字，也不要让"读了资料"变成"读了一句断章"。"""
 
 
 class EvidenceItem(BaseModel):
@@ -38,6 +46,14 @@ class EvidenceItem(BaseModel):
     id: str
     kind: EvidenceKind
     text: str
+    """**命中的那一段**（子块，已截断到 `_KNOWLEDGE_BODY_CHARS`）。"""
+
+    context: str = ""
+    """命中块所属**整节**（父块）的正文，截断到 `_KNOWLEDGE_PARENT_CHARS`；空串 = 没有父块。
+
+    与 `text` 是两种用途：`text` 回答"命中的是哪一句"，`context` 给模型读前后文。
+    """
+
     score: float = 0.0
     source_url: str = ""
 
@@ -97,7 +113,12 @@ class EvidenceBundle(BaseModel):
         knowledge = [i for i in self.items if i.kind == "knowledge"][:max_items]
         if knowledge:
             lines.append("【知识依据｜只能据此给检查与用药建议】")
-            lines.extend(f"[{i.id}] {i.text}" for i in knowledge)
+            for i in knowledge:
+                lines.append(f"[{i.id}] {i.text}")
+                if i.context:
+                    # 标注清楚哪一段是"整节"：模型引用编号时引的是这一节，
+                    # 而它答题时依据的应当是整节，不是被截断的那一句。
+                    lines.append(f"  （{i.id} 所在小节全文）{i.context}")
         else:
             lines.append(
                 "【知识依据】本次**没有检索到任何资料**。"
@@ -160,11 +181,17 @@ def build_evidence(
 
     for i, hit in enumerate(hits, start=1):
         body = (hit.body or "").strip().replace("\n", " ")
+        # 整节正文与命中片段一并给出：前者是语境，后者是命中位置。两者相同（没有父块时）
+        # 就不重复一遍——那会白占一倍的上下文。
+        parent = (getattr(hit, "parent_text", "") or "").strip().replace("\n", " ")
+        if parent[: len(body)] == body:
+            parent = ""
         items.append(
             EvidenceItem(
                 id=f"K{i}",
                 kind="knowledge",
                 text=f"{hit.title} › {hit.breadcrumb}：{body[:_KNOWLEDGE_BODY_CHARS]}",
+                context=parent[:_KNOWLEDGE_PARENT_CHARS],
                 score=hit.score,
                 source_url=hit.source_url,
             )

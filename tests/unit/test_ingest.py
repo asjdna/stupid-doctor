@@ -125,9 +125,11 @@ def test_identical_content_reuses_vectors_from_index(settings, store, embedder):
     _write(settings.corpus_path, "a.md", "Same Title", BODY_A)
     _write(settings.corpus_path, "b.md", "Same Title", BODY_A)
     r1 = _ingest(store, settings, embedder)
-    # 批内去重：两篇内容一致，只编码一次
-    assert r1.chunks_written > r1.chunks_embedded
-    assert r1.chunks_embedded == 1
+    # 批内去重：两篇内容一致，只编码一次。断言写成"写入 == 编码的两倍"而不是写死块数——
+    # 一篇文档产出几个块取决于切块参数（父子切割后是若干 300 字子块），
+    # 写死数字会让这条测试在每次调切块时都假红一次，而它要守的是**去重**不是块数。
+    assert r1.chunks_written == 2 * r1.chunks_embedded
+    assert r1.chunks_embedded > 0
 
     # 删掉 b 再放回来：此时 b 的块不在库里，但同哈希的向量还在 -> 命中库内复用
     (settings.corpus_path / "b.md").unlink()
@@ -146,10 +148,32 @@ def test_intra_batch_dedup_with_duplicate_in_the_middle(settings, store, embedde
 
     r = _ingest(store, settings, embedder)
     assert r.chunks_written == store.stats().n_chunks
-    assert r.chunks_embedded == 2  # dup1 与 dup2 同内容，只编码一次
+    # 期望值由**同一套切块参数**独立算出来，而不是写死块数：父子切割的默认尺寸以后可能调，
+    # 调的时候这条测试不该假红——它守的是"重复内容只编码一次"，不是"一篇文档产出几个块"。
+    dup = _n_children(settings, "dup1.md", "Same Title", BODY_A)
+    other = _n_children(settings, "other.md", "Different Title", BODY_B)
+    assert r.chunks_written == 2 * dup + other
+    assert r.chunks_embedded == dup + other, "dup1/dup2 内容相同 ⇒ 只编码一份"
     # 三篇文档的块都拿到向量（否则 dense_search 会漏）
     assert store.dense_search(np.ones(32, dtype=np.float32), 50) != []
     assert len(store.doc_texts(["dup1", "dup2", "other"])) == 3
+
+
+def _n_children(settings: Settings, rel: str, title: str, body: str) -> int:
+    """一篇文档按摄取所用的同一套参数切出几个**子块**。"""
+    from kubedocs.chunker import chunk_document
+
+    text = f"---\ntitle: {title}\n---\n\n{body}\n"
+    return len(
+        chunk_document(
+            rel,
+            text,
+            max_chars=settings.chunk_max_chars,
+            overlap=settings.chunk_overlap_chars,
+            min_chars=settings.chunk_min_chars,
+            url_prefix=settings.docs_url_prefix,
+        )
+    )
 
 
 def test_empty_document_is_registered_to_avoid_rework(settings, store, embedder):

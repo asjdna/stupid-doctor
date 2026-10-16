@@ -120,6 +120,14 @@ class BgeEmbedder:
     def encode(
         self, texts: Sequence[str], *, is_query: bool = False, show_progress: bool = False
     ) -> np.ndarray:
+        """把一批文本编码成归一化向量，**返回顺序与入参一一对应**。
+
+        批大小是这里唯一的性能旋钮，而它**不是越大越好**：本机（14 线程、20 核）在
+        272 条真实子块上实测，batch 8/16/32 都在 15~17 条/s，batch 64 掉到 11.9，
+        batch 128 掉到 8.1。批次越大，"批内最长的那个块决定 padding"的浪费越明显，
+        而这个语料里既有 300 字的段落也有 6000 字的代码块。所以默认取较小的批量
+        （见 `Settings.embedding_batch_size`）。
+        """
         if not texts:
             return np.zeros((0, self.dim), dtype=np.float32)
         payload = list(texts)

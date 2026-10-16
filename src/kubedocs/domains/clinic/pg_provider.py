@@ -246,6 +246,18 @@ def _as_idempotency_key(value: object) -> str | None:
     return key or None
 
 
+def _scalar_int(row: tuple[Any, ...] | None, *, what: str) -> int:
+    """把一句 `SELECT` 的单列结果取成 int。
+
+    `fetchone()` 在类型上是可空的（`COUNT(*)` / `MAX(...)+1` 实际不可能没有行，但类型
+    系统不知道），直接 `[0]` 既过不了静态检查，真出现时也是一条难读的 IndexError。
+    缺行时给 0：这两个调用点要的都是"还没有任何计数/记录"这个语义。
+    """
+    if row is None or not row or row[0] is None:
+        raise BookingError(f"{what}读取失败：查询没有返回结果")
+    return int(row[0])
+
+
 def _row_to_ticket(row: tuple[Any, ...]) -> dict:
     """库行 → 取号单 dict。
 
@@ -467,15 +479,16 @@ class PgAppointmentProvider(AppointmentProvider):
             ).fetchone()
             if row is None:
                 raise BookingError(f"{dep} {day.isoformat()} {per}没有排班，无法改号量")
-            old_capacity = int(row[0])
-            booked = int(
+            old_capacity = _scalar_int(row, what="号量")
+            booked = _scalar_int(
                 conn.execute(
                     self._q(
                         "SELECT COUNT(*) FROM {appointments} "
                         "WHERE department = %s AND date = %s AND period = %s AND status <> %s"
                     ),
                     (dep, day, per, STATUS_CANCELLED),
-                ).fetchone()[0]
+                ).fetchone(),
+                what="已挂出号数",
             )
             new_remaining = max(0, new_capacity - booked)
             conn.execute(
@@ -661,14 +674,15 @@ class PgAppointmentProvider(AppointmentProvider):
             ).fetchone()
             if taken is None:
                 raise BookingError(self._why_unavailable(conn, dep, day, period))
-            queue_no = int(
+            queue_no = _scalar_int(
                 conn.execute(
                     self._q(
                         "SELECT COALESCE(MAX(queue_no), 0) + 1 FROM {appointments} "
                         "WHERE department = %s AND date = %s AND period = %s"
                     ),
                     (dep, day, period),
-                ).fetchone()[0]
+                ).fetchone(),
+                what="队列号",
             )
             row = conn.execute(
                 self._q(
@@ -691,6 +705,10 @@ class PgAppointmentProvider(AppointmentProvider):
                     idem,
                 ),
             ).fetchone()
+            if row is None:
+                # `INSERT ... RETURNING` 没有行只可能是并发删掉了这张单（本事务刚插进去，
+                # 正常不可能）。宁可报一句可读的失败，也不要拿 None 去解包。
+                raise BookingError("取号失败：写入的单据没有回读到，请重试")
             return _row_to_ticket(row)
 
     def _by_idempotency_key(self, idem: str) -> dict | None:
@@ -858,8 +876,8 @@ def _slot_dict(day: dt.date, period: object, capacity: object, remaining: object
     is_closed = bool(closed)
     return {
         "time": str(period),
-        "remaining": 0 if is_closed else int(remaining),
-        "capacity": int(capacity),
+        "remaining": 0 if is_closed else int(str(remaining)),
+        "capacity": int(str(capacity)),
         "closed": is_closed,
         "date": day.isoformat(),
     }

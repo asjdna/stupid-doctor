@@ -26,7 +26,15 @@ from pydantic import BaseModel, Field, ValidationError
 from kubedocs.agent.tools import SearchDocsParams, ToolError, ToolSpec
 
 BODY_LIMIT = 600
-"""单条命中的正文最多交给模型的字符数（构造工具时可用 `body_limit` 覆盖）。"""
+"""单条命中的**片段**正文最多交给模型的字符数（构造工具时可用 `body_limit` 覆盖）。"""
+
+PARENT_CONTEXT_LIMIT = 1500
+"""单条命中附带的**整节**（父块）正文上限。
+
+比 `BODY_LIMIT` 宽得多是刻意的：`body` 是命中位置（精确、短），`context` 是它所在的
+那一整节（读得到前后文）。按 `BODY_LIMIT` 去截整节，等于把刚拼好的语境又切掉。
+5 条命中 × 1500 字 ≈ 7500 字，仍在单轮工具结果的合理预算内。
+"""
 
 _MARKER_RE = re.compile(r"\[(\d{1,3})\]")
 """引用标记的形状与 `generate` 保持一致：1~3 位数字包在方括号里。"""
@@ -59,8 +67,22 @@ def _coerce_search_params(params: object) -> SearchDocsParams:
 
 
 def _hit_payload(hit: object, *, body_limit: int) -> dict[str, Any]:
-    """一条命中压成纯 dict：只留模型确实用得上的字段，并截断正文。"""
+    """一条命中压成纯 dict：只留模型确实用得上的字段，并截断正文。
+
+    **给两种正文，别只给一种**：
+
+    - `body`：**命中的那一段**（子块，300 字级）。它回答"命中的是哪一句"。
+    - `context`：这段所在的**整节**（父块，小节级，上限 `PARENT_CONTEXT_LIMIT`）。
+      它回答"这句话前后在讲什么"。
+
+    只给 `body`，模型容易拿着一句被切断的话去下结论；只给 `context` 并在长度上截断，
+    又可能把命中的那句整段截掉（命中位置在小节里的哪里是不确定的）。
+    两者相同（索引没有父块）时只给 `body`，不白占一倍上下文。
+    """
     body = _text(getattr(hit, "body", ""))
+    context = _text(getattr(hit, "parent_text", ""))
+    if context[: len(body)] == body:
+        context = ""
     return {
         "chunk_id": _text(getattr(hit, "chunk_id", "")),
         "doc_id": _text(getattr(hit, "doc_id", "")),
@@ -68,6 +90,9 @@ def _hit_payload(hit: object, *, body_limit: int) -> dict[str, Any]:
         "breadcrumb": _text(getattr(hit, "breadcrumb", "")),
         "source_url": _text(getattr(hit, "source_url", "")),
         "body": f"{body[:body_limit]} …" if len(body) > body_limit else body,
+        "context": (
+            f"{context[:PARENT_CONTEXT_LIMIT]} …" if len(context) > PARENT_CONTEXT_LIMIT else context
+        ),
     }
 
 
@@ -119,7 +144,8 @@ def make_search_tool(
 
     description = (
         "在文档语料里做混合检索（全文 + 向量 + 融合），返回按相关度排序的片段："
-        "每条含 chunk_id/doc_id/title/breadcrumb/source_url/body（body 已截断）。"
+        "每条含 chunk_id/doc_id/title/breadcrumb/source_url/body（命中的那一段，已截断）"
+        "与 context（这段所在的整节，已截断）。"
         f"最多返回 {top_k} 条。用它取证；没有命中的话题不要凭记忆作答。"
     )
     when_not = (

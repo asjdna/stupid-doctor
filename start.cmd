@@ -113,14 +113,17 @@ if not exist "%PY%" goto no_venv
 rem ---- 前置检查 2：索引 ------------------------------------------------------
 rem  索引缺失**不阻止启动**：/healthz 按设计不会因为索引空而失败，控制台页面
 rem  自己会亮红条说"索引为空，先 ingest"。这里只负责把话讲清楚。
+rem  下面探的是**本地回退索引**（sqlite-vec/sqlite 的位置）。默认后端 pgvector 把索引
+rem  放在 Postgres 里，那时这个文件不存在是正常的——所以提示文案里说明了这一点。
 if not exist "%ROOT%\data\index\%DOMAIN%\kubedocs.db" goto no_index
 goto pick
 
 :no_index
 echo.
-echo   [注意] 没有找到 %DOMAIN% 的索引：
+echo   [注意] 没有找到 %DOMAIN% 的本地索引：
 echo          %ROOT%\data\index\%DOMAIN%\kubedocs.db
-echo          服务仍会启动，但检索/问答会是空的。
+echo          用默认的 pgvector 后端时索引在 Postgres 里，这条可以忽略；
+echo          否则服务仍会启动，但检索/问答会是空的。
 echo          建索引（本域首次约需几分钟）：
 echo            .venv\Scripts\python.exe -m kubedocs.cli --domain %DOMAIN% %OFFLINE% ingest
 echo.

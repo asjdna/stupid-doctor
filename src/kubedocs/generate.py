@@ -127,7 +127,7 @@ class Answer:
 
 
 # --------------------------------------------------------------------------- 上下文组装
-def context_text(body: str) -> str:
+def strip_context_header(body: str) -> str:
     """去掉块首的 `[标题 › 面包屑]` 上下文头。
 
     这一行是给**嵌入模型**提高区分度用的；放进提示词反而冗余——编号标签里已经写了
@@ -140,29 +140,43 @@ def build_context(
     hits: Sequence[ChunkHit],
     *,
     max_chars: int = 8000,
-    per_chunk_chars: int = 1200,
+    per_chunk_chars: int = 3000,
     max_per_doc: int = 2,
 ) -> tuple[str, list[Citation]]:
     """把检索结果编号成上下文，返回 (上下文文本, 实际收录的引用)。
 
-    两条约束：
+    三条约束：
 
+    - **喂给模型的是父块**（`hit.context_text`）：检索用子块命中（精确），
+      进提示词用父块（整节，读得到前后文）。子块只有 300 字，单独塞给模型常常是
+      一句被切断的话；父块是它所在的那个小节。
     - **超出 `max_chars` 的片段会被丢弃**，并且不出现在引用列表里——只给模型看了
       一部分片段却允许它引用全部编号，是引用错位的常见来源。
     - **同一文档最多收录 `max_per_doc` 段**。检索按块打分，同一篇文档里相邻小节的
       向量往往高度相似，会一起涌进前几名，既挤掉别的文档又让上下文冗余。限流后
       引用编号按收录顺序重编，仍然连续。
+    - **同一个父块只收录一次**：一个小节被切成好几个子块，它们可能一起命中前几名，
+      而那几段文字是**同一节**——重复贴三遍既浪费上下文，也会让模型以为"有三个来源
+      都这么说"。重复的命中直接跳过，不占编号。
+
+    `per_chunk_chars` 默认 3000（= 父块上限）：它必须是**父块**的预算，不是子块的。
+    按子块的 300 字来截父块，等于把刚拼好的语境又切掉。
     """
     blocks: list[str] = []
     citations: list[Citation] = []
     per_doc: dict[str, int] = {}
+    seen_parents: set[str] = set()
     used = 0
     for hit in hits:
+        if hit.parent_id:
+            if hit.parent_id in seen_parents:
+                continue
+            seen_parents.add(hit.parent_id)
         if per_doc.get(hit.doc_id, 0) >= max_per_doc and citations:
             # `citations` 非空才允许跳过：第一段必须保留，否则"有结果"会退化成"没结果"
             continue
         label = f"{hit.title} › {hit.breadcrumb}" if hit.breadcrumb else hit.title
-        body = context_text(hit.body)
+        body = strip_context_header(hit.context_text)
         if len(body) > per_chunk_chars:
             body = body[:per_chunk_chars].rstrip() + " …"
         idx = len(citations) + 1
@@ -711,6 +725,10 @@ class Answerer:
                     breadcrumb=h.breadcrumb,
                     source_url=h.source_url,
                     body=h.body,
+                    # 父块必须一起带上：`build_context` 用它当上下文（检索用子块、
+                    # 生成用父块），漏了它这里就退回"只给模型 300 字的片段"。
+                    parent_id=h.parent_id,
+                    parent_text=h.parent_text,
                 )
                 for h in hits
             ],

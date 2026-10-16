@@ -22,9 +22,9 @@ from kubedocs.generate import (
     LLMResult,
     LLMUnavailable,
     build_context,
-    context_text,
     has_api_key,
     required_api_key_env,
+    strip_context_header,
     validate_citations,
 )
 from kubedocs.store.base import ChunkHit
@@ -94,13 +94,13 @@ def settings(tmp_path: Path) -> Settings:
 # --------------------------------------------------------------------- 上下文
 class TestContextText:
     def test_strips_the_context_header_line(self):
-        assert context_text("[Pod Lifecycle › Probes]\n\nReal body") == "Real body"
+        assert strip_context_header("[Pod Lifecycle › Probes]\n\nReal body") == "Real body"
 
     def test_keeps_body_without_header(self):
-        assert context_text("Just a body") == "Just a body"
+        assert strip_context_header("Just a body") == "Just a body"
 
     def test_only_strips_one_header(self):
-        assert context_text("[A]\n\n[B]\n\nbody") == "[B]\n\nbody"
+        assert strip_context_header("[A]\n\n[B]\n\nbody") == "[B]\n\nbody"
 
 
 class TestBuildContext:

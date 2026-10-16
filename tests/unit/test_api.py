@@ -110,8 +110,14 @@ def _event(events: list[tuple[str, dict]], name: str) -> dict:
 # --------------------------------------------------------------------------- 夹具
 @pytest.fixture
 def api_settings(tmp_path: Path) -> Settings:
-    """索引指向 tmp_path、嵌入用 hashing：**绝不联网、绝不加载真实模型**。"""
+    """索引指向 tmp_path、嵌入用 hashing：**绝不联网、绝不加载真实模型**。
+
+    显式 `store="sqlite-vec"`：`--index-dir` 式的隔离只对本地后端成立（pgvector 的索引
+    在 Postgres 的 schema 里，目录参数对它没有作用）。默认后端是 pgvector，不写这一项
+    这些用例就会去连真实 Postgres，既是环境依赖、又会被本机索引的维度/内容影响。
+    """
     return Settings(
+        store="sqlite-vec",
         index_dir=str(tmp_path / "index"),
         domain="k8s_docs",
         embedding_provider="hashing",
@@ -135,10 +141,20 @@ def client(api_settings: Settings) -> Iterator[TestClient]:
 # --------------------------------------------------------------------------- 没有索引时的探针与自省
 class TestWithoutIndex:
     def test_healthz_returns_200_even_without_index(self, client: TestClient) -> None:
-        """没有索引时 /healthz 仍然 200：判活探针关心"进程活着"，不关心有没有语料。"""
+        """没有索引时 /healthz 仍然 200：判活探针关心"进程活着"，不关心有没有语料。
+
+        `store` / `store_fallback` 是"用的是哪个向量库、有没有降级"的对外读数，
+        这里只断言它们存在（具体后端取决于测试环境的配置与库可达性）。
+        """
         resp = client.get("/healthz")
         assert resp.status_code == 200
-        assert resp.json() == {"ok": True, "domain": "k8s_docs", "n_chunks": 0}
+        body = resp.json()
+        assert {k: body[k] for k in ("ok", "domain", "n_chunks")} == {
+            "ok": True,
+            "domain": "k8s_docs",
+            "n_chunks": 0,
+        }
+        assert "store" in body and "store_fallback" in body
 
     def test_domains_returns_200_even_without_index(self, client: TestClient) -> None:
         """域包与索引是两件事：索引为空照样要能列出可用域。"""
@@ -553,6 +569,7 @@ class TestClinicStatePersistence:
 
         db = tmp_path / "state" / "clinic.db"
         settings = Settings(
+            store="sqlite-vec",
             index_dir=str(tmp_path / "index"),
             domain="k8s_docs",
             embedding_provider="hashing",

@@ -58,9 +58,9 @@ services:
     env_file:
       - .env
     environment:
-      # 必须与 DATABASE_URL 成对给出：Settings.store 的默认值是 sqlite-vec，
-      # 而它不读 database_url。只设 DATABASE_URL 不设 STORE 会让 api 去读嵌入式索引，
-      # 把旁边那个填满数据的 Postgres 晾着。
+      # 显式钉住容器里用 Postgres：`.env` 里可能把 KUBEDOCS_STORE 设成了本地后端，
+      # 而 compose 的 `environment` 优先于 `env_file`。写死 pgvector 才不会出现
+      # "api 去读容器内的嵌入式索引、把旁边那个填满数据的 Postgres 晾着"。
       KUBEDOCS_STORE: pgvector
       # 容器内互访用服务名
       KUBEDOCS_DATABASE_URL: postgresql://kubedocs:kubedocs@db:5432/kubedocs

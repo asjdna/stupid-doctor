@@ -103,11 +103,20 @@ class AskResponse(BaseModel):
 
 
 class HealthResponse(BaseModel):
-    """存活探针。字段刻意只有三个：探针要的是"活着吗、哪个域、有多少块"。"""
+    """存活探针。字段刻意只有三个：探针要的是"活着吗、哪个域、有多少块"。
+
+    **存储降级不算不存活**（所以它不进 `ok`）：配置的是 pgvector、数据库不可达时会降级为
+    本地 sqlite-vec，服务照常可用。但这件事必须看得见，所以单开一个字段而不是塞进 `ok`——
+    探针报 red 会触发重启，而重启解决不了"Postgres 没起"。
+    """
 
     ok: bool
     domain: str
     n_chunks: int
+    store: str = ""
+    """实际生效的后端名（降级时与配置值不同）。"""
+    store_fallback: str = ""
+    """非空表示发生了降级，内容是原因。空串 = 用的就是配置里的后端。"""
 
 
 class ToolsResponse(BaseModel):

@@ -83,12 +83,14 @@ class Settings(BaseSettings):
 
     # ---------- 存储 ----------
     # 同一 Store 协议下的三种实现（环境变量 KUBEDOCS_STORE，前缀由 env_prefix 自动加）：
-    #   sqlite-vec : 默认。SQLite（FTS5 全文）+ sqlite-vec 向量索引，零外部进程/零镜像/零网络
-    #   sqlite     : numpy 暴力内积 + .npy 侧车矩阵，作对照与回退
-    #   pgvector   : Postgres + pgvector HNSW，需要 database_url 可达
-    # 非法取值直接报错，绝不静默回退：静默回退会让"我明明切到 pgvector 了、
-    # 为什么数据还是旧的"变成一个没有任何日志的谜。
-    store: Literal["sqlite-vec", "sqlite", "pgvector"] = "sqlite-vec"
+    #   pgvector   : **默认**。Postgres + pgvector HNSW —— 真正的向量库：近似检索、
+    #                一库同时承担全文与向量、索引跨重启跨副本共享
+    #   sqlite-vec : 离线回退。SQLite（FTS5 全文）+ sqlite-vec 向量索引，零外部进程/零镜像/零网络
+    #   sqlite     : numpy 暴力内积 + .npy 侧车矩阵，作对照与最小依赖实现
+    #
+    # 两条失败路径刻意不同（见 `store/__init__.py`）：**非法取值直接报错**，绝不静默回退；
+    # **数据库不可达**则降级为 sqlite-vec 并留一条可见的 warning（离线开发/演示要能跑起来）。
+    store: Literal["sqlite-vec", "sqlite", "pgvector"] = "pgvector"
     database_url: str = "postgresql://kubedocs:kubedocs@127.0.0.1:5432/kubedocs"
     db_pool_min: int = 1
     db_pool_max: int = 10
@@ -121,7 +123,11 @@ class Settings(BaseSettings):
     embedding_provider: Literal["bge", "hashing", "api"] = "bge"
     embedding_model: str = "BAAI/bge-small-en-v1.5"
     embedding_dim: int = 384
-    embedding_batch_size: int = 64
+    embedding_batch_size: int = Field(default=32, ge=1)
+    """编码批量。**不是越大越快**：本机（14 线程 / 20 核）在 272 条真实子块上实测，
+    batch 8/16/32 都在 15~17 条/s，64 掉到 11.9，128 掉到 8.1，256 掉到 4.9。
+    原因是批内要 padding 到最长那条，而语料里既有 300 字的段落也有 6000 字的代码块，
+    批量越大"为了最长那条多算的比例"越高。32 是实测的拐点，也是这档语料的合理默认。"""
     # bge-small-en-v1.5 官方说明 v1.5 起可省略 query 指令；保留开关以便做 A/B。
     query_instruction: str = ""
     # 模型下载源。留空 = 走 HuggingFace 官方；企业内网/受限网络下指向镜像站。
@@ -156,10 +162,17 @@ class Settings(BaseSettings):
     # 不限流会让一段答案被近重复片段挤满，上下文既冗余又少了别的来源。
     max_chunks_per_doc: int = Field(default=2, ge=1, le=10)
 
-    # ---------- 切块 ----------
-    chunk_max_chars: int = Field(default=1200, ge=200)
-    chunk_overlap_chars: int = Field(default=150, ge=0)
+    # ---------- 切块（父子两层） ----------
+    # 检索用**子块**、喂给模型用**父块**（见 `chunker.py`）：
+    #   · 子块小 ⇒ 命中精确（一个具体说法、一行报错含义），而不是整节"泛泛相关"；
+    #   · 父块完整（一个标题小节）⇒ 模型看得到前后文，不会拿着被切一半的话去答题。
+    # 这三个值只作用于子块；父块的上限是下面的 `chunk_parent_max_chars`。
+    chunk_max_chars: int = Field(default=300, ge=100)
+    chunk_overlap_chars: int = Field(default=60, ge=0)
     chunk_min_chars: int = Field(default=80, ge=0)
+    # 父块（一个标题小节）的长度上限。小节超过它就按段落边界拆成多个父块——
+    # 拆是为了"任何一个父块都能整段放进模型上下文"，不为检索。
+    chunk_parent_max_chars: int = Field(default=3000, ge=400)
 
     # ---------- 大模型 ----------
     llm_model: str = "deepseek/deepseek-chat"

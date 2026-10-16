@@ -42,6 +42,34 @@
     font-size:13px; max-width:100%; }
   .msg.thinking .bubble { color:var(--dim); font-style:italic; }
 
+  /* 挂号卡片：和聊天气泡同一个容器（#stream），所以卡片出现在对话的恰当位置。
+     卡片上的科室/日期/时段/费用/余量**全部来自服务端**，前端不拼也不换算。 */
+  .msg.card { display:block; }
+  .card { background:var(--panel); border:1px solid var(--line); border-radius:12px;
+    padding:13px 15px; max-width:88%; }
+  .card.booking { border-color:#2c4a7a; }
+  .card .ct { font-weight:700; margin-bottom:9px; }
+  .card .kv { display:flex; gap:10px; font-size:14px; }
+  .card .kv .k { color:var(--dim); min-width:72px; }
+  .card .acts { margin-top:11px; display:flex; gap:8px; flex-wrap:wrap; }
+  button.act { background:var(--accent); color:#fff; border:0; border-radius:8px;
+    padding:7px 15px; font:inherit; font-size:13px; font-weight:600; cursor:pointer; }
+  button.act.quiet { background:transparent; border:1px solid var(--line);
+    color:var(--dim); font-weight:400; }
+  button.act:disabled { opacity:.5; cursor:not-allowed; }
+  .card .fine { color:var(--dim); font-size:12px; margin-top:9px; }
+  .card .why { color:#ffb4b4; font-size:13px; margin-top:9px; }
+  .card .taken { white-space:pre-wrap; word-break:break-word; }
+
+  /* 一条挂号记录。退掉的号**仍然留在列表里**（那是历史），只是压暗并标「已退号」。 */
+  .appt { border-top:1px solid var(--line); padding:10px 0; display:flex;
+    gap:10px; align-items:center; flex-wrap:wrap; }
+  .appt:first-child { border-top:0; }
+  .appt.cancelled { opacity:.55; }
+  .appt .main { flex:1; min-width:200px; font-size:14px; }
+  .appt .dept { font-weight:600; margin-right:8px; }
+  .appt .meta { color:var(--dim); font-size:12px; }
+
   footer { border-top:1px solid var(--line); padding:12px 20px 16px; }
   form { max-width:760px; margin:0 auto; display:flex; gap:8px; align-items:flex-end; }
   textarea { flex:1; background:var(--panel2); color:var(--fg); border:1px solid var(--line);
@@ -59,8 +87,10 @@
   <h1>在线问诊</h1>
   <span class="sub">用您自己的话描述症状即可</span>
   <span class="spacer"></span>
+  <span class="sub" id="pid"></span>
   <span class="sub" id="sid"></span>
-  <button class="ghost" id="reset" type="button">重新开始</button>
+  <button class="ghost" id="reset" type="button" title="只清空这次对话（就诊人不变）">重新开始</button>
+  <button class="ghost" id="switch" type="button" title="换一个就诊人并清空这次对话">换个人</button>
 </header>
 
 <div id="emg">
@@ -76,17 +106,40 @@
     <button class="send" id="send" type="submit">发送</button>
   </form>
   <div class="hint">按 Enter 发送，Shift+Enter 换行</div>
+  <div class="hint" id="trace"></div>
 </footer>
 
 <script>
 const $ = (id) => document.getElementById(id);
 const SID_KEY = "kubedocs.consult.sid";
+/* 患者身份 = **浏览器本地的 UUID**，不是登录态：清掉这条 localStorage 就是另一个人。
+   它与会话分开存，两者语义不同、不要混：
+     - `kubedocs.consult.sid`    ：这次聊到哪了（sessionStorage，关掉标签页即弃）；
+     - `kubedocs.consult.patient`：这些挂号记录归谁（localStorage，跨刷新/跨重启都在）。
+   凡是需要 patient_id 的请求（/consult、confirm、cancel、appointments）都必须带上它。 */
+const PID_KEY = "kubedocs.consult.patient";
+
+function newId() {
+  return (typeof crypto !== "undefined" && crypto.randomUUID)
+    ? crypto.randomUUID()
+    : String(Date.now()) + Math.random();
+}
+
 let sid = sessionStorage.getItem(SID_KEY);
 if (!sid) {
-  sid = (crypto.randomUUID ? crypto.randomUUID() : String(Date.now()) + Math.random()).slice(0, 36);
+  sid = newId().slice(0, 36);
   sessionStorage.setItem(SID_KEY, sid);
 }
-$("sid").textContent = "会话 " + sid.slice(0, 8);
+let pid = localStorage.getItem(PID_KEY);
+if (!pid) {
+  pid = newId();
+  localStorage.setItem(PID_KEY, pid);
+}
+function showIdentity() {
+  $("sid").textContent = "会话 " + sid.slice(0, 8);
+  $("pid").textContent = "就诊人 " + pid.slice(0, 8);
+}
+showIdentity();
 
 function esc(s) {
   return String(s == null ? "" : s).replace(/[&<>"]/g, (c) =>
@@ -100,16 +153,34 @@ function addMsg(text, cls) {
   $("log").scrollTop = $("log").scrollHeight;
   return d;
 }
+/* 卡片挂进同一个消息流：这样"待确认单"就出现在它那句话下面，而不是飘在页面角落。 */
+function addCard(node) {
+  $("stream").appendChild(node);
+  $("log").scrollTop = $("log").scrollHeight;
+  return node;
+}
+function kv(k, v) {
+  return '<div class="kv"><span class="k">' + esc(k) + '</span><span class="v">' + esc(v) + "</span></div>";
+}
+function traceHTML(t) {
+  return t ? '<div class="fine">追踪号 ' + esc(t) + "</div>" : "";
+}
+function statusText(s) {
+  return { paid: "已支付", pending_payment: "待支付", cancelled: "已退号" }[s] || String(s == null ? "" : s);
+}
 
-/* 开场白（免责声明）从服务端取，避免在页面里写第二份 */
+/* ------------------------------------------------------------------ 开场白 */
+/* 免责声明从服务端取，避免在页面里写第二份。开场白之后把**该就诊人已有的**挂号记录
+   拉一次：它证明号真的落在库里，重启服务后刷新页面依然看得见。 */
 fetch("/consult/status").then((r) => r.json()).then((s) => {
   addMsg("您好，请用您自己的话描述不舒服的地方。系统会先问 1~2 个关键问题，"
     + "再告诉您大概该挂哪个科、可能需要做哪些检查。", "sys");
   if (s.disclaimer) addMsg(s.disclaimer, "note");
 }).catch(() => {
   addMsg("您好，请描述您的不舒服。", "sys");
-});
+}).then(() => loadAppointments());
 
+/* ------------------------------------------------------------------ 问诊 */
 async function send(text) {
   $("send").disabled = true;
   addMsg(text, "me");
@@ -118,7 +189,7 @@ async function send(text) {
     const r = await fetch("/consult", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ question: text, session_id: sid }),
+      body: JSON.stringify({ question: text, session_id: sid, patient_id: pid }),
     });
     wait.remove();
     if (!r.ok) {
@@ -138,6 +209,11 @@ async function send(text) {
     }
     // 结构化字段（科室/病症/检查/用药）不在这渲染——它们已在正文里由模型讲出来
     addMsg(p.message, "sys");
+    if (p.trace_id) $("trace").textContent = "本轮追踪号 " + p.trace_id;
+    // 挂号的两类卡片：`pending_action` 是模型**提议**的待确认单（号源还没被占用），
+    // `appointments` 是患者本人的挂号记录。两者都由服务端给内容，前端只渲染。
+    if (p.pending_action) renderPending(p.pending_action);
+    if (Array.isArray(p.appointments)) renderAppointments(p.appointments);
   } catch (e) {
     wait.remove();
     addMsg("（系统）网络错误：" + e, "note");
@@ -147,6 +223,183 @@ async function send(text) {
   }
 }
 
+/* ------------------------------------------------------------ 待确认挂号单 */
+/* 一次只留一张待确认卡片：新的 pending_action 一到就替掉旧的（旧单号已经不可用了）。 */
+function renderPending(a) {
+  const old = $("stream").querySelector(".card.pending");
+  if (old) old.remove();
+  const card = document.createElement("div");
+  card.className = "msg card booking pending";
+  card.innerHTML = '<div class="ct">待确认挂号单</div>'
+    + kv("科室", a.department) + kv("日期", a.date) + kv("时段", a.time_slot)
+    + kv("挂号费", a.fee) + kv("就诊人", a.patient_name) + kv("该时段余量", a.remaining)
+    + kv("失效时间", a.expires_at)
+    + '<div class="acts"></div>'
+    + '<div class="fine">号源还没被占用：点「确认挂号」才真的取号。'
+    + "这张单子到上面那个时间就自动失效（约 15 分钟），届时让助手重新提议即可。</div>";
+  const acts = card.querySelector(".acts");
+  const okBtn = document.createElement("button");
+  okBtn.type = "button";
+  okBtn.className = "act";
+  okBtn.textContent = "确认挂号";
+  okBtn.addEventListener("click", () => confirmBooking(a, card, okBtn));
+  const noBtn = document.createElement("button");
+  noBtn.type = "button";
+  noBtn.className = "act quiet";
+  noBtn.textContent = "先不挂";
+  noBtn.addEventListener("click", () => {
+    card.remove();
+    addMsg("好的，这次先不挂号。这张单子 15 分钟后自动失效，需要时再让助手重新提议。", "note");
+  });
+  acts.appendChild(okBtn);
+  acts.appendChild(noBtn);
+  return addCard(card);
+}
+
+/* 确认请求体**只回传单号**（外加会话/就诊人身份）。
+   科室、日期、时段、挂号费一律留在服务端那张单子上：后端只认 proposal_id，
+   前端回传这些字段等于给自己开了一个"改单"的入口——这是刻意的安全设计。 */
+function confirmBody(a) {
+  return {
+    proposal_id: a.proposal_id,
+    session_id: sid,
+    patient_id: pid,
+    patient_name: a.patient_name,
+  };
+}
+
+async function confirmBooking(a, card, btn) {
+  btn.disabled = true;
+  const wait = addMsg("正在取号…", "sys thinking");
+  try {
+    const r = await fetch("/consult/booking/confirm", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(confirmBody(a)),
+    });
+    const d = await r.json().catch(() => ({}));
+    wait.remove();
+    if (r.status === 409) {
+      // 业务失败（单子过期 / 号被占满 / 停诊）：把服务端那句人话**原样**给患者看，
+      // 并引导他换个时段或日期再让助手重新提议。这张单子已经一次性消费掉了。
+      card.querySelector(".acts").remove();
+      const why = document.createElement("div");
+      why.className = "why";
+      why.textContent = "没有取号成功：" + (d.detail || "这张单子已经不能用了");
+      card.appendChild(why);
+      addMsg("（系统）没有取号成功：" + (d.detail || "这张单子已经不能用了")
+        + " 请换一个时段或日期，再让助手重新提议。", "note");
+      return;
+    }
+    if (!r.ok || !d.ok) {
+      addMsg("（系统）挂号请求失败 HTTP " + r.status + "：" + (d.detail || r.statusText), "note");
+      btn.disabled = false;
+      return;
+    }
+    // 成功：卡片换成服务端给的取号结果（正文由服务端拼，前端不自己算凭据号/队列号/费用）
+    card.classList.remove("pending");
+    card.classList.add("taken");
+    card.innerHTML = '<div class="ct">已取号</div>'
+      + '<div class="taken">' + esc(d.message || "挂号成功。") + "</div>"
+      + traceHTML(d.trace_id);
+    addMsg(d.message || "挂号成功。", "note");
+    if (d.trace_id) $("trace").textContent = "本轮追踪号 " + d.trace_id;
+    // 以服务端的挂号记录为准重拉一次：新取的号立刻出现在记录里
+    loadAppointments();
+  } catch (e) {
+    wait.remove();
+    addMsg("（系统）网络错误：" + e, "note");
+    btn.disabled = false;
+  }
+}
+
+/* -------------------------------------------------------------- 挂号记录 */
+let recordsCard = null;
+function renderAppointments(rows) {
+  if (!recordsCard) {
+    recordsCard = document.createElement("div");
+    recordsCard.className = "msg card booking records";
+    recordsCard.innerHTML = '<div class="ct">我的挂号记录</div><div class="rlist"></div>';
+    addCard(recordsCard);
+  }
+  const list = recordsCard.querySelector(".rlist");
+  list.innerHTML = "";
+  if (!rows || !rows.length) {
+    const empty = document.createElement("div");
+    empty.className = "fine";
+    empty.textContent = "还没有挂号记录。";
+    list.appendChild(empty);
+    return;
+  }
+  rows.forEach((row) => list.appendChild(appointmentNode(row)));
+}
+
+function appointmentNode(a) {
+  const node = document.createElement("div");
+  node.className = "appt" + (a.status === "cancelled" ? " cancelled" : "");
+  const meta = [esc(a.date) + " " + esc(a.time), "凭据号 " + esc(a.ticket_no),
+    "队列号 " + esc(a.queue_no), "挂号费 " + esc(a.fee) + " 元"];
+  if (a.created_at) meta.push("创建于 " + esc(a.created_at));
+  node.innerHTML = '<div class="main">'
+    + '<span class="dept">' + esc(a.department) + "</span>"
+    + '<span class="st">' + esc(statusText(a.status)) + "</span>"
+    + '<div class="meta">' + meta.join(" · ") + "</div></div>";
+  // 退号按钮**只在没退过号时**出现；退掉的号留在列表里，用「已退号」样式显示。
+  if (a.status !== "cancelled") {
+    const btn = document.createElement("button");
+    btn.type = "button";
+    btn.className = "act quiet";
+    btn.textContent = "退号";
+    btn.addEventListener("click", () => cancelBooking(a, node, btn));
+    node.appendChild(btn);
+  }
+  return node;
+}
+
+async function cancelBooking(a, node, btn) {
+  btn.disabled = true;
+  try {
+    const r = await fetch("/consult/booking/cancel", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ ticket_no: a.ticket_no, session_id: sid, patient_id: pid }),
+    });
+    const d = await r.json().catch(() => ({}));
+    if (r.status === 409) {
+      addMsg("（系统）退号失败：" + (d.detail || "这个号退不了"), "note");
+      btn.disabled = false;
+      return;
+    }
+    if (!r.ok || !d.ok) {
+      addMsg("（系统）退号请求失败 HTTP " + r.status + "：" + (d.detail || r.statusText), "note");
+      btn.disabled = false;
+      return;
+    }
+    // 退号成功：记录**留在列表里**，只是换成"已退号"的样式
+    node.classList.add("cancelled");
+    node.querySelector(".st").textContent = statusText("cancelled");
+    btn.remove();
+    addMsg(d.message || ("凭据号 " + a.ticket_no + " 已退号。"), "note");
+  } catch (e) {
+    addMsg("（系统）网络错误：" + e, "note");
+    btn.disabled = false;
+  }
+}
+
+/* 已有的挂号记录（真落库的那些）。读不出来不该挡住问诊，所以失败只留个提示。 */
+async function loadAppointments() {
+  try {
+    const r = await fetch("/consult/appointments?patient_id="
+      + encodeURIComponent(pid) + "&limit=10");
+    if (!r.ok) return;
+    const d = await r.json();
+    renderAppointments(d.appointments || []);
+  } catch (e) {
+    addMsg("（系统）挂号记录暂时读不出来：" + e, "note");
+  }
+}
+
+/* ------------------------------------------------------------------ 表单 */
 $("f").addEventListener("submit", (ev) => {
   ev.preventDefault();
   const v = $("q").value.trim();
@@ -165,15 +418,44 @@ $("q").addEventListener("input", () => {
   $("q").style.height = "auto";
   $("q").style.height = Math.min($("q").scrollHeight, 160) + "px";
 });
-$("reset").addEventListener("click", async () => {
-  await fetch("/consult/reset", {
+
+/* 清空页面上的对话与卡片（就诊人**不变**——记录还在服务端躺着）。 */
+function clearStream() {
+  $("stream").innerHTML = "";
+  recordsCard = null;
+  $("emg").classList.remove("show");
+  $("trace").textContent = "";
+}
+
+function resetSession() {
+  return fetch("/consult/reset", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ session_id: sid }),
   }).catch(() => {});
-  $("stream").innerHTML = "";
-  $("emg").classList.remove("show");
+}
+
+/* 「重新开始」= 只重置这次对话（就诊人不变，已有挂号记录照旧显示）。 */
+$("reset").addEventListener("click", async () => {
+  await resetSession();
+  clearStream();
   addMsg("已重新开始，请重新描述症状。", "sys");
+  loadAppointments();
+  $("q").focus();
+});
+
+/* 「换个人」= 换一个就诊人：清掉 localStorage 里的 patient id 并重新生成，
+   同时清空当前会话。这是演示时干净切换身份的唯一入口。 */
+$("switch").addEventListener("click", async () => {
+  await resetSession();
+  localStorage.removeItem(PID_KEY);
+  pid = newId();
+  localStorage.setItem(PID_KEY, pid);
+  showIdentity();
+  clearStream();
+  addMsg("已切换就诊人（" + pid.slice(0, 8) + "）。这是浏览器本地新生成的就诊人标识，"
+    + "上一个就诊人的挂号记录不会再显示。", "sys");
+  loadAppointments();
   $("q").focus();
 });
 </script>

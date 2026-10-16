@@ -151,6 +151,10 @@ class _DomainRuntime:
             # 索引不可用 ≠ 服务不可用：记下原因，端点返回 200 + 说明
             self.store = None
             self.index_error = f"{type(e).__name__}: {e}"
+        # 存储**降级**说明（配置的是 pgvector、但数据库不可达时会降级为本地 sqlite-vec）。
+        # 它必须被读出来：两个后端的索引存在不同位置，降级期间建的索引在 Postgres 恢复后
+        # 是看不见的——只写进日志的话，这个差异会以"我的数据呢"的形式在演示现场出现。
+        self.store_fallback = str(getattr(self.store, "fallback_reason", "") or "")
 
     # ------------------------------------------------------------------ 只读
     def stats(self, *, max_age_s: float = STATS_TTL_S) -> StoreStats | None:
@@ -747,9 +751,19 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     # ---------------------------------------------------------------- 探针与自省
     @app.get("/healthz")
     def healthz(request: Request) -> HealthResponse:
-        """存活探针：**索引为空 / 索引不可用都不算失败**（理由见模块文档）。"""
+        """存活探针：**索引为空 / 索引不可用都不算失败**（理由见模块文档）。
+
+        `store` / `store_fallback` 是"用的是哪个向量库、有没有降级"的对外读数：
+        配置的是 pgvector 而实际跑在 sqlite-vec 上时，`store_fallback` 会写明原因。
+        """
         runtime = _runtime(request)
-        return HealthResponse(ok=True, domain=runtime.settings.domain, n_chunks=runtime.n_chunks())
+        return HealthResponse(
+            ok=True,
+            domain=runtime.settings.domain,
+            n_chunks=runtime.n_chunks(),
+            store=type(runtime.store).__name__ if runtime.store is not None else "",
+            store_fallback=runtime.store_fallback,
+        )
 
     @app.get("/domains")
     def domains() -> list[dict[str, Any]]:

@@ -40,8 +40,29 @@ class DocInput:
 
 
 @dataclass(frozen=True)
+class ParentInput:
+    """一个待写入的**父块**（一个标题小节 / 一页 / 一张幻灯片）。
+
+    父块**不进索引**：既不参与 BM25，也不算向量。它只在某条子块命中后被取出来，
+    作为"这一段的完整语境"交给模型。所以这里存的是正文与出处，没有任何检索字段。
+    """
+
+    parent_id: str
+    doc_id: str
+    ordinal: int
+    title: str
+    breadcrumb: str
+    source_url: str
+    body: str
+    n_chars: int
+    content_hash: str = ""
+    location: str = ""
+    n_children: int = 0
+
+
+@dataclass(frozen=True)
 class ChunkInput:
-    """一个待写入的块。向量由摄取层算好传入——存储层不做编码，避免职责混淆。"""
+    """一个待写入的**子块**。向量由摄取层算好传入——存储层不做编码，避免职责混淆。"""
 
     chunk_id: str
     doc_id: str
@@ -52,6 +73,8 @@ class ChunkInput:
     body: str
     content_hash: str
     n_chars: int
+    parent_id: str = ""
+    """所属父块。空串 = 这份索引建在父子切割之前，读路径会退回用子块正文当语境。"""
 
 
 @dataclass(frozen=True)
@@ -67,11 +90,26 @@ class ChunkHit:
     body: str
     score: float = 0.0
     ranks: dict[str, int] = field(default_factory=dict)
+    parent_id: str = ""
+    parent_text: str = ""
+    """命中块所属**父块**的完整正文（可能要跨一次库查询才拿得到）。
+
+    空串表示这份索引没有父块（父子切割之前建的）。用 `context_text` 取值，
+    不要直接用 `parent_text`——它会把"没有父块"变成"喂给模型的上下文是空的"。
+    """
 
     @property
     def citation(self) -> str:
         """人可读的引用标签，例如 `Pod CPU 限制 › 配置 › 步骤`。"""
         return f"{self.title} › {self.breadcrumb}" if self.breadcrumb else self.title
+
+    @property
+    def context_text(self) -> str:
+        """**喂给模型的那段文字**：有父块就给父块，没有就退回子块自己。
+
+        检索用子块（命中精确），生成用父块（语境完整）——这一行就是父子切割的全部收益。
+        """
+        return self.parent_text or self.body
 
 
 @dataclass(frozen=True)
@@ -85,6 +123,9 @@ class StoreStats:
     indexed_at: str
     domain: str = ""
     normalizer: str = ""
+    n_parents: int = 0
+    """父块数。父子切割之后它应当与 `n_chunks` 同量级但不是同一个数——
+    "有几段语境"和"有几个检索单位"是两件事，体检时要能分别看见。"""
 
     @property
     def mean_chars(self) -> float:
@@ -110,8 +151,19 @@ class Store(Protocol):
     def delete_docs(self, rel_paths: set[str]) -> int:
         """按 rel_path 删除整篇（含其所有块、全文索引行与向量索引项）。返回删除的块数。"""
 
-    def upsert_docs(self, docs: list[DocInput], chunks: list[ChunkInput], vectors: dict[str, Vector]) -> None:
-        """写入/覆盖若干文档及其块。同一 doc 的旧块会被先清掉（覆盖语义）。"""
+    def upsert_docs(
+        self,
+        docs: list[DocInput],
+        chunks: list[ChunkInput],
+        vectors: dict[str, Vector],
+        parents: list[ParentInput] | None = None,
+    ) -> None:
+        """写入/覆盖若干文档、其**父块**与**子块**。同一 doc 的旧父块与旧子块会被先清掉
+        （覆盖语义）。
+
+        `parents` 允许为 `None`（旧调用方与"只关心检索层"的测试）：那时子块的
+        `parent_id` 指向的父块不会被写入，读路径会退回用子块正文当语境。
+        """
 
     def finalize(self) -> None:
         """收尾：把本轮新增的向量落到持久结构。每次摄取跑完必须调用。"""

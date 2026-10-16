@@ -119,7 +119,10 @@ class BookingService:
         if window is None:
             raise BookingError("当前号源实现不支持查询放号窗口，请改用 get_availability 逐天查询")
         try:
-            return window(dep, days)
+            # 显式标注返回值：`window` 是 `getattr` 取出来的（类型是 Any），
+            # 直接 return 会把 Any 漏进本方法的声明返回类型。
+            rows: list[dict] = window(dep, days)
+            return rows
         except NotImplementedError as e:
             # ABC 给可选能力留了默认实现（抛 NotImplementedError），所以"没覆盖"这件事
             # 只能靠异常认出来——`getattr(...) is None` 对 ABC 的子类永远不成立。

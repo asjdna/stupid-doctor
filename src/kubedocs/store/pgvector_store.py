@@ -51,6 +51,18 @@
 - 距离用 `vector_cosine_ops` + `<=>`：与另外两个实现的余弦语义一致。
   向量已归一化时，余弦序与内积序严格相同。
 
+## 父子两层
+
+父子切割之后库里有两张事实表：`chunks`（子块，进 BM25 与 HNSW）与 `parents`（父块，
+一个 Markdown 小节 / 一页 PDF / 一张幻灯片）。父块表**刻意不进任何索引**——它没有
+`tsv`、没有 `embedding`，因此"父块混进检索结果"在 schema 层面就不可能发生，而不必
+依赖每条查询记得加过滤条件。它只在子块命中后按 `parent_id` 被整段取回，作为交给模型
+的语境（`ChunkHit.context_text`）。
+
+`chunks.parent_id` 是 `NOT NULL DEFAULT ''`：空串 = 这份索引建在父子切割之前，读路径会
+退回用子块正文当语境。所以这一列可以用 `ADD COLUMN IF NOT EXISTS` 无损升级老库，
+**不需要 bump `PG_SCHEMA_VERSION`**（bump 会让老库在打开时被元信息闸门直接拒绝）。
+
 ## 连接
 
 用 `psycopg` + **连接池**（`psycopg_pool`）：HTTP 层是多线程的，每次查询新建连接
@@ -82,6 +94,7 @@ from kubedocs.store.base import (
     ChunkInput,
     DocInput,
     MissingVectorError,
+    ParentInput,
     StoreError,
     StoreStats,
     Vector,
@@ -147,7 +160,8 @@ _TSV_EXPR = (
 
 # 建表 DDL（语句逐条执行）。`embedding` 与 `tsv` 都在块行内，不存在"块在、向量不在"
 # 的中间态，也不需要任何侧车文件（对比 SQLite 侧的 .npy）。
-# `{documents}` / `{chunks}` 是 sql.Identifier 占位符，`{dim}`/`{m}`/`{efc}` 是整数字面量。
+# `{documents}` / `{chunks}` / `{parents}` 是 sql.Identifier 占位符，
+# `{dim}`/`{m}`/`{efc}` 是整数字面量。
 _DDL_STATEMENTS = (
     "CREATE TABLE IF NOT EXISTS {documents} ("
     "  doc_id text PRIMARY KEY,"
@@ -168,10 +182,38 @@ _DDL_STATEMENTS = (
     "  body_normalized text NOT NULL DEFAULT '',"
     "  content_hash text NOT NULL,"
     "  n_chars integer NOT NULL,"
+    "  parent_id text NOT NULL DEFAULT '',"
     "  embedding vector({dim}) NOT NULL,"
     f"  tsv tsvector GENERATED ALWAYS AS ({_TSV_EXPR}) STORED)",
+    # 父块表：**没有 tsv、没有 embedding、没有任何索引字段**——父块不参与检索，所以
+    # "它会不会混进检索结果"在 schema 层面就不成立，而不是靠每条查询自觉过滤。
+    #
+    # 它**没有指向 documents 的外键**：父块与子块在写入路径上是一起清、一起写的，
+    # 而"覆盖某篇"的删除是按 doc_id 显式点名的（见 upsert_docs / delete_docs）；
+    # 加外键反而会引入"父块行必须先有 documents 行"这种隐性顺序约束。
+    "CREATE TABLE IF NOT EXISTS {parents} ("
+    "  parent_id text PRIMARY KEY,"
+    "  doc_id text NOT NULL,"
+    "  ordinal integer NOT NULL,"
+    "  title text NOT NULL,"
+    "  breadcrumb text NOT NULL,"
+    "  source_url text NOT NULL,"
+    "  body text NOT NULL,"
+    "  content_hash text NOT NULL DEFAULT '',"
+    "  n_chars integer NOT NULL,"
+    "  location text NOT NULL DEFAULT '',"
+    "  n_children integer NOT NULL DEFAULT 0)",
+    # ⚠️ 老库（父子切割之前建的，CREATE TABLE 里没有这一列）必须能原地升级：
+    # `ADD COLUMN IF NOT EXISTS` 在**新库与老库上都幂等**（新库里它只是 CREATE TABLE
+    # 声明的重复 no-op）。**故意不 bump PG_SCHEMA_VERSION**：这一列是可加列、无损升级，
+    # 而 bump 版本号会让老库在 `_init_meta` 的闸门处直接被拒绝，把"能平滑升级"变成
+    # "必须丢库重建"。
+    "ALTER TABLE {chunks} ADD COLUMN IF NOT EXISTS parent_id text NOT NULL DEFAULT ''",
     "CREATE INDEX IF NOT EXISTS idx_chunks_doc ON {chunks} (doc_id)",
     "CREATE INDEX IF NOT EXISTS idx_chunks_hash ON {chunks} (content_hash)",
+    # 读路径按 parent_id 批量取父块，这条索引支撑那一句 `WHERE parent_id = ANY(%s)`
+    "CREATE INDEX IF NOT EXISTS idx_chunks_parent ON {chunks} (parent_id)",
+    "CREATE INDEX IF NOT EXISTS idx_parents_doc ON {parents} (doc_id)",
     # ⚠️ 这个 GIN 索引只服务**降级引擎**（ts_rank）：BM25 走下面那条
     # `USING paradedb` 索引，两者并存、互不干扰。
     "CREATE INDEX IF NOT EXISTS idx_chunks_tsv ON {chunks} USING gin (tsv)",
@@ -290,7 +332,9 @@ class PgVectorStore:
         self._fts_engine = _FTS_TS_RANK
         self._fts_reason = ""
         self._dirty = False
-        self._tbl = {name: sql.Identifier(schema, name) for name in ("documents", "chunks", "meta")}
+        self._tbl = {
+            name: sql.Identifier(schema, name) for name in ("documents", "chunks", "parents", "meta")
+        }
 
         self._register_vector = _import_register_vector()
         try:
@@ -552,7 +596,12 @@ class PgVectorStore:
         return np.asarray(arr, dtype=np.float32)
 
     def doc_texts(self, doc_ids: list[str]) -> dict[str, str]:
-        """拼接指定文档的全部块正文（小写化，供标注集 `must_contain` 自检）。"""
+        """拼接指定文档的全部**子块**正文（小写化，供标注集 `must_contain` 自检）。
+
+        **父块刻意不拼进来**：这个函数的用途是回答"标注集要求的字面量确实进了被检索的
+        文本吗"，而父块不进索引、检索时根本看不见它。把父块拼进来只会让一个"子块没写进
+        索引"的真问题被父块里的同一句话掩盖（`must_contain` 过了，检索却永远命不中）。
+        """
         if not doc_ids:
             return {}
         # 请求了但索引里没有的文档返回空串（与 SQLite 侧一致），而不是缺键
@@ -579,12 +628,16 @@ class PgVectorStore:
                     self._q("SELECT COUNT(*) FROM {chunks} WHERE body LIKE %s"), ("%```%",)
                 ).fetchone()[0]
             )
+            # 父块数与块数分别读：父子切割之后它们同量级但**不是**同一个数，
+            # "有几段语境"和"有几个检索单位"是两件要分开看见的事。
+            n_parents = int(conn.execute(self._q("SELECT COUNT(*) FROM {parents}")).fetchone()[0])
             meta = dict(conn.execute(self._q("SELECT key, value FROM {meta}")).fetchall())
         return StoreStats(
             n_docs=n_docs,
             n_chunks=int(row[0]),
             total_chars=int(row[1]),
             n_with_code=n_code,
+            n_parents=n_parents,
             embedding_model=str(meta.get("embedding_model", "")),
             embedding_dim=int(meta.get("embedding_dim", "0")),
             indexed_at=str(meta.get("indexed_at", "")),
@@ -597,13 +650,28 @@ class PgVectorStore:
             return {}
         rows = self._pairs(
             self._q(
-                "SELECT chunk_id, doc_id, ordinal, title, breadcrumb, source_url, body "
+                "SELECT chunk_id, doc_id, ordinal, title, breadcrumb, source_url, body, parent_id "
                 "FROM {chunks} WHERE chunk_id = ANY(%s)"
             ),
             (chunk_ids,),
         )
+        # 父块**批量**取回（一句 `WHERE parent_id = ANY(%s)`）：命中列表动辄几十条，
+        # 在循环里逐条查父块会把"取回上下文"变成 N+1 次往返，而这一步在检索延迟的
+        # 关键路径上。缺失的 parent_id（索引建在父子切割之前、或调用方 parents=None）
+        # 直接留在 `parent_text = ""`，由 `context_text` 退回子块正文。
+        parent_ids = sorted({str(r[7]) for r in rows if r[7]})
+        parents: dict[str, str] = {}
+        if parent_ids:
+            parents = {
+                str(pid): str(body)
+                for pid, body in self._pairs(
+                    self._q("SELECT parent_id, body FROM {parents} WHERE parent_id = ANY(%s)"),
+                    (parent_ids,),
+                )
+            }
         out: dict[str, ChunkHit] = {}
-        for cid, doc_id, ordinal, title, breadcrumb, url, body in rows:
+        for cid, doc_id, ordinal, title, breadcrumb, url, body, parent_id in rows:
+            pid = str(parent_id or "")
             out[str(cid)] = ChunkHit(
                 chunk_id=str(cid),
                 doc_id=str(doc_id),
@@ -612,6 +680,8 @@ class PgVectorStore:
                 breadcrumb=str(breadcrumb),
                 source_url=str(url),
                 body=str(body),
+                parent_id=pid,
+                parent_text=parents.get(pid, ""),
             )
         return out
 
@@ -734,8 +804,24 @@ class PgVectorStore:
         return np.ascontiguousarray(q, dtype=np.float32)
 
     # ------------------------------------------------------------------ 写入
-    def upsert_docs(self, docs: list[DocInput], chunks: list[ChunkInput], vectors: dict[str, Vector]) -> None:
-        if not docs and not chunks:
+    def upsert_docs(
+        self,
+        docs: list[DocInput],
+        chunks: list[ChunkInput],
+        vectors: dict[str, Vector],
+        parents: list[ParentInput] | None = None,
+    ) -> None:
+        """写入/覆盖文档、**父块**与**子块**（父块可选）。
+
+        `parents=None`（旧调用方、只看检索层的测试）走的是"只写子块"的老路径：子块的
+        `parent_id` 仍照写，但库里没有对应父块行，读路径因此退回子块正文当语境——
+        这与"这份索引建在父子切割之前"是同一种状态，不需要额外分支。
+
+        父块与子块在**同一个事务**里清、同一个事务里写：任何"父块写了、子块没写"的
+        中间态都会在崩溃后留下指向不存在父块的 `parent_id`，比没有父块更难排查。
+        """
+        parent_rows = list(parents or ())
+        if not docs and not chunks and not parent_rows:
             return
         missing = [c.chunk_id for c in chunks if c.chunk_id not in vectors]
         if missing:
@@ -748,6 +834,9 @@ class PgVectorStore:
             for d in docs:
                 # 先删整篇（chunks 上有 ON DELETE CASCADE），再插——覆盖语义与 SQLite 侧一致
                 conn.execute(self._q("DELETE FROM {documents} WHERE doc_id = %s"), (d.doc_id,))
+                # 父块表没有外键，级联删不到它，只能在这里显式点名同一个 doc_id；
+                # 一次文档一句 DELETE，不随块数增长，批量写法不受影响。
+                conn.execute(self._q("DELETE FROM {parents} WHERE doc_id = %s"), (d.doc_id,))
                 n_chunks = sum(1 for c in chunks if c.doc_id == d.doc_id)
                 conn.execute(
                     self._q(
@@ -761,8 +850,9 @@ class PgVectorStore:
                 cur.executemany(
                     self._q(
                         "INSERT INTO {chunks}(chunk_id, doc_id, ordinal, title, breadcrumb, "
-                        "source_url, body, body_normalized, content_hash, n_chars, embedding) "
-                        "VALUES(%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)"
+                        "source_url, body, body_normalized, content_hash, n_chars, parent_id, "
+                        "embedding) "
+                        "VALUES(%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)"
                     ),
                     [
                         (
@@ -776,11 +866,38 @@ class PgVectorStore:
                             self.normalizer.index_text(c.body),
                             c.content_hash,
                             c.n_chars,
+                            c.parent_id,
                             np.ascontiguousarray(np.asarray(vectors[c.chunk_id], dtype=np.float32)),
                         )
                         for c in chunks
                     ],
                 )
+                if parent_rows:
+                    # 父块同样走 executemany：条数虽少于子块，但"每块一句 SQL"在
+                    # 上万父块的批次里同样是致命的往返开销。
+                    cur.executemany(
+                        self._q(
+                            "INSERT INTO {parents}(parent_id, doc_id, ordinal, title, breadcrumb, "
+                            "source_url, body, content_hash, n_chars, location, n_children) "
+                            "VALUES(%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)"
+                        ),
+                        [
+                            (
+                                p.parent_id,
+                                p.doc_id,
+                                p.ordinal,
+                                p.title,
+                                p.breadcrumb,
+                                p.source_url,
+                                p.body,
+                                p.content_hash,
+                                p.n_chars,
+                                p.location,
+                                p.n_children,
+                            )
+                            for p in parent_rows
+                        ],
+                    )
         self._dirty = True
 
     def delete_docs(self, rel_paths: set[str]) -> int:
@@ -792,9 +909,10 @@ class PgVectorStore:
                 (list(rel_paths),),
             ).fetchall()
             if rows:
-                conn.execute(
-                    self._q("DELETE FROM {documents} WHERE doc_id = ANY(%s)"), ([r[0] for r in rows],)
-                )
+                doc_ids = [r[0] for r in rows]
+                # 父块没有外键，删除同样要显式点名 doc_id（返回语义仍是"删掉的块数"）
+                conn.execute(self._q("DELETE FROM {parents} WHERE doc_id = ANY(%s)"), (doc_ids,))
+                conn.execute(self._q("DELETE FROM {documents} WHERE doc_id = ANY(%s)"), (doc_ids,))
         self._dirty = True
         return int(sum(int(r[1]) for r in rows))
 
@@ -819,8 +937,10 @@ class PgVectorStore:
 
     # ------------------------------------------------------------------ 运维
     def rebuild_from_scratch(self) -> None:
+        # 父块必须一起 TRUNCATE：它是与子块同一批写入的事实表，漏掉它会让
+        # "重建后的索引"里残留一堆孤儿父块（n_parents 虚高，且串味的旧语境仍可取回）。
         with self._pool.connection() as conn:
-            conn.execute(self._q("TRUNCATE TABLE {chunks}, {documents}"))
+            conn.execute(self._q("TRUNCATE TABLE {chunks}, {parents}, {documents}"))
         self._set_meta("indexed_at", "")
         self._dirty = False
 

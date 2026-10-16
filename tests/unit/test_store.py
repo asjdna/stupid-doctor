@@ -1,13 +1,17 @@
-"""SQLite 存储的单元测试：FTS5 外内容表删除顺序、rowid 回收后的向量对齐、MATCH 表达式与元信息守卫。
+"""SQLite 存储的单元测试：FTS5 外内容表删除顺序、rowid 回收后的向量对齐、MATCH 表达式与元信息守卫、
+父子两层（`parents` 表 / `chunks.parent_id`）的写入-读回-覆盖-删除，以及老库的原地升级。
 
-守的契约：MATCH 只留词元，删除或重建后两个通道都不再召回被删的块，维度或嵌入模型不符必须拒绝。"""
+守的契约：MATCH 只留词元，删除或重建后两个通道都不再召回被删的块，维度或嵌入模型不符必须拒绝；
+命中块带上它所属**父块**的完整正文（取不到就留空、由 `context_text` 退回子块正文）。"""
 
 from __future__ import annotations
+
+import sqlite3
 
 import numpy as np
 import pytest
 
-from kubedocs.store.base import ChunkInput, DocInput
+from kubedocs.store.base import ChunkInput, DocInput, ParentInput
 from kubedocs.store.sqlite_store import (
     MissingVectorError,
     SqliteStore,
@@ -48,6 +52,62 @@ def _doc(doc_id: str, n: int, text_prefix: str = "body") -> tuple[DocInput, list
 def _upsert(store: SqliteStore, doc_id: str, n: int, axis: int, text_prefix: str = "body") -> None:
     d, chunks = _doc(doc_id, n, text_prefix)
     store.upsert_docs([d], chunks, {c.chunk_id: _vec(axis) for c in chunks})
+    store.finalize()
+
+
+def _parent(doc_id: str, i: int, body: str) -> ParentInput:
+    return ParentInput(
+        parent_id=f"{doc_id}::p{i:04d}",
+        doc_id=doc_id,
+        ordinal=i,
+        title=doc_id,
+        breadcrumb="sec",
+        source_url=f"u/{doc_id}/",
+        body=body,
+        n_chars=len(body),
+        content_hash=f"hp-{doc_id}-{i}",
+        location=f"loc:{i}",
+        n_children=1,
+    )
+
+
+def _parents_doc(
+    doc_id: str, parent_bodies: list[str]
+) -> tuple[DocInput, list[ChunkInput], list[ParentInput]]:
+    """造一篇"一个父块配一个子块"的文档：父块正文互不相同，便于断言取回时**不串味**。"""
+    d = DocInput(
+        doc_id=doc_id,
+        rel_path=f"{doc_id}.md",
+        title=doc_id,
+        source_url=f"u/{doc_id}/",
+        content_hash=f"h-{doc_id}",
+    )
+    parents = [_parent(doc_id, i, body) for i, body in enumerate(parent_bodies)]
+    chunks = [
+        ChunkInput(
+            chunk_id=f"{doc_id}::{i:04d}",
+            doc_id=doc_id,
+            ordinal=i,
+            title=doc_id,
+            breadcrumb="sec",
+            source_url=f"u/{doc_id}/",
+            body=f"child {i} {doc_id}",
+            content_hash=f"h-{doc_id}-{i}",
+            n_chars=20,
+            parent_id=parents[i].parent_id,
+        )
+        for i in range(len(parents))
+    ]
+    return d, chunks, parents
+
+
+def _upsert_parents(
+    store: SqliteStore, doc_id: str, parent_bodies: list[str], *, axis: int = 0, write_parents: bool = True
+) -> None:
+    d, chunks, parents = _parents_doc(doc_id, parent_bodies)
+    store.upsert_docs(
+        [d], chunks, {c.chunk_id: _vec(axis) for c in chunks}, parents=parents if write_parents else None
+    )
     store.finalize()
 
 
@@ -246,3 +306,235 @@ def test_stats_counts_code_chunks(store: SqliteStore):
     st = store.stats()
     assert (st.n_docs, st.n_chunks, st.n_with_code) == (1, 2, 1)
     assert st.mean_chars == pytest.approx(15.0)
+
+
+class TestParentChildReadback:
+    """父子两层读回：命中子块要带回它所属**父块**的完整正文。"""
+
+    def test_hit_carries_parent_id_and_parent_text(self, store: SqliteStore):
+        """防的回归：子块检索命中后，喂给模型的是子块正文（300 字的碎片）而不是父块的完整语境——
+        父子切割的全部收益就没了，且这种退化**不会报错**，只能靠断言 `context_text` 抓。"""
+        _upsert_parents(store, "a", ["父块甲：完整小节正文"])
+        hit = store.get_chunks(["a::0000"])["a::0000"]
+        assert hit.parent_id == "a::p0000"
+        assert hit.parent_text == "父块甲：完整小节正文"
+        assert hit.context_text == "父块甲：完整小节正文"
+        assert hit.body == "child 0 a"  # 子块正文仍在（引用/高亮要用它）
+
+    def test_batch_read_fills_each_parent_without_crosstalk(self, store: SqliteStore):
+        """防的回归：一次取多条命中时父块**串味**（把 A 的语境喂给 B 的块）。
+
+        这类错误通常来自"先查第一条的父块、循环里忘了换"或把父块按行号错位映射；
+        单条命中的用例抓不到它，所以必须一次取多条、每条都断言自己的父块。"""
+        _upsert_parents(store, "a", ["甲父块正文", "乙父块正文", "丙父块正文"])
+        hits = store.get_chunks(["a::0002", "a::0000", "a::0001"])
+        assert {cid: h.parent_text for cid, h in hits.items()} == {
+            "a::0000": "甲父块正文",
+            "a::0001": "乙父块正文",
+            "a::0002": "丙父块正文",
+        }
+
+    def test_missing_parents_fall_back_to_child_body(self, store: SqliteStore):
+        """老索引兜底：`parents=None` 写入的子块（parent_id 指不到任何父块）必须能用，
+        `context_text` 退回子块正文——**绝不能是空串**，那等于让模型对着空白回答。"""
+        _upsert_parents(store, "a", ["父块正文根本没写进去"], write_parents=False)
+        hit = store.get_chunks(["a::0000"])["a::0000"]
+        assert store.stats().n_parents == 0
+        assert hit.parent_id == "a::p0000"  # 子块自己记着父块 id，只是父块不在这份索引里
+        assert hit.parent_text == ""
+        assert hit.context_text == hit.body == "child 0 a"
+
+    def test_chunk_without_parent_id_falls_back_to_child_body(self, store: SqliteStore):
+        """父子切割之前建的块：`parent_id` 是空串，同样退回子块正文。"""
+        _upsert(store, "a", 1, axis=0)
+        hit = store.get_chunks(["a::0000"])["a::0000"]
+        assert hit.parent_id == ""
+        assert hit.parent_text == ""
+        assert hit.context_text == "body 0 a"
+
+
+class TestParentChildWrite:
+    """父子两层的写入语义：覆盖按文档先删后写、删除与重建都要带上父块。"""
+
+    def test_overwrite_replaces_parents(self, store: SqliteStore):
+        """防的回归：同一 doc 第二次 upsert 后旧父块残留——子块会取到**过期的语境**
+        （喂错上下文比喂空上下文更坏），而且残留行会越积越多。"""
+        _upsert_parents(store, "a", ["旧父块甲", "旧父块乙"], axis=0)
+        _upsert_parents(store, "a", ["新父块只有一个"], axis=0)
+
+        assert store.stats().n_parents == 1
+        hit = store.get_chunks(["a::0000"])["a::0000"]
+        assert hit.parent_text == "新父块只有一个"
+        assert hit.context_text == "新父块只有一个"
+
+    def test_overwrite_without_parents_leaves_no_stale_context(self, store: SqliteStore):
+        """`parents=None` 的重写表示"这次不提供父块"：旧父块必须一起清掉，
+        否则新子块的 parent_id 会撞上旧父块，静默喂出**上一版**的语境。"""
+        _upsert_parents(store, "a", ["上一版的父块"], axis=0)
+        _upsert_parents(store, "a", ["这一版不传父块"], axis=0, write_parents=False)
+
+        assert store.stats().n_parents == 0
+        hit = store.get_chunks(["a::0000"])["a::0000"]
+        assert hit.parent_text == ""
+        assert hit.context_text == hit.body
+
+    def test_delete_docs_removes_parents(self, store: SqliteStore):
+        """防的回归：删文档只删子块，父块留在表里无限增长（`n_parents` 也会虚高）。"""
+        _upsert_parents(store, "a", ["甲父块", "乙父块"], axis=0)
+        _upsert_parents(store, "b", ["丙父块"], axis=1)
+
+        assert store.delete_docs({"a.md"}) == 2  # 返回的仍是**子块**数，语义不变
+        assert store.stats().n_parents == 1
+        assert store.get_chunks(["b::0000"])["b::0000"].parent_text == "丙父块"
+
+        # 同一批 parent_id 再写一次不许撞主键：这也是"删干净了"的另一种证法
+        _upsert_parents(store, "a", ["甲父块"], axis=0)
+        assert store.get_chunks(["a::0000"])["a::0000"].parent_text == "甲父块"
+
+    def test_rebuild_from_scratch_clears_parents(self, store: SqliteStore):
+        """防的回归：重建只清块与向量，父块表跨轮次累积，下一轮体检看到虚高的 `n_parents`。"""
+        _upsert_parents(store, "a", ["甲父块", "乙父块"])
+        store.rebuild_from_scratch()
+        assert (store.stats().n_chunks, store.stats().n_parents) == (0, 0)
+
+    def test_stats_reports_n_parents(self, store: SqliteStore):
+        """`n_parents` 必须是真实读数：父子切割没生效时它是 0，不该等于 `n_chunks` 或恒定 0。"""
+        _upsert_parents(store, "a", ["甲父块", "乙父块", "丙父块"], axis=0)
+        _upsert_parents(store, "b", ["丁父块"], axis=1)
+        st = store.stats()
+        assert (st.n_chunks, st.n_parents) == (4, 4)
+
+    def test_doc_texts_still_concatenates_only_chunks(self, store: SqliteStore):
+        """`doc_texts` 刻意只拼子块：标注集自检问的是"内容有没有进**索引**"，
+        把不进索引的父块拼进来会让"子块漏进索引"永远查不出来。"""
+        _upsert_parents(store, "a", ["父块独有词 parentonlyword"])
+        texts = store.doc_texts(["a"])
+        assert "child 0 a" in texts["a"]
+        assert "parentonlyword" not in texts["a"]
+
+
+# --------------------------------------------------------------------- 老库升级
+_LEGACY_SCHEMA = """
+CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+CREATE TABLE documents (
+    doc_id       TEXT PRIMARY KEY,
+    rel_path     TEXT NOT NULL UNIQUE,
+    title        TEXT NOT NULL,
+    source_url   TEXT NOT NULL,
+    content_hash TEXT NOT NULL,
+    n_chunks     INTEGER NOT NULL,
+    updated_at   TEXT NOT NULL
+);
+CREATE TABLE chunks (
+    chunk_id       TEXT PRIMARY KEY,
+    doc_id         TEXT NOT NULL,
+    ordinal        INTEGER NOT NULL,
+    title          TEXT NOT NULL,
+    breadcrumb     TEXT NOT NULL,
+    source_url     TEXT NOT NULL,
+    body           TEXT NOT NULL,
+    body_normalized TEXT NOT NULL DEFAULT '',
+    content_hash   TEXT NOT NULL,
+    n_chars        INTEGER NOT NULL,
+    vector_row     INTEGER NOT NULL
+);
+CREATE INDEX idx_chunks_doc ON chunks(doc_id);
+CREATE VIRTUAL TABLE chunks_fts USING fts5(
+    body_normalized, title, breadcrumb,
+    content='chunks',
+    content_rowid='rowid',
+    tokenize='porter unicode61'
+);
+"""
+
+
+def _make_legacy_db(db_path, vector_path) -> None:
+    """造一个**父子切割之前**的库：没有 `parents` 表、`chunks` 也没有 `parent_id` 列。
+
+    手写 schema 而不是用旧版代码：只有真正缺这两样东西，下面的用例才在测升级路径
+    （函数开头会先断言这一点，防止以后有人顺手改了这里让用例变成空转）。
+    """
+    con = sqlite3.connect(str(db_path))
+    try:
+        con.executescript(_LEGACY_SCHEMA)
+        con.executemany(
+            "INSERT INTO meta(key, value) VALUES(?, ?)",
+            [
+                ("schema_version", "2"),
+                ("embedding_model", "hashing-test"),
+                ("embedding_dim", "32"),
+                ("normalizer", "identity"),
+                ("domain", ""),
+                ("indexed_at", "2024-01-01T00:00:00"),
+            ],
+        )
+        con.execute(
+            "INSERT INTO documents(doc_id, rel_path, title, source_url, content_hash, n_chunks, updated_at)"
+            " VALUES('a', 'a.md', 'a', 'u/a/', 'h-a', 1, '2024-01-01T00:00:00')"
+        )
+        # rowid 显式写死：外内容 FTS 表的索引项要指向同一行
+        con.execute(
+            "INSERT INTO chunks(rowid, chunk_id, doc_id, ordinal, title, breadcrumb, source_url,"
+            " body, body_normalized, content_hash, n_chars, vector_row)"
+            " VALUES(1, 'a::0000', 'a', 0, 'a', 'sec', 'u/a/', 'legacybody legacyword',"
+            " 'legacybody legacyword', 'h-a-0', 21, 0)"
+        )
+        con.execute(
+            "INSERT INTO chunks_fts(rowid, body_normalized, title, breadcrumb)"
+            " VALUES(1, 'legacybody legacyword', 'a', 'sec')"
+        )
+        con.commit()
+    finally:
+        con.close()
+    np.save(vector_path, np.zeros((1, 32), dtype=np.float32))
+
+
+class TestLegacyIndexUpgrade:
+    """平滑升级：换一次切块方式就要求所有人删库重建是不可接受的。老库必须**原地能读**，
+    只是没有父块语境（`context_text` 退回子块正文）——那是完全可用的退化状态。"""
+
+    def test_legacy_db_without_parent_layer_is_upgraded_in_place(self, tmp_path):
+        db, npy = tmp_path / "legacy.db", tmp_path / "legacy.npy"
+        _make_legacy_db(db, npy)
+        # 先确认造出来的**真的**是老布局，否则这条用例会悄悄退化成"打开一个本来就有父块表的库"
+        raw = sqlite3.connect(str(db))
+        try:
+            cols = {r[1] for r in raw.execute("PRAGMA table_info(chunks)")}
+            tables = {r[0] for r in raw.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+        finally:
+            raw.close()
+        assert "parent_id" not in cols and "parents" not in tables
+
+        store = SqliteStore(db_path=db, vector_path=npy, dim=32, embedding_model="hashing-test")
+        try:
+            # 1) 不抛异常、老数据照旧读得到，只是没有父块语境
+            hit = store.get_chunks(["a::0000"])["a::0000"]
+            assert hit.body == "legacybody legacyword"
+            assert hit.parent_id == ""
+            assert hit.parent_text == ""
+            assert hit.context_text == "legacybody legacyword"
+            assert store.stats().n_parents == 0
+            # 2) 全文路没被 `ALTER TABLE` 弄坏（外内容 FTS 表最容易在这里静默失配）
+            assert store.keyword_search("legacyword", 5) == [("a::0000", 1)]
+            assert store.verify_fts() == "ok"
+            # 3) 补列与建表确已发生
+            cols_now = {r["name"] for r in store._con.execute("PRAGMA table_info(chunks)")}  # noqa: SLF001
+            assert "parent_id" in cols_now
+            # 4) 升级后的库能接着写新格式（父子两层共存，不用重建）
+            _upsert_parents(store, "b", ["升级后写入的父块"], axis=1)
+            assert store.get_chunks(["b::0000"])["b::0000"].parent_text == "升级后写入的父块"
+            assert store.stats().n_parents == 1
+        finally:
+            store.close()
+
+    def test_reopening_upgraded_db_is_idempotent(self, tmp_path):
+        """防的回归：升级逻辑不可重复执行（第二次打开时 `ALTER TABLE` 重复跑会抛
+        `duplicate column name`）——"打开一次能用、打开两次就崩"是最糟的形态。"""
+        db, npy = tmp_path / "legacy2.db", tmp_path / "legacy2.npy"
+        _make_legacy_db(db, npy)
+        for _ in range(3):
+            s = SqliteStore(db_path=db, vector_path=npy, dim=32, embedding_model="hashing-test")
+            try:
+                assert s.get_chunks(["a::0000"])["a::0000"].parent_text == ""
+            finally:
+                s.close()

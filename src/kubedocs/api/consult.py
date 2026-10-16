@@ -454,7 +454,10 @@ class ConsultRuntime:
             # 端点把它翻成 409 + 一句人话，让界面提示"换一个时段"。
             raise HTTPException(status_code=409, detail=str(e)) from e
         self._link_booking(session_id, ticket)
-        return ticket
+        # 显式标注：`self.booking()` 返回 Any（号源实现是注入的），直接 return 会把
+        # Any 漏进本方法声明的返回类型。
+        booked: dict[str, Any] = ticket
+        return booked
 
     def cancel_booking(self, *, session_id: str, ticket_no: str, patient_id: str) -> dict[str, Any]:
         """退号。归属由号源层核对（只有本人能退自己的号）。"""
@@ -472,7 +475,8 @@ class ConsultRuntime:
             except Exception as e:  # noqa: BLE001 - 关联表只是投影，同步失败不该让退号失败
                 logger.warning("退号后同步挂号关联失败（%s: %s）：号源那边已经退掉了", type(e).__name__, e)
         del session_id  # 退号不需要会话：凭据号 + 就诊人已经唯一确定了那张单子
-        return result
+        cancelled: dict[str, Any] = result
+        return cancelled
 
     def appointments(self, patient_id: str, limit: int = 10) -> list[dict[str, Any]]:
         """患者本人的挂号记录（新 → 旧）。号源层只按 `patient_id` 过滤，别人的看不见。"""
@@ -722,7 +726,8 @@ def build_consult_router(
         # （它也要同一个号源服务）。各建各的会让"问诊页提议、对话页确认"两边对不上。
         rt = getattr(app.state, "consult_runtime", None)
         if rt is not None:
-            return rt
+            found: ConsultRuntime = rt
+            return found
         with runtimes_lock:
             rt = getattr(app.state, "consult_runtime", None)
             if rt is None:

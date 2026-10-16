@@ -63,21 +63,21 @@ def _store(settings: Settings) -> SqliteStore:
 # 卡片 -> 索引
 class TestCardsToInputs:
     def test_each_card_becomes_one_doc_and_one_chunk(self):
-        docs, chunks = cards_to_inputs(CARDS)
+        docs, parents, chunks = cards_to_inputs(CARDS)
         assert len(docs) == len(chunks) == 3
         assert docs[0].doc_id == "symptom/咳嗽"
         assert chunks[0].chunk_id == "symptom/咳嗽::0000"
 
     def test_empty_text_cards_are_skipped(self):
-        docs, _ = cards_to_inputs([{"kind": "symptom", "key": "空", "text": "  "}])
+        docs, _, _ = cards_to_inputs([{"kind": "symptom", "key": "空", "text": "  "}])
         assert docs == []
 
     def test_limit_keeps_the_prefix(self):
-        docs, _ = cards_to_inputs(CARDS, limit=2)
+        docs, _, _ = cards_to_inputs(CARDS, limit=2)
         assert [d.doc_id for d in docs] == ["symptom/咳嗽", "symptom/头痛"]
 
     def test_citation_url_is_built(self):
-        docs, _ = cards_to_inputs(CARDS)
+        docs, _, _ = cards_to_inputs(CARDS)
         assert docs[0].source_url.startswith("https://kubedocs.local/clinic/")
 
 

@@ -32,20 +32,29 @@ from kubedocs.domains.clinic.pack import clinic_cards_path
 from kubedocs.embed import Embedder, embed_texts
 from kubedocs.ingest import IngestReport
 from kubedocs.retrieve.hybrid import HybridRetriever
-from kubedocs.store.base import ChunkInput, DocInput, Store
+from kubedocs.store.base import ChunkInput, DocInput, ParentInput, Store
 
 
 def cards_to_inputs(
     cards: list[dict],
     *,
     limit: int | None = None,
-) -> tuple[list[DocInput], list[ChunkInput]]:
-    """卡片 -> 文档/块。
+) -> tuple[list[DocInput], list[ParentInput], list[ChunkInput]]:
+    """卡片 -> 文档 / 父块 / 子块。
 
     每张卡片独立成篇（doc_id 含类别与键），这样引用能精确指到"哪张卡"，
     文档级评测也能按卡片判定。
+
+    ## 这里的父块与子块正文是**同一段**，这是刻意的
+
+    知识卡片是**按原子知识单元撰写的**（一张卡讲一个症状或一个处置），它已经是
+    "检索单位"与"语境单位"的合体。再按段落把它切成"症状 / 处置 / 红旗"三块，命中的
+    会是半张卡：`症状：胸痛` 这种片段单独拿出来，既不足以判断该挂哪个科，也会让引用
+    指向一段读不出结论的文字。所以卡片语料保持一层，父块与子块同文——
+    父块行仍然写，读路径因此与文档语料完全一致（不需要"卡片走另一条分支"）。
     """
     docs: list[DocInput] = []
+    parents: list[ParentInput] = []
     chunks: list[ChunkInput] = []
     for i, card in enumerate(cards if limit is None else cards[:limit]):
         kind = str(card.get("kind", "card"))
@@ -61,6 +70,21 @@ def cards_to_inputs(
         docs.append(
             DocInput(doc_id=doc_id, rel_path=f"{doc_id}.md", title=key, source_url=url, content_hash=digest)
         )
+        parent_id = f"{doc_id}::p0000"
+        parents.append(
+            ParentInput(
+                parent_id=parent_id,
+                doc_id=doc_id,
+                ordinal=0,
+                title=key,
+                breadcrumb=kind,
+                source_url=url,
+                body=text,
+                n_chars=len(text),
+                content_hash=digest,
+                n_children=1,
+            )
+        )
         chunks.append(
             ChunkInput(
                 chunk_id=f"{doc_id}::0000",
@@ -72,9 +96,10 @@ def cards_to_inputs(
                 body=text,
                 content_hash=digest,
                 n_chars=len(text),
+                parent_id=parent_id,
             )
         )
-    return docs, chunks
+    return docs, parents, chunks
 
 
 class ClinicPack:
@@ -131,23 +156,30 @@ class ClinicPack:
         if rebuild:
             store.rebuild_from_scratch()
         cards = self.load_cards()
-        docs, chunks = cards_to_inputs(cards, limit=limit_files)
+        docs, parents, chunks = cards_to_inputs(cards, limit=limit_files)
         report.files_scanned = len(cards) if limit_files is None else min(limit_files, len(cards))
         report.files_changed = len(docs)
         batch = max(1, int(batch_files))
-        log(f"卡片 {len(cards)} 张 -> 文档 {len(docs)} 篇 / 块 {len(chunks)} 个（编码批 {batch}）")
+        log(
+            f"卡片 {len(cards)} 张 -> 文档 {len(docs)} 篇 / 父块 {len(parents)} 个 / "
+            f"块 {len(chunks)} 个（编码批 {batch}）"
+        )
 
         for start in range(0, len(chunks), batch):
-            part_docs = {d.doc_id: d for d in docs}
+            part = {d.doc_id: d for d in docs}
             chunk_slice = chunks[start : start + batch]
             ids = {c.doc_id for c in chunk_slice}
             texts = [c.body for c in chunk_slice]
             log(f"  编码 {start + len(texts)}/{len(chunks)} …")
             mat = embed_texts(embedder, texts)
             vectors = {c.chunk_id: mat[i] for i, c in enumerate(chunk_slice)}
-            store.upsert_docs([part_docs[i] for i in ids], chunk_slice, vectors)
+            # 父块与子块一起写：只写子块会让 `parent_id` 指向一行不存在的父块。
+            # 卡片语料一层一层地切，所以这里按 doc 过滤父块即可（与块的切法无关）。
+            parent_slice = [p for p in parents if p.doc_id in ids]
+            store.upsert_docs([part[i] for i in ids], chunk_slice, vectors, parent_slice)
             store.finalize()
             report.chunks_written += len(chunk_slice)
+            report.parents_written += len(parent_slice)
             report.chunks_embedded += len(chunk_slice)
         report.elapsed_s = 0.0
         note = f"clinic 索引完成：嵌入器 {embedder.name}（{embedder.dim} 维）。"

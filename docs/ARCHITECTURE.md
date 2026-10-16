@@ -14,7 +14,7 @@
 ├──────────────────────────────────────────────────────────────────────────┤
 │ 能力层  retrieve/（混合检索 · 融合 · 重排）· generate.py（带引用回答）      │
 ├──────────────────────────────────────────────────────────────────────────┤
-│ 数据层  ingest.py（摄取）· store/（sqlite · sqlite-vec · pgvector）       │
+│ 数据层  ingest.py（摄取）· parse.py（多格式解析）· store/（pgvector 等） │
 ├──────────────────────────────────────────────────────────────────────────┤
 │ 支撑    config.py · observability.py · evaluation/                        │
 └──────────────────────────────────────────────────────────────────────────┘
@@ -58,10 +58,40 @@
 - **重排默认关闭**：cross-encoder 质量更好但要多加载一个模型；按需开启。
 - **降级是显式的**：任一路失败会退化为单路并在结果里记录原因，而不是静默返回空。
 
+### 检索用子块，生成用父块
+
+索引里存着**两层**，由 `chunker.py` 一次切出：
+
+| 层 | 是什么 | 进不进索引 | 它在回答什么 |
+|---|---|---|---|
+| 子块 `Chunk` | 标题小节内部的段落装箱（目标 300 字符、相邻重叠 60 字符） | 进：BM25 与向量都建在它上面 | "命中的是**哪一句**" |
+| 父块 `Parent` | 一个标题小节；超过 3000 字符就按段落边界拆成几片 | 不进：不参与全文、也不算向量 | "这句话**前后在讲什么**" |
+
+- **id 形状**：子块是 `<doc_id>::<四位序号>`，父块是 `<doc_id>::p<四位序号>`。
+- **短碎片只在同一个父块内合并**。跨父块合并会把上一节的残句接到下一节的引用下，
+  而引用说的还是上一节——这是必须避免的。
+- **读路径统一走 `ChunkHit.context_text`**：有父块给父块，没有（索引里没有父块、或调用方不传
+  父块）退回子块正文。取值一律用它，不要直接读 `parent_text`——那会把"没有父块"变成"喂给模型的
+  上下文是空的"。
+
+**为什么多存一层**：子块小 ⇒ 命中精确（一个具体说法、一行报错含义，而不是整节"泛泛相关"）；
+父块完整 ⇒ 模型看得到前后文，不会拿着一句被切一半的话去答题。两层用途不同，谁都不能省。
+
+**`body` 与父块是两种东西**，给模型时要一起给：`body` 是命中的那一段（短、已截断），
+父块是它所在的整节（读得到语境）。只给前者，模型容易拿着断章下结论；只给后者并在长度上截断，
+又可能把命中的那句整段截掉——命中在小节里的位置是不确定的。落点：
+`generate.build_context` 用父块（按父块去重，`per_chunk_chars` 默认 3000）、
+`agent/rag_tools.py` 的 `search_docs` 返回 `body` + `context`、
+`clinical/evidence.py` 的 `EvidenceItem.text` + `.context`。
+
+卡片语料（`clinic`）是唯一的例外：每张卡片本身就是一个原子知识单元，父块与子块**同文**
+（理由见 [`DECISIONS.md`](DECISIONS.md)），父块行照写，读路径因此与文档语料完全一致。
+
 ## 四、摄取链路
 
 ```
-语料文件 ──► 切块 ──► 分批编码 ──► 写入（文档 / 块 / 全文索引 / 向量索引）──► 一致性自检
+语料文件 ──► 解析（多格式 → 带位置的块）──► 切块（父子两层）──► 分批编码
+        ──► 写入（文档 / 父块 / 子块 / 全文索引 / 向量索引）──► 一致性自检
 ```
 
 - **分批提交**：批大小决定"中断时最多丢多少工作"，默认小批量（60 个文件）。
@@ -70,7 +100,70 @@
 - **一致性自检**：向量行与块行必须一一对应，行数或连续性不一致就报错——这种错位一旦静默存在，
   检索结果会整体漂移。
 
-## 五、Agent 与工具
+### 多格式解析：位置是引用可信的前提
+
+`parse.py` 把任意受支持的资料转成**带位置的块**，切块仍然全部由 `chunker.py` 负责。
+受支持的后缀：`.md` / `.txt` / `.csv` / `.html` / `.htm` / `.pdf` / `.docx` / `.xlsx` / `.pptx`。
+
+**位置语义按格式分别定义**，不做"统一成行号"这种会把语义抹平的归一：
+
+| 格式 | 位置 | 切块粒度 |
+|---|---|---|
+| `.pdf` | `p.7`（页码，1 起） | 按页 → 页内再按段 |
+| `.xlsx` / `.csv` | `Sheet1!A1:C20`（sheet 名 + 行区间） | 按行窗口，**每块重复表头行** |
+| `.pptx` | `slide 3` | 按幻灯片（标题 + 要点 + 备注） |
+| `.docx` / `.html` / `.md` / `.txt` | 标题路径（h1–h6） | 按标题切小节 |
+
+位置以**面包屑首段**的形式进入引用（`[手册.pdf › p.7]`、`[台账.xlsx › Sheet1!A1:C20]`），
+所以不新增存储字段；容器型格式的父块**不跨位置**——跨页/跨表合并会把下一页的文字挂到上一页的
+引用下。
+
+三条不变量（都会毁掉现场演示，所以写在 `parse.py` 顶部）：
+
+- **绝不静默丢字**：编码按 `utf-8-sig` → `utf-8` → `gb18030` 严格探测，全失败才取"替换字符更少"
+  的那个用 `errors="replace"` 救回来，并把替换字符数写进报告。**不用 `errors="ignore"`**——
+  丢字是静默的，而"少了几行"在检索里表现为莫名其妙的漏召回。
+- **扫描件点名跳过**：PDF 抽出空文本 = 无文本层（不做 OCR），报"该文件无文本层（疑似扫描件），
+  已跳过"并计数，**绝不建空块**。"库里有这个文档但搜不到"必须能查出原因。
+- **单文件失败不影响整批**：`parse()` **不抛异常**，任何失败（不支持的格式、文件损坏、缺解析库）
+  都变成可读原因，计进摄取报告，本批继续。
+
+解析库（`pypdf` / `python-docx` / `openpyxl` / `python-pptx` / `beautifulsoup4`）都在
+`pyproject.toml` 里显式声明，且都是**函数内延迟 import**：缺一个库只坏一种格式，不会让
+`import kubedocs.ingest` 整体失败、连检索服务都起不来。
+
+## 五、存储后端（pgvector / sqlite-vec / sqlite）
+
+`store/` 下是同一份 `Store` 协议的三套实现，按 `KUBEDOCS_STORE` 选：
+
+| 取值 | 实现 | 定位 |
+|---|---|---|
+| `pgvector`（默认） | `PgVectorStore` | Postgres + pgvector HNSW：近似检索、**一库同时承担全文与向量**、索引跨重启与多副本共享 |
+| `sqlite-vec` | `SqliteVecStore` | 离线回退：零外部进程、零镜像、零网络 |
+| `sqlite` | `SqliteStore` | numpy 暴力内积 + `.npy` 侧车矩阵：最小依赖，兼作性能对照 |
+
+三个实现都是**同一套父子两层的读法**：父块存在普通表里、由子块的 `parent_id` 指过去，
+命中后批量取回。**没有父块数据的索引可以原地升级**（例如更早的版本写下的那一份）：
+打开时幂等地补上父块表与 `parent_id` 列，已有子块行不动；缺父块的行 `parent_text` 为空串，
+`context_text` 于是退回子块正文。
+
+**两条失败路径刻意不同**（`store/__init__.py` 的 `from_settings`）：
+
+- **非法取值直接报错**，绝不静默回退——回退成默认后端会让"我明明切到 pgvector 了，
+  为什么数据还是旧的"变成一个没有任何日志的谜。
+- **数据库不可达则降级为 `sqlite-vec`**，把原因写到返回对象的 `fallback_reason` 上；
+  传 `allow_local_fallback=False` 可以让它原样抛错，留给"基础设施没起就该响亮失败"的调用方。
+
+**降级是可见的，也是有代价的**。可见的落点：
+
+- `GET /healthz` 的 `store`（实际生效的后端类名）与 `store_fallback`（降级原因）；
+- CLI `stats` 打印「存储后端 X（配置 Y）」，降级时再打一行 `⚠ 已降级：…`，
+  JSON 里多出 `store_backend` / `store_configured` / `store_fallback` / `n_parents`。
+
+代价是**两个后端的索引存在不同位置**：降级期间建的索引在 Postgres 恢复后是**看不见**的。
+要回到生产后端，先起数据库再重跑 `ingest`。
+
+## 六、Agent 与工具
 
 工具的**唯一真相源**是 `agent/tools.py` 的 `ToolRegistry`。一个 `ToolSpec` 声明：
 名称、说明、参数模型、"什么时候**不该**用"、是否产生副作用、执行体。
@@ -93,7 +186,27 @@
 - **调用方身份不从模型来**：患者标识由调用方注入执行体，不在工具参数里，模型无法伪造。
 - **轮次与证据都有上界**：工具循环轮次有硬上限，累积的证据条数也有上限。
 
-## 六、医疗产品层（`clinical/`）
+### 挂号：模型只提议，写操作只由服务端执行
+
+工具面与写入口是分开的，边界很清楚：
+
+| 谁 | 能做什么 | 走哪条路 |
+|---|---|---|
+| 模型 | `list_departments` / `get_availability` / `booking_window` / `my_appointments`，外加**只读**的 `propose_booking`（产出一张待确认单，不占号） | 工具循环 |
+| 患者 | **点确认**才真的取号；点退号才真的退号 | `POST /consult/booking/confirm`、`POST /consult/booking/cancel` |
+| 前端 | 渲染服务端给的卡片 | `pending_action`（两条路径都有）；`/consult` 的响应还带 `appointments` |
+
+- `book_appointment` 仍然注册在册，但标着 `side_effect=True`：工具循环没有 `confirm` 回调，
+  所以它**默认不交给模型**，只有明确知道自己在做什么的调用方（MCP 加 `--allow-side-effects`）
+  才拿得到。
+- **确认请求只带 `proposal_id`**：科室、日期、时段、挂号费都取自服务端那张单子。前端若能回传
+  这些字段，界面就成了价格与科室的真相源。
+- 待确认单**进程内、一次性消费、15 分钟过期**（`domains/clinic/pending.py`）。业务失败返回
+  **409 + 一句人话**（单子过期 / 号被占满 / 停诊），参数不合法由 pydantic 拦成 422。
+- `/consult` 与 `/chat` 是**同一套**：两条路径都让模型提议、由前端卡片上的按钮触发确认，
+  没有"用户这句话里有没有挂号两个字"这类基于关键词的确认回调。
+
+## 七、医疗产品层（`clinical/`）
 
 ```
 contracts.py    输出契约：ClinicalAssessment / RedFlag（病症 + 严重程度 + 依据）
@@ -104,7 +217,15 @@ prompts/        系统提示词（硬性条款 R1–R7 与输出契约）
 reasoning.py    主判：装配提示词、解析契约、失败降级、预算闸
 orchestration.py 工具编排：模型自行决定取证
 pipeline.py     把上面这些装成一条链
+persistence.py  患者 / 就诊 / 消息 / 挂号关联（Postgres `clinical` schema）
 ```
+
+号源与挂号工具不在这一层，而在域包 `domains/clinic/` 里（`provider.py` 是契约、
+`pg_provider.py` 是 Postgres 实现、`pending.py` 是待确认单、`tools.py` 是工具面）。
+
+**就诊记录与挂号关联**：患者 / 就诊 / 消息 / 挂号关联都落 Postgres 的 `clinical` schema。
+挂号关联是**单向**的（就诊 → 号），权威状态在 `booking.appointments`；`GET /consult/encounters`
+的每条记录带 `bookings`，用来回答"这次问诊最后挂了哪个科"。
 
 **一次问诊的形状**
 
@@ -135,24 +256,28 @@ pipeline.py     把上面这些装成一条链
 - **依据约束**：检查与用药建议必须引用真实存在的证据编号；没有依据的条目会被丢弃。
 - **急重症信息不被这条约束削弱**：急重症判断、科室建议与对话正文不因依据缺失而被删掉。
 
-## 七、可观测与运维
+## 八、可观测与运维
 
 - `GET /metrics`：Prometheus 指标，含按端点的请求数与耗时、检索各路耗时、LLM 花费与预算。
-- `GET /healthz`：存活 + 当前域的块数与索引可用性。**索引不可用不算存活失败**，
-  此时接口仍返回 200 并在 `diagnostics` 里说明原因，避免"探针把服务打成不健康"。
+- `GET /healthz`：存活 + 当前域的块数，外加 `store`（实际生效的存储后端类名）与
+  `store_fallback`（降级原因）。**索引不可用 / 索引为空都不算存活失败**：返回 200、
+  `ok=true`、`n_chunks=0`——探针报 red 会触发重启，而重启解决不了"Postgres 没起"。
+- `GET /consult/status`：会话数、待确认挂号单数、号源后端（`booking_backend`）、
+  就诊记录后端与各表行数——**不触发管线装配**，所以可以随便探。
 - 花费：所有模型调用共用一本日预算账本，账本按日累计落在 `data/index/llm_spend.json`。
 
-## 八、关键目录
+## 九、关键目录
 
 ```
 src/kubedocs/
   config.py        配置与路径锚定（含容器内覆盖）
-  cli.py           命令行入口：ingest / search / ask / eval / serve / stats / domains …
+  cli.py           命令行入口：ingest / search / ask / eval / serve / stats / schedule / domains …
   ingest.py        摄取流水线
+  parse.py         多格式解析：PDF / Office / HTML / CSV / TXT / MD → 带位置的块
   embed.py         嵌入器抽象（bge / hashing）
   normalize.py     归一化器（可选中文分词）
   generate.py      带引用回答与日预算账本
-  store/           sqlite · sqlite-vec · pgvector
+  store/           pgvector · sqlite-vec · sqlite
   retrieve/        混合检索、RRF、重排
   domains/         k8s_docs · clinic
   agent/           工具注册表、ReAct 循环、图编排
@@ -162,7 +287,7 @@ src/kubedocs/
   evaluation/      评测闸门与基线
 ```
 
-## 九、扩展点速查
+## 十、扩展点速查
 
 | 想做的事 | 改哪里 |
 |---|---|
@@ -170,7 +295,9 @@ src/kubedocs/
 | 加一个工具 | `agent/tools.py` 注册 `ToolSpec`（HTTP `/tools`、Agent 循环与 MCP 清单同时生效） |
 | 加一步服务端编排 | `clinical/orchestration.py` 的工具循环 |
 | 换嵌入模型 | 域包里的 `embedding_model`，然后**重建索引** |
-| 换向量后端 | 配置 `KUBEDOCS_STORE`，实现新后端则加一个 `Store` 子类 |
+| 换向量后端 | 配置 `KUBEDOCS_STORE`，实现新后端则新增一个满足 `Store` 协议的实现 |
+| 调切块尺寸 | 配置 `KUBEDOCS_CHUNK_MAX_CHARS` / `KUBEDOCS_CHUNK_OVERLAP_CHARS` / `KUBEDOCS_CHUNK_PARENT_MAX_CHARS`，然后**重建索引** |
+| 加一种可摄取格式 | 在 `parse.py` 的解析器注册表加一条，并同步 `chunker.DOC_SUFFIXES`（有测试钉住这个不变式） |
 | 换精排 | 实现重排接口（`retrieve/rerank.py`），在域包里启用 |
 | 调分诊行为 | `clinical/triage.py` 的候选池大小与投票权重 |
 | 改提示词 | `clinical/prompts/system.md`（内容变更会反映到提示词版本指纹） |

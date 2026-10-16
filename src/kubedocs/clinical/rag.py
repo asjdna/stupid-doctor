@@ -31,6 +31,15 @@ class RetrievedChunk(BaseModel):
     breadcrumb: str = ""
     source_url: str = ""
     body: str = ""
+    """**命中的那一段**（子块）：精确、短。用它回答"命中的是哪一句"。"""
+
+    parent_text: str = ""
+    """命中块所属**父块**（整节）的正文，可能为空（索引建在父子切割之前）。
+
+    与 `body` 是两种用途，别混：`body` 是命中位置，`parent_text` 是它所在的完整语境。
+    只给 `body`，模型会拿着半句话答题；只给 `parent_text` 并在长度上截断，又把命中那句截掉了。
+    """
+
     score: float = 0.0
 
 
@@ -83,6 +92,10 @@ class LocalIndexBackend:
                 breadcrumb=c.breadcrumb,
                 source_url=c.source_url,
                 body=c.body,
+                # 用 `getattr`：这一层的输入是**鸭子类型**的检索器（测试替身、将来的
+                # 外接 RAG 系统都可能没有父块概念），缺字段应当退化成"没有父块语境"，
+                # 而不是让整条检索链 AttributeError。
+                parent_text=getattr(c, "parent_text", ""),
                 score=c.score,
             )
             for c in result.results

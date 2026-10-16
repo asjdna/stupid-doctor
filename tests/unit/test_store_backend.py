@@ -32,15 +32,55 @@ def _settings(tmp_path: Path, **over: object) -> Settings:
 
 
 class TestDefaultBackend:
-    """默认后端：未显式配置时 `KUBEDOCS_STORE` 取 `sqlite-vec`。"""
+    """默认后端：未显式配置时 `KUBEDOCS_STORE` 取 `pgvector`。"""
 
-    def test_default_is_sqlite_vec(self):
+    def test_default_is_pgvector(self):
         # 用字段默认值而不是 Settings() 实例：实例会读到 .env，测的就不是代码默认值。
-        assert Settings.model_fields["store"].default == "sqlite-vec"
+        assert Settings.model_fields["store"].default == "pgvector"
 
     def test_backend_names_are_stable(self):
         # 名字是配置面的一部分（KUBEDOCS_STORE 的取值），改名等于破坏兼容
         assert BACKENDS == ("sqlite-vec", "sqlite", "pgvector")
+
+
+class TestUnreachableDatabaseFallback:
+    """配置了 pgvector 但数据库不可达：降级为本地后端，**并且把原因带出来**。
+
+    这是"离线也能演示"与"降级必须可见"两条要求的交点：静默降级会让
+    "Postgres 恢复后看不到降级期间建的索引"变成一个没人预期过的差异。
+    """
+
+    def test_pgvector_unreachable_falls_back_to_local(self, tmp_path: Path):
+        s = _settings(
+            tmp_path,
+            store="pgvector",
+            database_url="postgresql://kubedocs:kubedocs@127.0.0.1:1/kubedocs",
+        )
+        store = from_settings(s)
+        try:
+            assert isinstance(store, SqliteVecStore), "数据库不可达时必须降级，而不是抛异常"
+            reason = getattr(store, "fallback_reason", "")
+            assert reason, "降级必须留下可见的原因（HTTP `/healthz` 与 CLI stats 都读它）"
+            assert "pgvector" in reason and "sqlite-vec" in reason
+        finally:
+            store.close()
+
+    def test_fallback_can_be_disabled_for_production_startup(self, tmp_path: Path):
+        """生产启动路径要能要求"基础设施没起就响亮失败"。"""
+        s = _settings(
+            tmp_path,
+            store="pgvector",
+            database_url="postgresql://kubedocs:kubedocs@127.0.0.1:1/kubedocs",
+        )
+        with pytest.raises(Exception):  # noqa: B017 - 具体类型取决于驱动，这里只要求"不吞"
+            from_settings(s, allow_local_fallback=False)
+
+    def test_illegal_backend_still_raises_instead_of_falling_back(self, tmp_path: Path):
+        """非法取值与"连不上"是两条不同的路径：前者必须报错，绝不降级成任何后端。"""
+        from kubedocs.store.sqlite_store import StoreError as _StoreError
+
+        with pytest.raises((_StoreError, ValidationError)):
+            from_settings(_settings(tmp_path, store="chroma"))
 
 
 class TestEnvWiring:

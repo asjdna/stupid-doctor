@@ -41,10 +41,22 @@ class RetrievedChunk:
     score: float = 0.0
     ranks: dict[str, int] = field(default_factory=dict)
     rerank_score: float | None = None
+    parent_id: str = ""
+    parent_text: str = ""
+    """命中块所属**整节**（父块）的正文；空串 = 索引没有父块。
+
+    检索排序只看子块（`body`），父块是**命中之后**才用的语境。这两者一起往下传，
+    生成层才有得选：出片段用 `body`，喂整段用 `context_text`。
+    """
 
     @property
     def citation(self) -> str:
         return f"{self.title} › {self.breadcrumb}" if self.breadcrumb else self.title
+
+    @property
+    def context_text(self) -> str:
+        """喂给模型的整段文字：有父块给父块，没有就退回子块自己。"""
+        return self.parent_text or self.body
 
     @classmethod
     def from_hit(cls, hit: ChunkHit) -> RetrievedChunk:
@@ -56,6 +68,8 @@ class RetrievedChunk:
             breadcrumb=hit.breadcrumb,
             source_url=hit.source_url,
             body=hit.body,
+            parent_id=hit.parent_id,
+            parent_text=hit.parent_text,
         )
 
     def explain(self) -> str:

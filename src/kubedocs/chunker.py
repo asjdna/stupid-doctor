@@ -142,7 +142,7 @@ def _safe_overlap_tail(block: str, overlap: int) -> str:
 
 @dataclass
 class Chunk:
-    """一个可检索块。metadata 全部保留，供引用与调试。"""
+    """一个可检索块（**子块**）。metadata 全部保留，供引用与调试。"""
 
     chunk_id: str
     index: int  # 该文档内的块序号
@@ -156,6 +156,45 @@ class Chunk:
     # 所以容器型格式的位置已经作为面包屑首段拼好，检索结果里的引用直接可读：
     # `[手册.pdf › p.7]`、`[台账.xlsx › Sheet1!A1:C20]`。
     location: str = ""
+    parent_id: str = ""
+    """所属**父块**的 id（`<doc_id>::p<序号>`）。空串 = 这份索引是父子切割之前建的，
+    检索端会退回用子块正文当上下文（见 `docs/ARCHITECTURE.md` 的检索一节）。"""
+
+
+@dataclass
+class Parent:
+    """一个**父块**：一段完整的语义单元（一个标题小节，或小节被长度上限切开的一片）。
+
+    父块**不进检索索引**——它不参与 BM25、也不算向量。它的唯一用途是：某条子块命中后，
+    把这一整段交给模型当上下文。这样"检索用的单位"和"喂给模型的单位"可以各自最优：
+    子块小 => 命中精确；父块完整 => 模型看得到前后文，不会拿着一句被切一半的话去答题。
+    """
+
+    parent_id: str
+    index: int  # 该文档内的父块序号
+    doc_id: str
+    text: str
+    title: str = ""
+    breadcrumb: list[str] = field(default_factory=list)
+    source_url: str = ""
+    location: str = ""
+    content_hash: str = ""
+    n_children: int = 0
+    """挂在这个父块下的子块数。读路径与体检用它回答"这段到底有没有被索引到"。"""
+
+
+@dataclass
+class DocumentTree:
+    """一份文档切出来的**父子两层**结果。"""
+
+    doc_id: str
+    title: str
+    source_url: str
+    parents: list[Parent] = field(default_factory=list)
+    children: list[Chunk] = field(default_factory=list)
+
+    def describe(self) -> str:
+        return f"{self.doc_id}：{len(self.parents)} 个父块 / {len(self.children)} 个子块"
 
 
 def parse_front_matter(text: str) -> tuple[dict, str]:
@@ -369,8 +408,8 @@ def source_url_for(rel_path: str, url_prefix: str) -> str:
 class _Piece:
     """切块中间态：一段文字 + 它该带的位置与面包屑。
 
-    `chunk_document` 与 `chunk_blocks` 都收敛到这个中间态，再由 `_assemble` 统一
-    生成 `Chunk`（编号、上下文头、内容指纹）——两条路径共用同一套收尾规则。
+    **现在它是"父块候选"**：`chunk_document` 的一个标题小节、或 `chunk_blocks` 的一个
+    位置块（页 / 表格块 / 幻灯片）。`_assemble_tree` 再把每个候选切成父子两层。
     """
 
     location: str
@@ -378,58 +417,148 @@ class _Piece:
     text: str
 
 
-def _assemble(pieces: list[_Piece], *, doc_id: str, title: str, url: str, add_context: bool) -> list[Chunk]:
-    """中间态 -> `Chunk`。空文本不产出块；`index`/`chunk_id` 按中间态序号给。"""
-    out: list[Chunk] = []
-    for i, piece in enumerate(pieces):
-        body_text = piece.text.strip()
-        if not body_text:
+# 父子切割的默认尺寸。三个数各自回答一个问题，不要互相推导：
+#
+# - `CHILD_TARGET_CHARS=300`：**检索单位**。小到能精确命中一个具体说法（一句参数说明、
+#   一行报错含义），而不是整节"泛泛相关"。原来的 1200 字块会把一个小节里的四个话题
+#   平均成一个向量，其中任何一句都不再突出。
+# - `CHILD_OVERLAP_CHARS=60`：相邻子块的重叠，留给"一句话正好被切在边界上"。
+#   比原来的 150 小：子块本身就短，重叠按比例取，太大等于 300 字里一半是重复。
+# - `PARENT_MAX_CHARS=3000`：**上下文单位**的上限。小节超过它就按段落边界拆成多个父块；
+#   拆是为了"任何一个父块都能整段放进模型上下文"，不为检索。
+CHILD_TARGET_CHARS = 300
+CHILD_OVERLAP_CHARS = 60
+PARENT_MAX_CHARS = 3000
+
+
+def _context_header(title: str, breadcrumb: list[str]) -> str:
+    """块首的「文档标题 › 标题面包屑」上下文行；没有可用标题时返回空串。
+
+    标题已在面包屑里就不重复它（本模块一直以来的规则）。
+    """
+    parts = breadcrumb if breadcrumb and breadcrumb[0] == title else [title, *breadcrumb]
+    return " › ".join(dict.fromkeys(p for p in parts if p))
+
+
+def _split_parent(text: str, parent_max_chars: int) -> list[str]:
+    """把小节按**段落边界**拆进长度上限（单段超长时允许超出，绝不切进代码块）。
+
+    overlap 传 0：父块是"完整语境"，两片之间再加一段重叠只会让模型读两遍同样的字。
+    """
+    if parent_max_chars <= 0 or len(text) <= parent_max_chars:
+        return [text]
+    return _split_long_text(text, parent_max_chars, 0)
+
+
+def _assemble_tree(
+    pieces: list[_Piece],
+    *,
+    doc_id: str,
+    title: str,
+    url: str,
+    add_context: bool,
+    child_target_chars: int = CHILD_TARGET_CHARS,
+    child_overlap: int = CHILD_OVERLAP_CHARS,
+    parent_max_chars: int = PARENT_MAX_CHARS,
+    min_chars: int = 80,
+) -> DocumentTree:
+    """中间态（父块候选）-> 父子两层。
+
+    ## 编号与 id
+
+    - 父：`parent_id = "<doc_id>::p<序号>"`，按父块出现顺序，文档内唯一。
+    - 子：`chunk_id = "<doc_id>::<序号>"` —— 与父子切割之前**同一个形状**，序号是子块在
+      文档内的顺序。不改形状的理由：`chunk_id` 是增量摄取定位行的键，换形状等于让已有
+      索引的行全部对不上，而它们本来就是同一批内容。
+
+    ## 短块合并**只在同一个父块内**做
+
+    比 `min_chars` 还短的子块（例如只剩一行标题）会并进同父块的前一个子块。
+    **绝不跨父块合并**：那会把"第 8 页末尾的残句"接到"第 7 页"的子块尾巴上，
+    而引用说的还是第 7 页——同一类错误在 `chunk_blocks` 里已经踩过一次（见那里的说明）。
+    """
+    tree = DocumentTree(doc_id=doc_id, title=title, source_url=url)
+    child_index = 0
+    for p_index, piece in enumerate(pieces):
+        body = piece.text.strip()
+        if not body:
             continue
-        breadcrumb = piece.crumb or [title]
-        # 上下文行：标题已在面包屑里就不重复它
-        ctx_parts = breadcrumb if breadcrumb[0] == title else [title, *breadcrumb]
-        ctx = " › ".join(dict.fromkeys(p for p in ctx_parts if p))
-        final_text = f"[{ctx}]\n\n{body_text}" if add_context and ctx else body_text
-        out.append(
-            Chunk(
-                chunk_id=f"{doc_id}::{i:04d}",
-                index=i,
-                text=final_text,
-                breadcrumb=breadcrumb,
+        crumb = piece.crumb or [title]
+        ctx = _context_header(title, crumb)
+        parent_id = f"{doc_id}::p{p_index:04d}"
+        # 子块按**纯正文**切，再各自加上下文头：先加头再切的话只有第一个子块带得到它，
+        # 后面的子块在检索里就成了"没有出处的句子"。
+        child_texts: list[str] = []
+        for raw in _split_long_text(body, child_target_chars, child_overlap):
+            if child_texts and len(raw) < min_chars:
+                child_texts[-1] = f"{child_texts[-1]}\n\n{raw}"
+            else:
+                child_texts.append(raw)
+        for raw in child_texts:
+            text = f"[{ctx}]\n\n{raw}" if add_context and ctx else raw
+            tree.children.append(
+                Chunk(
+                    chunk_id=f"{doc_id}::{child_index:04d}",
+                    index=child_index,
+                    text=text,
+                    breadcrumb=crumb,
+                    title=title,
+                    source_url=url,
+                    content_hash=hashlib.blake2b(text.encode("utf-8"), digest_size=8).hexdigest(),
+                    location=piece.location,
+                    parent_id=parent_id,
+                )
+            )
+            child_index += 1
+        parent_text = f"[{ctx}]\n\n{body}" if add_context and ctx else body
+        tree.parents.append(
+            Parent(
+                parent_id=parent_id,
+                index=len(tree.parents),
+                doc_id=doc_id,
+                text=parent_text,
                 title=title,
+                breadcrumb=crumb,
                 source_url=url,
-                content_hash=hashlib.blake2b(final_text.encode("utf-8"), digest_size=8).hexdigest(),
                 location=piece.location,
+                content_hash=hashlib.blake2b(parent_text.encode("utf-8"), digest_size=8).hexdigest(),
+                n_children=len(child_texts),
             )
         )
-    return out
+    return tree
 
 
-def chunk_document(
+def _sections_to_pieces(body: str, *, parent_max_chars: int) -> list[_Piece]:
+    """`chunk_document_tree` 的中间态：按标题切小节，过长的小节再按段落拆。"""
+    raw: list[_Piece] = []
+    for crumb, sec in split_sections(body):
+        for part in _split_parent(sec, parent_max_chars):
+            raw.append(_Piece(location=" › ".join(crumb), crumb=list(crumb), text=part))
+    return raw
+
+
+def chunk_document_tree(
     rel_path: str,
     text: str,
     *,
-    max_chars: int = 1200,
-    overlap: int = 150,
+    parent_max_chars: int = PARENT_MAX_CHARS,
+    child_target_chars: int = CHILD_TARGET_CHARS,
+    child_overlap: int = CHILD_OVERLAP_CHARS,
     min_chars: int = 80,
     url_prefix: str = "https://kubernetes.io/docs/",
     add_context: bool = True,
-) -> list[Chunk]:
-    """把一个 markdown 文档切成块。空文档返回 []。
+) -> DocumentTree:
+    """把一份标题型文档（md/txt/html/docx）切成**父子两层**。
 
-    `add_context`（默认开）：给每块正文前加上「文档标题 › 标题面包屑」一行。
+    父 = 一个标题小节（过长时按段落边界拆成数片，见 `PARENT_MAX_CHARS`）；
+    子 = 小节内部的段落装箱，目标 `CHILD_TARGET_CHARS`。
 
-    为什么必须有：K8s 的 API reference 大量使用模板化小节（每个资源的
-    「Query Parameters」表格逐字相同）。**不带文档上下文时它们是同形块**——
-    实测 18861 块里有 5794 块（30.7%）内容完全重复。加上上下文后：
-    - 重复块大幅下降（不同资源的同名小节不再同形）；
-    - 检索命中后能直接看出"这是哪个文档的哪一节"，引用可读性也更好。
-    代价是块变长一点（约 +30 字符），可接受。
+    `chunk_document` 是本函数的薄包装（只回子块），两条路不会各切一套。
     """
     meta, body = parse_front_matter(text)
     body = clean_body(strip_legacy_anchors(body))
     if not body:
-        return []
+        return DocumentTree(doc_id=doc_id_from_path(rel_path), title="", source_url="")
 
     title = meta.get("title") or ""
     if not title:
@@ -442,29 +571,50 @@ def chunk_document(
         title = doc_id_from_path(rel_path).rsplit("/", 1)[-1].replace("-", " ").title()
 
     doc_id = doc_id_from_path(rel_path)
-    url = source_url_for(rel_path, url_prefix)
+    return _assemble_tree(
+        _sections_to_pieces(body, parent_max_chars=parent_max_chars),
+        doc_id=doc_id,
+        title=title,
+        url=source_url_for(rel_path, url_prefix),
+        add_context=add_context,
+        child_target_chars=child_target_chars,
+        child_overlap=child_overlap,
+        parent_max_chars=parent_max_chars,
+        min_chars=min_chars,
+    )
 
-    # 先按标题切段；无标题的长文档会得到一段超长文本，交给 _split_long_text
-    raw: list[_Piece] = []
-    for crumb, sec in split_sections(body):
-        for piece in _split_long_text(sec, max_chars, overlap):
-            raw.append(_Piece(location=" › ".join(crumb), crumb=list(crumb), text=piece))
 
-    # 合并过短的碎片到前一块（避免"只有一句标题"的块污染检索）。
-    # 这里**不按位置过滤**：md 语料既有索引的块边界就是这样（碎片的标题本来就让位给
-    # 前一块），改成按位置过滤等于全量重切、引用面全变。容器型格式走 `chunk_blocks`，
-    # 那里必须按位置过滤 —— 否则第 8 页的文字会被挂到第 7 页的引用下。
-    merged: list[_Piece] = []
-    for piece in raw:
-        if merged and len(piece.text) < min_chars:
-            prev = merged[-1]
-            merged[-1] = _Piece(
-                location=prev.location, crumb=prev.crumb, text=prev.text + "\n\n" + piece.text
-            )
-        else:
-            merged.append(piece)
+def chunk_document(
+    rel_path: str,
+    text: str,
+    *,
+    max_chars: int = CHILD_TARGET_CHARS,
+    overlap: int = CHILD_OVERLAP_CHARS,
+    min_chars: int = 80,
+    url_prefix: str = "https://kubernetes.io/docs/",
+    add_context: bool = True,
+) -> list[Chunk]:
+    """把一个标题型文档切成**子块**（父子两层里的检索层）。需要父块（喂给模型的那一层）
+    就用 `chunk_document_tree`：它回 `DocumentTree`，`.children` 与本函数的返回值逐字段一致。
 
-    return _assemble(merged, doc_id=doc_id, title=title, url=url, add_context=add_context)
+    `add_context`（默认开）：给每块正文前加上「文档标题 › 标题面包屑」一行。
+
+    为什么必须有：K8s 的 API reference 大量使用模板化小节（每个资源的
+    「Query Parameters」表格逐字相同）。**不带文档上下文时它们是同形块**——
+    实测 18861 块里有 5794 块（30.7%）内容完全重复。加上上下文后：
+    - 重复块大幅下降（不同资源的同名小节不再同形）；
+    - 检索命中后能直接看出"这是哪个文档的哪一节"，引用可读性也更好。
+    代价是块变长一点（约 +30 字符），可接受。
+    """
+    return chunk_document_tree(
+        rel_path,
+        text,
+        child_target_chars=max_chars,
+        child_overlap=overlap,
+        min_chars=min_chars,
+        url_prefix=url_prefix,
+        add_context=add_context,
+    ).children
 
 
 class PositionedBlock(Protocol):
@@ -479,18 +629,71 @@ class PositionedBlock(Protocol):
     heading_path: list[str]
 
 
+def chunk_blocks_tree(
+    rel_path: str,
+    blocks: Iterable[PositionedBlock],
+    *,
+    title: str = "",
+    parent_max_chars: int = PARENT_MAX_CHARS,
+    child_target_chars: int = CHILD_TARGET_CHARS,
+    child_overlap: int = CHILD_OVERLAP_CHARS,
+    min_chars: int = 80,
+    url_prefix: str = "https://kubernetes.io/docs/",
+    add_context: bool = True,
+) -> DocumentTree:
+    """按"带位置的块"切父子两层：PDF 页 / 表格块 / 幻灯片。
+
+    与 `chunk_document_tree` 的差别只有一处，而且是位置语义要求的：
+    **父块不跨位置**。一个输入块（第 7 页的正文、`Sheet1!A1:C20` 那段、第 3 张幻灯片）
+    就是父块候选，超长时只在**它内部**按段落拆。跨位置合并会把下一页的文字挂到上一页的
+    引用下，"引用可追溯"就成了假话。
+    """
+    doc_id = doc_id_from_path(rel_path)
+    url = source_url_for(rel_path, url_prefix)
+    doc_title = title or doc_id.rsplit("/", 1)[-1].replace("-", " ").title()
+
+    pieces: list[_Piece] = []
+    for block in blocks:
+        text = clean_body(block.text)
+        if not text.strip():
+            continue
+        location = block.location or " › ".join(block.heading_path)
+        crumb = [location, *block.heading_path] if location else list(block.heading_path)
+        for part in _split_parent(text, parent_max_chars):
+            # **同一位置**的相邻片先并成一个父块候选：`parse.py` 会把一段连续正文拆成
+            # 多个块（同一页的不同段落），它们的位置相同、本来就是一个上下文单位。
+            # 位置不同则一律不并 —— 那会把下一页的字挂到上一页的引用下。
+            if pieces and pieces[-1].location == location:
+                prev = pieces[-1]
+                pieces[-1] = _Piece(location=prev.location, crumb=prev.crumb, text=f"{prev.text}\n\n{part}")
+            else:
+                pieces.append(_Piece(location=location, crumb=crumb, text=part))
+
+    return _assemble_tree(
+        pieces,
+        doc_id=doc_id,
+        title=doc_title,
+        url=url,
+        add_context=add_context,
+        child_target_chars=child_target_chars,
+        child_overlap=child_overlap,
+        parent_max_chars=parent_max_chars,
+        min_chars=min_chars,
+    )
+
+
 def chunk_blocks(
     rel_path: str,
     blocks: Iterable[PositionedBlock],
     *,
     title: str = "",
-    max_chars: int = 1200,
-    overlap: int = 150,
+    max_chars: int = CHILD_TARGET_CHARS,
+    overlap: int = CHILD_OVERLAP_CHARS,
     min_chars: int = 80,
     url_prefix: str = "https://kubernetes.io/docs/",
     add_context: bool = True,
 ) -> list[Chunk]:
-    """按"带位置的块"切块：PDF 页 / 表格块 / 幻灯片。
+    """按"带位置的块"切**子块**（父子两层里的检索层）。
 
     与 `chunk_document` 的差别只有两处，且都是位置语义要求的：
 
@@ -499,32 +702,15 @@ def chunk_blocks(
     2. **不跨位置合并碎片**：超短块只在**同一位置内**合并。跨位置合并会把下一页/
        下一张幻灯片的文字挂到上一页的引用下，"引用可追溯"就成了假话。
 
-    超长块仍然交给 `_split_long_text`（代码块不切断、重叠对齐安全边界），
-    切出来的每一片都继承所在块的位置 —— 位置从块到块片只允许收窄（同一页内），
-    不允许跨页漂移。
+    需要父块就用 `chunk_blocks_tree`（它回 `DocumentTree`，`.children` 与本函数返回值一致）。
     """
-    doc_id = doc_id_from_path(rel_path)
-    url = source_url_for(rel_path, url_prefix)
-    doc_title = title or doc_id.rsplit("/", 1)[-1].replace("-", " ").title()
-
-    raw: list[_Piece] = []
-    for block in blocks:
-        text = clean_body(block.text)
-        if not text.strip():
-            continue
-        location = block.location or " › ".join(block.heading_path)
-        crumb = [location, *block.heading_path] if location else list(block.heading_path)
-        for piece in _split_long_text(text, max_chars, overlap):
-            raw.append(_Piece(location=location, crumb=crumb, text=piece))
-
-    merged: list[_Piece] = []
-    for piece in raw:
-        if merged and len(piece.text) < min_chars and merged[-1].location == piece.location:
-            prev = merged[-1]
-            merged[-1] = _Piece(
-                location=prev.location, crumb=prev.crumb, text=prev.text + "\n\n" + piece.text
-            )
-        else:
-            merged.append(piece)
-
-    return _assemble(merged, doc_id=doc_id, title=doc_title, url=url, add_context=add_context)
+    return chunk_blocks_tree(
+        rel_path,
+        blocks,
+        title=title,
+        child_target_chars=max_chars,
+        child_overlap=overlap,
+        min_chars=min_chars,
+        url_prefix=url_prefix,
+        add_context=add_context,
+    ).children

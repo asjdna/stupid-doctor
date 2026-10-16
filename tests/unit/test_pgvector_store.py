@@ -7,6 +7,12 @@ skip；每个用例用独立的 `test_pgvector_*` schema，结束即 `DROP SCHEM
 守的契约：建表/建索引自动完成；全文引擎判定写进元信息，并由自检如实报成 `ok` 或 `DEGRADED`；
 HNSW 参数落进索引定义、`ef_search` 下发到查询连接；向量路排序、统计口径与正文拼接与 SQLite
 一致（并列次序除外）；非法 schema 名、维度/模型不符、缺向量都必须被拒绝。
+
+父子两层另有一组契约：父块**不进任何索引**（`keyword_search` / `dense_search` 只可能回子块）、
+`get_chunks` 按 `parent_id` **批量**带回父块正文、覆盖与删除都不留旧父块、`parents=None` 时
+读路径退回子块正文；`ensure_schema()` 反复调用幂等，且老库（没有 `parent_id` / `parents` 表）
+能原地升级而不是被拒绝。父块语料用本文件自己的 `_make_parent_seed`——共享的 `store_seed`
+必须保持"没有父块"的形态，另一批后端一致性测试正靠它。
 """
 
 from __future__ import annotations
@@ -18,9 +24,18 @@ from pathlib import Path
 import numpy as np
 import psycopg
 import pytest
+from psycopg import sql
 
 from kubedocs.config import Settings
-from kubedocs.store.base import MissingVectorError, Store, StoreError, Vector
+from kubedocs.store.base import (
+    ChunkInput,
+    DocInput,
+    MissingVectorError,
+    ParentInput,
+    Store,
+    StoreError,
+    Vector,
+)
 from kubedocs.store.pgvector_store import PgVectorStore, probe
 from kubedocs.store.sqlite_vec_store import SqliteVecStore
 from tests.unit.store_seed import DIM, make_seed, vec
@@ -73,9 +88,19 @@ pytestmark = [
 
 
 @pytest.fixture
-def schema() -> str:
-    """每个用例一个独立 schema：名字带随机后缀，避免并发/残留互相影响。"""
-    return f"test_pgvector_{uuid.uuid4().hex[:10]}"
+def schema() -> Iterator[str]:
+    """每个用例一个独立 schema：名字带随机后缀，避免并发/残留互相影响。
+
+    `DROP` 放在**这个 fixture** 里而不是 `pg` 里：有些用例（显式引擎模式、幂等升级）
+    自己直接构造 `PgVectorStore`、不用 `pg`，清理写在 `pg` 里就会把它们建的 schema
+    永久留在 `pg_namespace` 里——下一眼看上去像真实数据。
+    """
+    name = f"test_pgvector_{uuid.uuid4().hex[:10]}"
+    try:
+        yield name
+    finally:
+        with psycopg.connect(_DSN, connect_timeout=5) as conn:
+            conn.execute(f'DROP SCHEMA IF EXISTS "{name}" CASCADE')
 
 
 @pytest.fixture
@@ -86,9 +111,9 @@ def pg(schema: str) -> Iterator[PgVectorStore]:
     try:
         yield store
     finally:
+        # 先关池再让 `schema` fixture 去 DROP：池里还挂着连接时删 schema 会把
+        # 那条连接上的后续操作变成"relation does not exist"。
         store.close()
-        with psycopg.connect(_DSN, connect_timeout=5) as conn:
-            conn.execute(f'DROP SCHEMA IF EXISTS "{schema}" CASCADE')
 
 
 def _seed_pg(store: PgVectorStore) -> None:
@@ -381,3 +406,305 @@ def test_schema_name_is_validated(pg: PgVectorStore) -> None:
 def test_store_protocol_is_satisfied(pg: PgVectorStore) -> None:
     """运行期也满足 `Store` 协议（下游有 `isinstance` 风格的用法）。"""
     assert isinstance(pg, Store)
+
+
+# ------------------------------------------------------------------ 父子两层
+_PARENT_MARKER = "zxqparentonly"
+"""只写进**父块**正文的标记词，子块正文里没有它。
+
+"父块不许进索引"这条契约需要一个可判定的证据：拿这个词查关键字路，命中就必须为空。
+父块正文里另外放一份与子块完全不同的句子，用来区分"取回来的是父块"和"取回来的是子块"。
+"""
+
+
+def _parent(doc_id: str, ordinal: int, body: str, n_children: int = 1) -> ParentInput:
+    return ParentInput(
+        parent_id=f"{doc_id}::p{ordinal:04d}",
+        doc_id=doc_id,
+        ordinal=ordinal,
+        title=doc_id,
+        breadcrumb="sec",
+        source_url=f"https://kubernetes.io/docs/{doc_id}/",
+        body=body,
+        n_chars=len(body),
+        content_hash=f"hp-{doc_id}-{ordinal}",
+        location=f"L{ordinal}",
+        n_children=n_children,
+    )
+
+
+def _make_parent_seed() -> tuple[list[DocInput], list[ChunkInput], dict[str, Vector], list[ParentInput]]:
+    """两篇文档 / 三个父块 / 四个子块；父块与子块正文**刻意完全不同**。
+
+    子块（进索引）：alpha 两段讲 kubelet 驱逐、一段讲 ResourceQuota，beta 一段讲退避；
+    父块（不进索引）：`alpha::p0000` 覆盖前两段子块，`alpha::p0001` 覆盖第三段，
+    `beta::p0000` 覆盖 beta 那段——所以"两个子块共享一个父块"与"不同父块互不串味"
+    两种情形都在同一批语料里。
+    """
+    specs = [
+        ("alpha", 0, "kubelet eviction hard threshold", 0, vec(a=1.0)),
+        ("alpha", 1, "kubelet eviction soft threshold", 0, vec(a=0.8, b=0.6)),
+        ("alpha", 2, "resourcequota namespace limitrange", 1, vec(a=0.6, c=0.8)),
+        ("beta", 0, "crashloopbackoff restart policy", 0, vec(b=1.0)),
+    ]
+    docs: dict[str, DocInput] = {}
+    chunks: list[ChunkInput] = []
+    vectors: dict[str, Vector] = {}
+    for doc_id, ordinal, body, parent_ordinal, vector in specs:
+        cid = f"{doc_id}::{ordinal:04d}"
+        pid = f"{doc_id}::p{parent_ordinal:04d}"
+        docs.setdefault(
+            doc_id,
+            DocInput(
+                doc_id=doc_id,
+                rel_path=f"{doc_id}.md",
+                title=doc_id,
+                source_url=f"https://kubernetes.io/docs/{doc_id}/",
+                content_hash=f"h-{doc_id}",
+            ),
+        )
+        chunks.append(
+            ChunkInput(
+                chunk_id=cid,
+                doc_id=doc_id,
+                ordinal=ordinal,
+                title=doc_id,
+                breadcrumb="sec",
+                source_url=f"https://kubernetes.io/docs/{doc_id}/",
+                body=body,
+                content_hash=f"h-{doc_id}-{ordinal}",
+                n_chars=len(body),
+                parent_id=pid,
+            )
+        )
+        vectors[cid] = vector
+    parents = [
+        _parent("alpha", 0, f"{_PARENT_MARKER} 这一整节讲 kubelet 驱逐的硬阈值与软阈值", n_children=2),
+        _parent("alpha", 1, f"{_PARENT_MARKER} 这一整节讲 ResourceQuota 与 LimitRange", n_children=1),
+        _parent("beta", 0, f"{_PARENT_MARKER} 这一整节讲 CrashLoopBackOff 的指数退避", n_children=1),
+    ]
+    return list(docs.values()), chunks, vectors, parents
+
+
+def _seed_parents(store: PgVectorStore) -> list[ParentInput]:
+    docs, chunks, vectors, parents = _make_parent_seed()
+    store.upsert_docs(docs, chunks, vectors, parents)
+    store.finalize()
+    return parents
+
+
+def _raw_count(schema: str, table: str, where: sql.SQL | None = None, params: tuple[object, ...] = ()) -> int:
+    """直接数库里的行——不经过 store 的方法，避免"用被测代码验证被测代码"。
+
+    表名同样交给 `sql.Identifier`：测试里的动态 SQL 也走驱动提供的引用规则，
+    免得"生产代码不许拼表名、测试里可以"变成一条没人遵守的双标。
+    """
+    query = sql.SQL("SELECT COUNT(*) FROM {}.{}").format(sql.Identifier(schema), sql.Identifier(table))
+    if where is not None:
+        query = query + sql.SQL(" ") + where
+    with psycopg.connect(_DSN, connect_timeout=5) as conn:
+        return int(conn.execute(query, params).fetchone()[0])
+
+
+def test_parent_text_is_returned_and_wins_context_text(pg: PgVectorStore) -> None:
+    """命中子块后必须带回**父块完整正文**，且 `context_text` 取父块而不是子块。
+
+    这条断言防的是"父子切割名存实亡"：父块写了却没人读回来，模型拿到的仍是 300 字的
+    子块——检索指标看不出来，生成质量却掉回切割前。
+    """
+    parents = _seed_parents(pg)
+    hit = pg.get_chunks(["alpha::0000"])["alpha::0000"]
+    want = next(p for p in parents if p.parent_id == "alpha::p0000")
+    assert hit.parent_id == "alpha::p0000"
+    assert hit.parent_text == want.body
+    assert hit.context_text == want.body, "context_text 必须是父块正文"
+    assert hit.body == "kubelet eviction hard threshold", "子块正文不能被父块覆盖"
+    assert len(hit.context_text) > len(hit.body)
+
+
+def test_multiple_hits_do_not_bleed_parent_text(pg: PgVectorStore) -> None:
+    """一次取回多个命中时，每个命中的 `parent_text` 必须是**自己那个**父块的正文。
+
+    这条断言防的是"父块串味"：批量取父块时把结果按位置错配（或干脆共用最后一条），
+    表现为答案引用了别的章节的内容——比取不到父块更难发现。
+    """
+    parents = _seed_parents(pg)
+    want = {p.parent_id: p.body for p in parents}
+    hits = pg.get_chunks(["alpha::0000", "alpha::0002", "beta::0000"])
+    assert hits["alpha::0000"].parent_id == "alpha::p0000"
+    assert hits["alpha::0002"].parent_id == "alpha::p0001"
+    assert hits["beta::0000"].parent_id == "beta::p0000"
+    for cid, hit in hits.items():
+        assert hit.parent_text == want[hit.parent_id], f"{cid} 的父块正文不是它自己的"
+    assert len({h.parent_text for h in hits.values()}) == 3, "三个命中应当来自三个不同的父块"
+    # 同一个父块被两个子块共享时，两条命中的父块正文必须相同
+    both = pg.get_chunks(["alpha::0000", "alpha::0001"])
+    assert both["alpha::0000"].parent_text == both["alpha::0001"].parent_text == want["alpha::p0000"]
+
+
+def test_missing_parent_falls_back_to_child_body(pg: PgVectorStore) -> None:
+    """`parents=None`（旧调用方）或父块行缺失时：`parent_text == ""` 且语境退回子块。
+
+    这条断言防的是"没有父块 = 喂给模型的上下文是空的"这种回归——那会让旧索引上的
+    每一个回答都凭空丢掉正文，而 `context_text` 的存在正是为了不让人直接用
+    `parent_text`。
+    """
+    _seed_parents(pg)
+    # 只重写 alpha，但**不提供父块**：子块的 parent_id 仍写着 alpha::p0000，库里却没有那行。
+    # （覆盖清理由 `docs` 驱动，所以这里必须照 ingest 的做法把该篇的 DocInput 一起传——
+    # 传空的 docs 会变成"往已有块上再插一遍"，那是调用方的用法错误，不是被覆盖语义。）
+    docs, chunks, vectors, _ = _make_parent_seed()
+    alpha_docs = [d for d in docs if d.doc_id == "alpha"]
+    alpha = [c for c in chunks if c.doc_id == "alpha"]
+    pg.upsert_docs(alpha_docs, alpha, {c.chunk_id: vectors[c.chunk_id] for c in alpha}, None)
+    pg.finalize()
+
+    hit = pg.get_chunks(["alpha::0000"])["alpha::0000"]
+    assert hit.parent_id == "alpha::p0000", "子块仍记得自己的父块 id（只是那行不存在）"
+    assert hit.parent_text == ""
+    assert hit.context_text == hit.body == "kubelet eviction hard threshold"
+
+    # 完全没有父块的老式语料（parent_id 为空串）走同一条退路
+    seed = make_seed()
+    pg.upsert_docs(seed.docs, seed.chunks, seed.vectors)
+    pg.finalize()
+    legacy = pg.get_chunks(["gamma::0000"])["gamma::0000"]
+    assert legacy.parent_id == "" and legacy.parent_text == ""
+    assert legacy.context_text == legacy.body
+
+
+def test_second_upsert_leaves_no_stale_parents(pg: PgVectorStore) -> None:
+    """同一篇二次 upsert 后，旧父块必须整批消失，同 id 的父块正文要被新正文替换。
+
+    这条断言防的是"覆盖语义只覆盖子块"：旧父块留在库里时，子块的 parent_id 会取回
+    **上一版**的语境，答案里出现已经不存在的段落，且 `n_parents` 一路虚高。
+    """
+    _seed_parents(pg)
+    assert pg.stats().n_parents == 3
+
+    docs, chunks, vectors, _ = _make_parent_seed()
+    alpha_docs = [d for d in docs if d.doc_id == "alpha"]
+    alpha = [c for c in chunks if c.doc_id == "alpha"]  # parent_id 仍指向 p0000 与 p0001
+    new_p0 = _parent("alpha", 0, f"{_PARENT_MARKER} 改写后的 alpha 小节", n_children=2)
+    pg.upsert_docs(alpha_docs, alpha, {c.chunk_id: vectors[c.chunk_id] for c in alpha}, [new_p0])
+    pg.finalize()
+
+    assert _raw_count(pg.schema, "parents", sql.SQL("WHERE doc_id = %s"), ("alpha",)) == 1, "旧父块必须被清掉"
+    assert pg.stats().n_parents == 2, "只剩 alpha 的新 p0000 与 beta 的 p0000"
+    rewritten = pg.get_chunks(["alpha::0000"])["alpha::0000"]
+    assert rewritten.parent_text == new_p0.body, "同 id 的父块必须被新正文替换"
+    orphan = pg.get_chunks(["alpha::0002"])["alpha::0002"]
+    assert orphan.parent_id == "alpha::p0001" and orphan.parent_text == ""
+    assert orphan.context_text == orphan.body
+
+
+def test_delete_docs_removes_parents_too(pg: PgVectorStore) -> None:
+    """删一篇文档时它的父块一起删；别的文档的父块不受影响，返回语义仍是块数。
+
+    这条断言防的是"父块成了删不掉的孤儿"：`chunks` 靠外键级联，而父块表如果没有显式
+    删除就会永远留着——重建/删除同步之后 `n_parents` 只增不减。
+    """
+    _seed_parents(pg)
+    removed = pg.delete_docs({"alpha.md"})
+    pg.finalize()
+    assert removed == 3, "返回的仍是删掉的**块数**（alpha 有 3 个子块）"
+    assert _raw_count(pg.schema, "parents", sql.SQL("WHERE doc_id = %s"), ("alpha",)) == 0
+    assert pg.stats().n_parents == 1 and pg.stats().n_chunks == 1
+    survivor = pg.get_chunks(["beta::0000"])["beta::0000"]
+    assert survivor.parent_text.startswith(_PARENT_MARKER), "别的文档的父块不能被误删"
+
+
+def test_stats_counts_parents_separately(pg: PgVectorStore) -> None:
+    """`stats().n_parents` 必须是真实读数，且与 `n_chunks` 是**两个**数。
+
+    这条断言防的是"体检把父块数糊成 0 或等于块数"：父子切割之后"几段语境"和"几个检索
+    单位"应当分别可见，糊在一起就看不出父块有没有真的写进去。
+    """
+    assert pg.stats().n_parents == 0 and pg.stats().n_chunks == 0
+    _seed_parents(pg)
+    st = pg.stats()
+    assert (st.n_docs, st.n_chunks, st.n_parents) == (2, 4, 3)
+    assert _raw_count(pg.schema, "parents") == 3
+
+
+def test_searches_only_return_child_chunks(pg: PgVectorStore) -> None:
+    """检索结果的 id 只可能是子块：父块不进 BM25、也没有向量。
+
+    这条断言防的是"父块混进检索结果"：父块没有向量，一旦混进向量路就是拿 NULL/0 参与
+    排序；而父块进了关键字路会以极长的正文压住真正的子块命中。
+    """
+    _seed_parents(pg)
+    child_ids = {c.chunk_id for c in _make_parent_seed()[1]}
+    parent_ids = {p.parent_id for p in _make_parent_seed()[3]}
+
+    dense = [cid for cid, _ in pg.dense_search(vec(a=1.0), 20)]
+    assert set(dense) == child_ids, "向量路只能回子块，且必须回全"
+    assert not (set(dense) & parent_ids)
+
+    assert pg.keyword_search(_PARENT_MARKER, 5) == [], "父块正文不许进 BM25 索引"
+    assert {cid for cid, _ in pg.keyword_search("kubelet", 5)} == {"alpha::0000", "alpha::0001"}
+    # 父块表压根没有可检索字段：把"不出现在结果里"钉在 schema 上，而不是靠查询自觉
+    with psycopg.connect(_DSN, connect_timeout=5) as conn:
+        cols = {
+            r[0]
+            for r in conn.execute(
+                "SELECT column_name FROM information_schema.columns "
+                "WHERE table_schema = %s AND table_name = 'parents'",
+                (pg.schema,),
+            )
+        }
+    assert not ({"embedding", "tsv", "body_normalized"} & cols), f"父块表不该有检索字段：{cols}"
+
+
+def test_ensure_schema_is_idempotent_and_upgrades_legacy(schema: str) -> None:
+    """`ensure_schema()` 反复调用不许抛；老库（没有 `parent_id` / `parents` 表）必须能原地升级。
+
+    这条断言防的是"升级要丢库重建"：老库在打开时被元信息闸门或 ALTER 写法直接拒绝，
+    或 `parents` 表的 `CREATE/ALTER` 只在全新库上幂等、第二次调用就报"已存在"。
+    """
+    kwargs = {
+        "schema": schema,
+        "dim": DIM,
+        "embedding_model": "hashing-test",
+        "domain": schema,
+        "pool_min": 1,
+        "pool_max": 2,
+    }
+    first = PgVectorStore(_DSN, **kwargs)
+    try:
+        _seed_parents(first)
+    finally:
+        first.close()
+
+    # 第二次打开同一 schema：CREATE TABLE / ALTER / CREATE INDEX 全部再跑一遍，不许抛
+    second = PgVectorStore(_DSN, **kwargs)
+    try:
+        assert second.stats().n_parents == 3, "幂等重开不许丢数据，也不许重复插入"
+    finally:
+        second.close()
+
+    # 把库倒回**父子切割之前**的样子：没有 parents 表、chunks 里没有 parent_id 列
+    with psycopg.connect(_DSN, connect_timeout=5) as conn:
+        conn.execute(f'ALTER TABLE "{schema}".chunks DROP COLUMN parent_id')
+        conn.execute(f'DROP TABLE "{schema}".parents')
+
+    upgraded = PgVectorStore(_DSN, **kwargs)
+    try:
+        with psycopg.connect(_DSN, connect_timeout=5) as conn:
+            col = conn.execute(
+                "SELECT 1 FROM information_schema.columns WHERE table_schema = %s "
+                "AND table_name = 'chunks' AND column_name = 'parent_id'",
+                (schema,),
+            ).fetchone()
+            table = conn.execute(
+                "SELECT 1 FROM pg_tables WHERE schemaname = %s AND tablename = 'parents'", (schema,)
+            ).fetchone()
+        assert col is not None, "老库必须被就地补上 chunks.parent_id 列"
+        assert table is not None, "老库必须被就地建出 parents 表"
+        assert _raw_count(schema, "parents") == 0, "升级不许凭空造父块"
+        hit = upgraded.get_chunks(["alpha::0000"])["alpha::0000"]
+        assert hit.parent_id == "" and hit.parent_text == "", "老行的 parent_id 落到空串"
+        assert hit.context_text == hit.body, "老库升级后语境必须退回子块正文"
+        assert upgraded.stats().n_parents == 0 and upgraded.stats().n_chunks == 4, "升级不许丢老数据"
+    finally:
+        upgraded.close()

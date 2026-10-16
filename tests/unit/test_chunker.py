@@ -103,10 +103,29 @@ def test_超长正文按段落切且带重叠():
     )
 
 
-def test_过短碎片并入前一块():
+def test_过短小节自成一个父块而不是并进上一节():
+    """父子切割下的取舍：**短碎片不跨小节合并**。
+
+    旧行为是把过短的小节并进前一个块。那个动作会把「### 小节」下的字挂到「## 章」的
+    面包屑上，于是引用指向的位置是错的——引用可追溯是本项目的硬要求，所以现在宁可让
+    它自成一个（很短但归属正确的）父块与子块。
+
+    短碎片在**同一个父块内部**仍然会合并（`min_chars` 依然生效），见下一条断言。
+    """
     doc = "## 章\n\n" + ("正文" * 200) + "\n\n### 小节\n\n短\n"
     chunks = chunk_document("concepts/m.md", doc, max_chars=2000, min_chars=50)
-    assert len(chunks) == 1, "过短小节应被并入前一块，而不是单独成块污染检索"
+    assert len(chunks) == 2, "两个小节应当各自成块，且各自的归属正确"
+    assert chunks[0].breadcrumb == ["章"]
+    assert chunks[1].breadcrumb == ["章", "小节"], "短小节必须保留自己的面包屑，不能被挂到上一节"
+    assert chunks[0].parent_id != chunks[1].parent_id, "不同小节属于不同父块"
+
+
+def test_同父块内的过短碎片仍然合并():
+    """`min_chars` 的语义收窄为"同一个父块内部"：小节内的小碎片照样并进前一段。"""
+    doc = "## 章\n\n" + ("正文" * 60) + "\n\n短\n"
+    chunks = chunk_document("concepts/m.md", doc, max_chars=2000, min_chars=50)
+    assert len(chunks) == 1
+    assert "短" in chunks[0].text
 
 
 def test_chunk_id稳定且内容指纹随内容变化():

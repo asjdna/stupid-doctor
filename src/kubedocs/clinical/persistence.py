@@ -384,13 +384,19 @@ class PgPersistence:
         不属于 `ClinicalStore` 协议：计数是运维读数，不是产品能力。
         """
         # 每条语句写死而不是循环拼表名：动态 SQL 的注入面为 0，也不与静态检查较劲。
+        # `_count_one` 把 "fetchone() 可能是 None" 收在一处：`COUNT(*)` 不可能没有行，
+        # 但类型上 `fetchone()` 是可空的，直接下标会是一条真实的类型错误。
         with self._pool.connection() as conn:
             return {
-                "patients": int(conn.execute(self._q("SELECT COUNT(*) FROM {patients}")).fetchone()[0]),
-                "encounters": int(conn.execute(self._q("SELECT COUNT(*) FROM {encounters}")).fetchone()[0]),
-                "messages": int(conn.execute(self._q("SELECT COUNT(*) FROM {messages}")).fetchone()[0]),
-                "bookings": int(conn.execute(self._q("SELECT COUNT(*) FROM {bookings}")).fetchone()[0]),
+                "patients": self._count_one(conn, "SELECT COUNT(*) FROM {patients}"),
+                "encounters": self._count_one(conn, "SELECT COUNT(*) FROM {encounters}"),
+                "messages": self._count_one(conn, "SELECT COUNT(*) FROM {messages}"),
+                "bookings": self._count_one(conn, "SELECT COUNT(*) FROM {bookings}"),
             }
+
+    def _count_one(self, conn: Any, query: str) -> int:
+        row = conn.execute(self._q(query)).fetchone()
+        return int(row[0]) if row is not None else 0
 
     def close(self) -> None:
         """关掉连接池（进程退出、测试里模拟"重启"）。关掉后本对象不可再用。"""

@@ -30,7 +30,22 @@ def _corpus(tmp_path: Path) -> Path:
 
 
 def _args(tmp_path: Path, *rest: str) -> list[str]:
-    return ["--provider", "hashing", "--index-dir", str(tmp_path / "index"), *rest]
+    """CLI 参数基线：**显式指定本地后端**。
+
+    `--index-dir` 只对本地后端有意义：`pgvector` 的索引在 Postgres 的 schema 里，
+    目录参数对它没有作用。默认后端是 `pgvector`，所以这些用例如果不写
+    `--store sqlite-vec`，就会连到真实的 Postgres 去读真实索引——测试于是既不是
+    隔离的、结果也取决于那台机器上有什么。要测 pgvector 的用例自己显式传 store。
+    """
+    return [
+        "--store",
+        "sqlite-vec",
+        "--provider",
+        "hashing",
+        "--index-dir",
+        str(tmp_path / "index"),
+        *rest,
+    ]
 
 
 def _ingest(tmp_path: Path, corpus: Path) -> int:
@@ -56,6 +71,8 @@ class TestGlobalArgs:
                 "ingest",
                 "--batch-files",
                 "10",
+                "--store",
+                "sqlite-vec",
                 "--provider",
                 "hashing",
                 "--index-dir",
@@ -73,12 +90,38 @@ class TestGlobalArgs:
         corpus = _corpus(tmp_path)
         index = tmp_path / "index"
         assert (
-            main(["ingest", "--index-dir", str(index), "--provider", "hashing", "--corpus-dir", str(corpus)])
+            main(
+                [
+                    "ingest",
+                    "--store",
+                    "sqlite-vec",
+                    "--index-dir",
+                    str(index),
+                    "--provider",
+                    "hashing",
+                    "--corpus-dir",
+                    str(corpus),
+                ]
+            )
             == EXIT_OK
         )
         assert (index / "k8s_docs" / "kubedocs.db").exists()
         # 索引确实建在指定目录 -> 用该目录能查到
-        assert main(["--index-dir", str(index), "--provider", "hashing", "stats", "--json"]) == EXIT_OK
+        assert (
+            main(
+                [
+                    "--store",
+                    "sqlite-vec",
+                    "--index-dir",
+                    str(index),
+                    "--provider",
+                    "hashing",
+                    "stats",
+                    "--json",
+                ]
+            )
+            == EXIT_OK
+        )
 
     def test_missing_subcommand_is_an_error(self):
         with pytest.raises(SystemExit) as e:
@@ -247,6 +290,9 @@ class TestStatsVerifyCallsTheVectorChecker:
             class _S:
                 n_docs = 1
                 n_chunks = 1
+                # 父子切割之后"块数"与"父块数"是两个数，stats 两个都要读；
+                # 这个替身缺字段会让 `kubedocs stats` 直接 AttributeError。
+                n_parents = 1
                 mean_chars = 10.0
                 n_with_code = 0
                 embedding_model = "fake"
