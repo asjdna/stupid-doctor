@@ -267,3 +267,35 @@ def gate_failures(
         )
         fails.extend(f"  未命中: {m}" for m in report.triage_missed[:10])
     return fails
+
+
+def redline_gate_failures(
+    report: ClinicReport, *, fp_limit: float = DEFAULT_FALSE_POSITIVE_LIMIT
+) -> list[str]:
+    """**只判红线**的闸门：规则臂作为"线索提供者"时的口径。
+
+    与 `gate_failures()` 的差别只有一处——**不看分诊**。判断权已经交给大模型
+    （见 `clinical/reference.py` 的分工表），规则臂给出的科室票数只剩"线索质量"的含义：
+    拿它卡门限等于用错尺子，规则臂的分诊数字因此**只报不卡**。
+
+    红线不同：它是喂给模型的**最高优先级线索**，漏一条照样是回归，所以召回仍然
+    100%、零容差，"未评测"也仍然算失败（空集不得满足安全闸门）。
+
+    为什么把红线判据抄一遍而不是改 `gate_failures()`：那条闸门是**历史口径**，
+    行为被单测逐条钉住（`tests/unit/test_clinic_eval.py`），不能有丝毫移动。
+    两段判据必须**同步修改**——`gate_failures()` 里那一段是本函数的镜像。
+    """
+    fails: list[str] = []
+    recall = report.redline_recall
+    if recall is None:
+        fails.append(
+            "红线未评测（用例集里没有任何 `expect_red_line` 用例）："
+            "没测不等于测了没问题——若把它当通过，删掉红线用例就成了让闸门变绿的手段"
+        )
+    elif report.redline_fn:
+        fails.append(f"红线漏报 {report.redline_fn} 条（召回 {recall:.2%}）——安全属性要求 100%，容差为 0")
+        fails.extend(f"  漏: {m}" for m in report.missed[:10])
+    if report.redline_false_positive_rate > fp_limit:
+        fails.append(f"红线误报率 {report.redline_false_positive_rate:.2%} 超过上限 {fp_limit:.0%}")
+        fails.extend(f"  误报: {m}" for m in report.false_alarms[:10])
+    return fails
