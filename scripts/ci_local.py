@@ -179,15 +179,20 @@ def job_gate(*, hf_offline: bool) -> None:
 
     真实索引已存在，所以只跑"预检 + 闸门"两步。**只读**，不重建索引。
 
-    **钉住本地后端**：闸门要能在没有 Docker / 没有 Postgres 的机器上复现，而且它比的是
-    `data/index/` 那份本地索引与冻结基线——换成默认的 pgvector 就变成"比另一份索引、
-    还依赖一个容器"。pgvector 那条路有专门的单测覆盖（`tests/unit/test_pgvector_store.py`）。
+    **按配置的后端读索引，不钉本地后端**：基线是按**某一份具体索引**冻结的
+    （`corpus_sha` 把"文档 + 每篇块数"连同嵌入模型一起钉进基线），所以闸门必须读基线
+    对应的那一份。产品默认跑在 pgvector 上，闸门就该守那一份——钉成 `sqlite-vec` 就变成
+    "守着一份产品不用的索引"，指标再漂亮也说明不了线上质量。
+
+    代价：这一 job 需要配置里的向量库可达（默认是 Postgres）。数据库不可达时它会在预检
+    阶段**响亮失败并说明原因**，而不是静默换一份索引去比——那会让基线彻底失去意义。
+    想在完全离线（无数据库）的机器上守质量，就先用 `KUBEDOCS_STORE=sqlite-vec` 重建本地
+    索引、再按它冻结基线（`eval --write-baseline`）。
     """
     _banner("job: gate —— 真实模型 + 冻结基线（指标退化就红）")
     flag = ["--hf-offline"] if hf_offline else []
-    env = {"KUBEDOCS_STORE": "sqlite-vec"}
-    _run(_py("scripts/check_gold.py"), env=env)
-    _run(_py("-m", "kubedocs.cli", *flag, "eval", "--top-k", "10", "--gate"), env=env)
+    _run(_py("scripts/check_gold.py"))
+    _run(_py("-m", "kubedocs.cli", *flag, "eval", "--top-k", "10", "--gate"))
 
 
 def main(argv: list[str] | None = None) -> int:
