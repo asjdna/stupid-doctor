@@ -13,13 +13,15 @@ title kubedocs 一键启动
 rem ===========================================================================
 rem  kubedocs 一键启动（Windows）
 rem
-rem  双击本文件即可：找到/起好服务 -> 等服务真的健康 -> 自动打开控制台页面。
+rem  双击本文件即可：找到/起好服务 -> 等服务真的健康 -> 自动打开落地页。
+rem  落地页按域定：clinic（默认）是问诊页 /consult，其它域是控制台 /console。
 rem  起服务的那个窗口就是它的控制台，日志直接打在这里；Ctrl+C 或关窗口即停止。
 rem  不写日志文件、不装任何东西、不碰 C 盘。
 rem
 rem  可选参数（不传就是"一键"的默认形态）：
-rem    start.cmd --domain clinic      换域（默认 k8s_docs）
-rem    start.cmd --port 9000          指定端口（默认从 8080 起找第一个空闲的）
+rem    start.cmd --domain clinic      换域（默认 clinic：医疗问诊）
+rem    start.cmd --domain k8s_docs    换到 K8s 文档域
+rem    start.cmd --port 9000          指定端口（默认从 8000 起找第一个空闲的）
 rem    start.cmd --host 0.0.0.0       换监听地址（默认 127.0.0.1，只给本机用）
 rem    start.cmd --no-browser         不自动开浏览器
 rem    start.cmd --online             不用 --hf-offline（默认离线，见下方说明）
@@ -82,7 +84,9 @@ shift
 goto parse
 
 :parsed
-if "%DOMAIN%"=="" set "DOMAIN=k8s_docs"
+if "%DOMAIN%"=="" set "DOMAIN=clinic"
+set "PAGE=/console"
+if /i "%DOMAIN%"=="clinic" set "PAGE=/consult"
 if "%WANTHOST%"=="" set "WANTHOST=127.0.0.1"
 
 echo.
@@ -123,11 +127,10 @@ echo.
 goto pick
 
 rem ---- 挑端口 ----------------------------------------------------------------
-rem  8080 常常被别的容器/服务占着（本项目自己的 docker compose 就会占），
-rem  所以默认不是"报错"而是"往后找"，直到 8099。
+rem  8000 是本机约定端口；被别的程序占着时不是"报错"而是"往后找"，直到 8019。
 :pick
 if not "%WANTPORT%"=="" goto have_port
-set /a P=8080
+set /a P=8000
 :pick_loop
 netstat -ano -p tcp | findstr /R /C:":%P% " | findstr /I "LISTENING" >nul 2>&1
 if not errorlevel 1 goto pick_busy
@@ -136,7 +139,7 @@ goto have_port
 :pick_busy
 echo   [信息] 端口 %P% 已被占用，试下一个。
 set /a P+=1
-if %P% GTR 8099 goto no_port
+if %P% GTR 8019 goto no_port
 goto pick_loop
 
 :have_port
@@ -146,17 +149,18 @@ if "%WANTPORT%"=="" goto start_it
 set "PORT=%WANTPORT%"
 :start_it
 
-echo   控制台  http://127.0.0.1:%PORT%/console      ^<-- 建议用这个（体检/指标/诊断）
+echo   控制台  http://127.0.0.1:%PORT%/console
 echo   演示页  http://127.0.0.1:%PORT%/
 echo   接口文档 http://127.0.0.1:%PORT%/docs
 echo   ---------------------------------------------------------------
+echo   打开页面：http://127.0.0.1:%PORT%%PAGE%
 echo   停止服务：在这个窗口按 Ctrl+C
 echo.
 
 rem ---- 叫醒"等待并开页面"的帮手 ---------------------------------------------
 rem  用 /b：不另开窗口，和服务的日志共用这一个窗口。/b 的进程随本窗口一起结束。
 rem  帮手模式自己一行都不输出，所以这里不需要重定向。
-if not "%NOBROWSER%"=="1" start "" /b cmd /c ""%~f0" --wait-open %PORT%
+if not "%NOBROWSER%"=="1" start "" /b cmd /c ""%~f0" --wait-open %PORT% %PAGE%
 
 rem ---- 前台跑服务 ------------------------------------------------------------
 rem  前台而不是后台：Ctrl+C 和关窗口都能真的停掉它，不会留下一个孤儿进程
@@ -183,29 +187,29 @@ echo.
 echo   已经在 %FOUND_PORT% 上跑着一个 kubedocs 服务 —— 直接用它，不再另起一个。
 echo     控制台  http://127.0.0.1:%FOUND_PORT%/console
 echo     演示页  http://127.0.0.1:%FOUND_PORT%/
+echo     将打开  http://127.0.0.1:%FOUND_PORT%%PAGE%
 echo.
 echo   想强制另起一个本地实例：start.cmd --force
 echo.
 if "%NOBROWSER%"=="1" goto bye_ok
-start "" "http://127.0.0.1:%FOUND_PORT%/console"
+start "" "http://127.0.0.1:%FOUND_PORT%%PAGE%"
 :bye_ok
 set "RC=0"
 goto bye
 
-rem  探 8080：上面已经有 kubedocs 就返回 0，并把端口放进 FOUND_PORT。
-rem  探 8080：上面已经有**可用**的 kubedocs 才返回 0，并把端口放进 FOUND_PORT。
+rem  探 8000：上面已经有**可用**的 kubedocs 才返回 0，并把端口放进 FOUND_PORT。
 rem  两个条件缺一不可：
 rem    1) /healthz 的 JSON 里有 n_chunks —— 确认这是我们自己的服务，而不是别的
-rem       程序碰巧占着 8080；
+rem       程序碰巧占着 8000；
 rem    2) n_chunks 必须**非零** —— 实测踩到过：容器在跑、但它的 pgvector 后端是
 rem       空表（KUBEDOCS_DATABASE_URL 指向一个刚建好、还没灌数据的库），于是
 rem       /healthz 返回 n_chunks:0。这种实例"活着但什么也搜不到"，附着上去比
 rem       另起一个本地实例更糟——所以要求索引非空才算可用。
 :probe_first
 set "FOUND_PORT="
-call :probe 8080
+call :probe 8000
 if errorlevel 1 exit /b 1
-set "FOUND_PORT=8080"
+set "FOUND_PORT=8000"
 exit /b 0
 
 :probe
@@ -213,10 +217,12 @@ curl -s --max-time 2 "http://127.0.0.1:%~1/healthz" | findstr /R /C:"n_chunks.: 
 exit /b %ERRORLEVEL%
 
 rem ===========================================================================
-rem  帮手模式：等服务健康后打开控制台页面
+rem  帮手模式：等服务健康后打开落地页（clinic 域是 /consult，其余是 /console）
 rem ===========================================================================
 :wait_open
 set "WPORT=%~2"
+set "WPAGE=%~3"
+if "%WPAGE%"=="" set "WPAGE=/console"
 set /a TRIES=0
 where curl >nul 2>&1
 if errorlevel 1 goto wo_sleepy
@@ -237,7 +243,7 @@ call :sleep
 goto wo_sleepy
 
 :wo_open
-start "" "http://127.0.0.1:%WPORT%/console"
+start "" "http://127.0.0.1:%WPORT%%WPAGE%"
 endlocal & exit /b 0
 
 rem  一直没健康起来：安静退出。服务自己的报错在**主窗口**里，那才是该看的地方；
@@ -275,7 +281,7 @@ goto bye
 :no_port
 set "RC=3"
 echo.
-echo   [错误] 8080-8099 全被占用。用 --port 指定一个别的端口。
+echo   [错误] 8000-8019 全被占用。用 --port 指定一个别的端口。
 echo.
 pause
 goto bye
