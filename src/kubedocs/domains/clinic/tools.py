@@ -23,6 +23,7 @@
 
 from __future__ import annotations
 
+import datetime as dt
 from typing import Any
 
 from kubedocs.agent.tools import (
@@ -42,6 +43,33 @@ from kubedocs.domains.clinic.provider import BookingError
 DOMAIN = "clinic"
 
 MISSING_PATIENT = "缺少就诊人标识：本次会话没有拿到 patient_id，无法查/建这个人的挂号单。"
+
+_RELATIVE_DAYS = {
+    "今天": 0,
+    "今日": 0,
+    "明天": 1,
+    "明日": 1,
+    "后天": 2,
+    "大后天": 3,
+}
+"""模型最常原样传下来的几个相对日期。
+
+为什么必须在这一层收口：`date` 的说明写的是"YYYY-MM-DD，留空表示今天"，但患者说的是
+"明天上午方便吗"，而**模型几乎必然把「明天」原样传下来**（实测如此）。号源层对日期格式
+是严格校验的，于是这一次工具调用失败、整轮挂号提议不会发生——界面上只看到"模型没提议
+挂号"，原因藏在工具结果里。
+
+只认这几个词，**不做通用中文日期解析**：不假装能懂"下周三"这类表述。那种情况交给号源层
+回一句人话（"date 必须是 YYYY-MM-DD"），比猜错一个日期、给患者挂错天要好得多。
+"""
+
+
+def _normalize_date(value: object) -> str:
+    """相对日期 -> `YYYY-MM-DD`；其余原样返回（由号源层校验并给出可读错误）。"""
+    text = str(value or "").strip()
+    if text in _RELATIVE_DAYS:
+        return (dt.date.today() + dt.timedelta(days=_RELATIVE_DAYS[text])).isoformat()
+    return text
 
 
 def _patient_id(kwargs: dict[str, Any]) -> str:
@@ -91,7 +119,7 @@ def make_list_departments_tool(service: BookingService) -> ToolSpec:
 def make_availability_tool(service: BookingService) -> ToolSpec:
     def _run(**kwargs: Any) -> dict[str, Any]:
         department = str(kwargs.get("department", "") or "")
-        date = str(kwargs.get("date", "") or "") or None
+        date = _normalize_date(kwargs.get("date")) or None
         try:
             avail = service.availability(department, date)
         except BookingError as e:
@@ -147,7 +175,7 @@ def make_propose_booking_tool(service: BookingService, pending: PendingBookings)
     def _run(**kwargs: Any) -> dict[str, Any]:
         pid = _patient_id(kwargs)
         department = str(kwargs.get("department", "") or "")
-        date = str(kwargs.get("date", "") or "")
+        date = _normalize_date(kwargs.get("date"))
         slot = str(kwargs.get("time_slot", "") or "")
         name = str(kwargs.get("patient_name", "") or "")
         try:
@@ -228,7 +256,7 @@ def make_book_tool(service: BookingService) -> ToolSpec:
 
     def _run(**kwargs: Any) -> dict[str, Any]:
         department = str(kwargs.get("department", "") or "")
-        date = str(kwargs.get("date", "") or "") or None
+        date = _normalize_date(kwargs.get("date")) or None
         slot = str(kwargs.get("time_slot", "") or "") or None
         patient_id = _patient_id(kwargs)
         try:
@@ -255,8 +283,9 @@ def make_book_tool(service: BookingService) -> ToolSpec:
 def clinic_tools(service: BookingService, pending: PendingBookings | None = None) -> list[ToolSpec]:
     """clinic 域的全部工具（按注册顺序）。
 
-    `pending` 为 `None` 时**不注册** `propose_booking`：没有待确认单存储时，那张单子
-    无处安放，注册一个必然失败的提议工具只会让模型反复重试。
+        `pending` 为
+    one` 时**不注册** `propose_booking`：没有待确认单存储时，那张单子
+        无处安放，注册一个必然失败的提议工具只会让模型反复重试。
     """
     tools = [
         make_list_departments_tool(service),

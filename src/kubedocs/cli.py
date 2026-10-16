@@ -406,7 +406,7 @@ def cmd_serve(args: argparse.Namespace) -> int:
     host = args.host or "127.0.0.1"
     port = int(args.port or settings.api_port)
     print(f"服务地址：http://{host}:{port}")
-    print(f"域：{settings.domain}    索引：{settings.sqlite_path}")
+    print(f"域：{settings.domain}    向量库：{settings.store} @ {_index_label(settings)}")
     print(
         f"可观测：日志级别 {settings.log_level}／指标 /metrics／"
         f"OTel {settings.otel_exporter if tracer else '未启用'}"

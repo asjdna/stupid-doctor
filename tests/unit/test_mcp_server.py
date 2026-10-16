@@ -80,14 +80,26 @@ def _text(result: Any) -> str:
     return str(result.content[0].text)
 
 
+def _mock_booking() -> Any:
+    """进程内号源服务：**这一组用例不碰真实号源库**。
+
+    默认装配会连 Postgres 号源，于是"取号"这条用例会真的占掉真实库存——某天某个时段
+    被占满之后，它就会以"号源已满"的形式变红，而它验的其实只是协议形状。
+    """
+    from kubedocs.domains.clinic.booking import BookingService
+    from kubedocs.domains.clinic.mock import MockAppointmentProvider
+
+    return BookingService(MockAppointmentProvider())
+
+
 class TestMcpToolExposure:
     def test_read_only_tools_are_listed(self) -> None:
-        names = {t.name for t in _list(build_server("clinic"))}
+        names = {t.name for t in _list(build_server("clinic", booking_service=_mock_booking()))}
         assert {"list_departments", "get_availability"}.issubset(names), names
 
     def test_rag_tools_are_exposed(self, fake_retriever: Any) -> None:
         """**RAG 工具真的在清单里**：只有号源三件套的 MCP 没有价值。"""
-        names = {t.name for t in _list(build_server("clinic"))}
+        names = {t.name for t in _list(build_server("clinic", booking_service=_mock_booking()))}
         assert {"list_departments", "search_docs", "check_citations"}.issubset(names), names
 
     def test_k8s_docs_domain_is_supported(self, fake_retriever: Any) -> None:
@@ -106,11 +118,14 @@ class TestMcpToolExposure:
 
     def test_side_effect_tools_are_hidden_by_default(self) -> None:
         """**安全边界**：挂号会真的占号，默认不暴露。"""
-        names = {t.name for t in _list(build_server("clinic"))}
+        names = {t.name for t in _list(build_server("clinic", booking_service=_mock_booking()))}
         assert "book_appointment" not in names, "默认就暴露了有副作用的工具"
 
     def test_side_effect_tools_require_an_explicit_flag(self) -> None:
-        tools = {t.name: t for t in _list(build_server("clinic", allow_side_effects=True))}
+        tools = {
+            t.name: t
+            for t in _list(build_server("clinic", allow_side_effects=True, booking_service=_mock_booking()))
+        }
         assert "book_appointment" in tools
         schema = tools["book_appointment"].inputSchema
         assert "confirm" in (schema.get("required") or []), "开了副作用也要强制 confirm 字段"
@@ -118,7 +133,7 @@ class TestMcpToolExposure:
 
     def test_schema_comes_from_the_registry(self) -> None:
         """工具定义必须来自 `ToolRegistry`，不是这里另写的一份。"""
-        server = build_server("clinic")
+        server = build_server("clinic", booking_service=_mock_booking())
         spec = ToolRegistry.get("list_departments")
         tool = {t.name: t for t in _list(server)}["list_departments"]
         assert tool.inputSchema == spec.params.model_json_schema()
@@ -126,7 +141,7 @@ class TestMcpToolExposure:
 
 class TestMcpCalls:
     def test_read_only_call_works(self) -> None:
-        result = _call(build_server("clinic"), "list_departments", {})
+        result = _call(build_server("clinic", booking_service=_mock_booking()), "list_departments", {})
         assert result.isError is False
         assert "科室" in _text(result) or "内科" in _text(result)
 
@@ -163,20 +178,24 @@ class TestMcpCalls:
         assert "ingest" in text, "失败说明里要给出该跑哪条命令"
 
     def test_unknown_tool_is_a_readable_error(self) -> None:
-        result = _call(build_server("clinic"), "no_such_tool", {})
+        result = _call(build_server("clinic", booking_service=_mock_booking()), "no_such_tool", {})
         assert result.isError is True
         assert "没有名为" in _text(result)
 
     def test_hidden_side_effect_tool_is_refused_even_if_called(self) -> None:
         """**不列出 ≠ 拒绝**：直接点名调用也必须被挡住。"""
-        result = _call(build_server("clinic"), "book_appointment", {"department": "内科"})
+        result = _call(
+            build_server("clinic", booking_service=_mock_booking()),
+            "book_appointment",
+            {"department": "内科"},
+        )
         assert result.isError is True
         assert "副作用" in _text(result)
 
     def test_side_effect_missing_confirm_is_rejected(self) -> None:
         """开了 `--allow-side-effects` 也还不够：`confirm` 缺失一律拒绝。"""
         result = _call(
-            build_server("clinic", allow_side_effects=True),
+            build_server("clinic", allow_side_effects=True, booking_service=_mock_booking()),
             "book_appointment",
             {"department": "内科"},
         )
@@ -186,7 +205,7 @@ class TestMcpCalls:
     def test_side_effect_with_confirm_false_is_refused_with_reason(self) -> None:
         """显式传 `confirm=false` 时**必须给出可读的理由**。"""
         result = _call(
-            build_server("clinic", allow_side_effects=True),
+            build_server("clinic", allow_side_effects=True, booking_service=_mock_booking()),
             "book_appointment",
             {"department": "内科", "confirm": False},
         )
@@ -196,7 +215,7 @@ class TestMcpCalls:
     def test_side_effect_with_confirm_true_executes(self) -> None:
         """开了开关 + 显式 `confirm=true` 才真的执行（这条路径必须仍然可用）。"""
         result = _call(
-            build_server("clinic", allow_side_effects=True),
+            build_server("clinic", allow_side_effects=True, booking_service=_mock_booking()),
             "book_appointment",
             {"department": "心内科", "time_slot": "上午", "confirm": True},
         )
@@ -205,7 +224,9 @@ class TestMcpCalls:
 
     def test_bad_arguments_are_rejected_by_pydantic(self) -> None:
         """参数校验必须走与 agent 内部同一条 pydantic 路径（MCP 不是绕过校验的后门）。"""
-        result = _call(build_server("clinic"), "get_availability", {"department": ""})
+        result = _call(
+            build_server("clinic", booking_service=_mock_booking()), "get_availability", {"department": ""}
+        )
         assert result.isError is True
 
     def test_unknown_domain_fails_loudly(self) -> None:

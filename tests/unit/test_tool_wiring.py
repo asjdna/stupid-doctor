@@ -119,3 +119,41 @@ class TestToolSemantics:
         register_domain_tools("clinic", service=service)
         for spec in ToolRegistry.for_domain("clinic"):
             assert spec.when_not.strip(), f"{spec.name} 缺少 when_not"
+
+
+class TestRelativeDates:
+    """患者说的是"明天"，模型会把「明天」原样传进 `date`（实测）。
+
+    号源层对日期是严格校验的，所以这一层不收口的话，那次工具调用会失败、整轮挂号提议
+    根本不会发生——界面上只看到"模型没提议挂号"，而原因藏在工具结果里。
+    """
+
+    def test_relative_words_are_folded_to_iso(self, service):
+        import datetime as dt
+
+        from kubedocs.domains.clinic.tools import _normalize_date
+
+        today = dt.date.today()
+        assert _normalize_date("今天") == today.isoformat()
+        assert _normalize_date("明天") == (today + dt.timedelta(days=1)).isoformat()
+        assert _normalize_date("后天") == (today + dt.timedelta(days=2)).isoformat()
+        assert _normalize_date("大后天") == (today + dt.timedelta(days=3)).isoformat()
+        # 留空仍然是留空（"默认今天"由号源层决定，不在这一层替它做主）
+        assert _normalize_date("") == ""
+        assert _normalize_date(None) == ""
+
+    def test_an_iso_date_passes_through_untouched(self):
+        from kubedocs.domains.clinic.tools import _normalize_date
+
+        assert _normalize_date("2026-05-06") == "2026-05-06"
+
+    def test_unrecognised_wording_is_left_for_the_provider_to_reject(self):
+        """ "下周三"**故意不猜**：猜错一个日期等于给患者挂错天，交给号源层回一句人话。"""
+        from kubedocs.domains.clinic.tools import _normalize_date
+
+        assert _normalize_date("下周三") == "下周三"
+
+    def test_get_availability_accepts_the_relative_word(self, service):
+        register_domain_tools("clinic", service=service)
+        out = ToolRegistry.get("get_availability").handler(department="心内科", date="明天")
+        assert out["slots"], "「明天」应当被折成 ISO 并真的查到号源，而不是报日期格式错"

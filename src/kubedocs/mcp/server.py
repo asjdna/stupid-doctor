@@ -191,11 +191,13 @@ def _resolve_settings(domain: str, settings: Settings | None) -> Settings:
     return settings
 
 
-def _wire_tools(domain: str, *, settings: Settings) -> _LazyRetriever:
+def _wire_tools(domain: str, *, settings: Settings, booking_service: Any = None) -> _LazyRetriever:
     """按域装配工具：`ToolRegistry` 初始为空，工具只在装配时才注册进来。
 
     与 HTTP 层 `create_app` 同一个装配入口；漏掉它，MCP 会列出空清单——看起来像"这个项目没有能力"。
     检索器位置传的是 `_LazyRetriever`：`search_docs` 这一刻就出现在清单里，但一个模型权重都没加载。
+
+    `booking_service` 是给测试用的注入缝（默认 `None` = 按 settings 装配真号源）。
     """
     from kubedocs.agent.bootstrap import register_domain_tools, unregister_domain
     from kubedocs.domains import load_all
@@ -215,7 +217,8 @@ def _wire_tools(domain: str, *, settings: Settings) -> _LazyRetriever:
 
         # 与 HTTP 三条路径（`/consult`、`/chat`）走**同一个构造点**：Postgres 号源优先，
         # 连不上才降级进程内。各写一份的话，MCP 里查到的号源与网页面上的会是两套数据。
-        service = build_booking_service(settings)
+        # `service` 是注入缝：测试用进程内号源，免得一行单测去消耗真实号源库存。
+        service = booking_service if booking_service is not None else build_booking_service(settings)
         register_domain_tools(domain, service=service, retriever=retriever)
     else:
         # k8s_docs（以及未来任何只做检索的域）：检索 + 引用核对。
@@ -271,6 +274,7 @@ def build_server(
     settings: Settings | None = None,
     warmup: bool = False,
     patient_id: str = "anon",
+    booking_service: Any = None,
 ) -> Any:
     """造一个 MCP server：按 `domain` 装配工具，并挂好 `list_tools` / `call_tool`。
 
@@ -284,13 +288,17 @@ def build_server(
     注入到工具执行体，**不进工具 schema**——客户端改不了它，模型也伪造不了。
     它只影响按人查询的工具（`my_appointments`）与取号记账：MCP 是本地/内网运维通道，
     没有"登录用户"这个概念，所以身份必须由启动方在命令行上声明。
+
+    `booking_service` 是注入缝：默认按 settings 装配真号源（Postgres 优先）。测试要注入
+    进程内号源——否则一行单测会真的占掉真实号源的库存，几天后那条用例会因为"某个时段
+    挂满了"而红，而它验的其实只是协议。
     """
     from mcp.server import Server
     from mcp.types import CallToolResult, TextContent, Tool
 
     cfg = _resolve_settings(domain, settings)
     domain = cfg.domain
-    retriever = _wire_tools(domain, settings=cfg)
+    retriever = _wire_tools(domain, settings=cfg, booking_service=booking_service)
     if warmup:
         _start_warmup(retriever, domain)
     server = Server("kubedocs")

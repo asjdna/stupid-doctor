@@ -115,9 +115,13 @@ def api_settings(tmp_path: Path) -> Settings:
     显式 `store="sqlite-vec"`：`--index-dir` 式的隔离只对本地后端成立（pgvector 的索引
     在 Postgres 的 schema 里，目录参数对它没有作用）。默认后端是 pgvector，不写这一项
     这些用例就会去连真实 Postgres，既是环境依赖、又会被本机索引的维度/内容影响。
+
+    `database_url` 指向一个必然连不上的端口：**测试不该碰真实的号源库**（那会真的占掉
+    库存，几天后某条用例会因为"某个时段挂满了"而红）。指到死端口后号源走进程内降级。
     """
     return Settings(
         store="sqlite-vec",
+        database_url="postgresql://kubedocs:kubedocs@127.0.0.1:1/kubedocs",
         index_dir=str(tmp_path / "index"),
         domain="k8s_docs",
         embedding_provider="hashing",
