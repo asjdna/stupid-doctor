@@ -17,12 +17,12 @@
       "id": "rule.danger_keywords",
       "kind": "rule_asset",
       "path": "src/kubedocs/domains/clinic/redline.py",
-      "sha256": "78a611ce4bb97662432fb2f5b3cfea09a4532fa10a11b252d1e2df6073c9805e",
-      "version": "2026.10.0",
+      "sha256": "74051daeb514c66048da9494587ab62852432ac1b44f06b67be11abeb21e2d1b",
+      "version": "2026.10.1",
       "effective_date": "2026-10-16",
       "source": "仓库内人工整理的危险信号关键词 + 三维门控（断言 / 经验者 / 时间性）",
       "owner": "clinic 域维护者（尚未指派具名人员）",
-      "rationale": "这张表是喂给模型的**线索**，不参与判断：它决定模型能看到哪些词汇层面的信号，漏一条是线索质量回归，所以变更要留痕。"
+      "rationale": "这张表是喂给模型的**线索**，不参与判断：它决定模型能看到哪些词汇层面的信号，漏一条是线索质量回归，所以变更要留痕。0.1 版只改了模块文档（把「命中即强制转急诊」这类与代码相反的说明改成线索定位），词表本身没动。"
     },
     {
       "id": "rule.symptom_vocabulary",
