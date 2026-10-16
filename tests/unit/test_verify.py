@@ -172,6 +172,40 @@ class TestGroundingChecks:
         v = verify(assessment, "建议到火星科就诊。", facts)
         assert [d.name for d in strip_ungrounded(assessment, v, facts).departments] == ["火星科"]
 
+    def test_a_colloquial_suffix_is_not_a_grounding_failure(self):
+        """**归一化后比较**：模型说"呼吸内科门诊""全科门诊"，科室表写"呼吸内科""全科"。
+
+        硬比字符串会把合法建议判成未接地并剔除——患者看到的那条建议就凭空消失了
+        （在真实模型上实测踩过两次）。归一化规则属于域知识、由域层注入；
+        这里用一个最小替身规则钉住"注入之后就不再误报"。
+        """
+        facts = build_facts(
+            known_departments=("呼吸内科", "全科"),
+            normalize_department=lambda name: name.removesuffix("门诊"),
+        )
+        assessment = _assessment(departments=["呼吸内科门诊", "全科门诊"])
+        v = verify(assessment, "建议到呼吸内科门诊就诊。", facts)
+        assert v.kinds() == [], "口语后缀不是不接地"
+        assert [d.name for d in strip_ungrounded(assessment, v, facts).departments] == [
+            "呼吸内科门诊",
+            "全科门诊",
+        ]
+
+    def test_without_a_normalizer_the_comparison_is_exact(self):
+        """不注入规则时按原样比较——通用层不猜域规则，这一点要能被看见。"""
+        facts = build_facts(known_departments=("呼吸内科",))
+        v = verify(_assessment(departments=["呼吸内科门诊"]), "建议到呼吸内科门诊就诊。", facts)
+        assert "department_not_grounded" in v.kinds()
+
+    def test_a_broken_normalizer_falls_back_to_the_raw_name(self):
+        """归一化抛异常时退回原值：宁可多报一条科室，也不要误删患者能看到的建议。"""
+
+        def _boom(_name: str) -> str:
+            raise RuntimeError("坏了")
+
+        facts = build_facts(known_departments=("呼吸内科",), normalize_department=_boom)
+        assert verify(_assessment(departments=["呼吸内科"]), "建议到呼吸内科就诊。", facts).kinds() == []
+
     def test_a_cited_id_that_does_not_exist_is_flagged_and_stripped(self):
         facts = _facts(evidence=_evidence("K1"))
         assessment = _assessment(exams=[ExamAdvice(name="胸部 CT", evidence_ids=["K9"])])

@@ -30,6 +30,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -109,6 +110,15 @@ class FactSet:
     known_departments: tuple[str, ...] = ()
     """可挂号的科室表。科室建议必须落在它里面（见 `verify.fabricated_department`）。"""
 
+    normalize_department: Callable[[str], str] | None = None
+    """科室名的归一化函数（**可选注入**）。
+
+    校验必须**归一化后**比较，不能拿原始字符串硬比：模型说的是"呼吸内科门诊""全科门诊"，
+    科室表写的是"呼吸内科""全科"——那是同一个科，硬比会把**合法建议判成未接地并剔除**，
+    患者看到的那条建议就凭空消失了。归一化规则属于**域知识**（clinic 在
+    `domains/clinic/data/departments.py`），所以这里只收一个可调用对象，自己不实现规则。
+    """
+
     notes: list[str] = field(default_factory=list)
     """装配期的问题（某一路线索抽取失败等）。进面板，让模型知道"这次线索不全"。"""
 
@@ -149,10 +159,19 @@ class FactSet:
         return {b.ticket_no for b in self.completed_bookings() if b.ticket_no}
 
     def allowed_departments(self) -> set[str]:
-        """科室建议的合法取值：科室表 ∪ 面板里给出的候选。"""
+        """科室建议的合法取值：科室表 ∪ 面板里给出的候选（**已归一化**）。"""
         out = set(self.known_departments)
         out.update(d.name for d in self.departments)
-        return out
+        return {self.normalize(name) for name in out}
+
+    def normalize(self, name: str) -> str:
+        """按注入的规则归一化科室名；没注入就原样返回（通用层不猜域规则）。"""
+        if self.normalize_department is None:
+            return str(name or "").strip()
+        try:
+            return str(self.normalize_department(name) or "").strip()
+        except Exception:  # noqa: BLE001 - 归一化失败退回原值：宁可多报一条，不要误删
+            return str(name or "").strip()
 
     def known_numbers(self) -> set[int]:
         """面板里出现过的数值（费用/余量/队列号）。散文里出现的数值必须落在这里。"""
@@ -294,6 +313,7 @@ def build_facts(
     departments: list[DepartmentSignal] | None = None,
     booking: list[BookingFact] | None = None,
     known_departments: Any = (),
+    normalize_department: Callable[[str], str] | None = None,
     notes: list[str] | None = None,
 ) -> FactSet:
     """装配事实集。各参数都可以缺——缺了面板就如实写"无"，不影响其余部分可用。"""
@@ -303,5 +323,6 @@ def build_facts(
         departments=list(departments or []),
         booking=list(booking or []),
         known_departments=tuple(str(d) for d in (known_departments or ())),
+        normalize_department=normalize_department,
         notes=list(notes or []),
     )

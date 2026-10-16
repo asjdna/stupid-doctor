@@ -171,9 +171,11 @@ def verify(
         )
 
     # 2) 科室未接地：建议了一个既不在科室表、也不在候选里的科室。
+    #    **归一化后比较**：模型说的是"呼吸内科门诊""全科门诊"，科室表写的是"呼吸内科""全科"
+    #    ——同一个科。硬比会把合法建议判成未接地并剔除（实测踩过两次）。
     allowed = facts.allowed_departments()
     if allowed:
-        bad = [d.name for d in assessment.departments if d.name not in allowed]
+        bad = [d.name for d in assessment.departments if facts.normalize(d.name) not in allowed]
         if bad:
             out.append(
                 Violation(
@@ -302,7 +304,8 @@ def strip_ungrounded(
         cleaned = enforce(cleaned, facts.evidence_ids()).assessment
     if "department_not_grounded" in kinds:
         allowed = facts.allowed_departments()
-        kept = [d for d in cleaned.departments if not allowed or d.name in allowed]
+        # 与 `verify` 同一条口径：归一化后比较（"呼吸内科门诊" = "呼吸内科"）。
+        kept = [d for d in cleaned.departments if not allowed or facts.normalize(d.name) in allowed]
         # 全被删掉时**保留原样**：一个科室建议都没有会让 `validate_against` 记一条
         # "没有任何科室建议"，反而把"科室名不接地"这件事掩盖成"模型没给科室"。
         # 宁可留着那条不合法的（患者能看到、运维能查到），也不要制造一个更含糊的失败。

@@ -30,6 +30,7 @@ from kubedocs.clinical.reference import (
     SymptomSignal,
     build_facts,
 )
+from kubedocs.domains.clinic.data.departments import normalize_department
 from kubedocs.domains.clinic.pack import extract_evidence, match_symptoms
 from kubedocs.domains.clinic.polarity import is_negated
 
@@ -115,5 +116,8 @@ def clinic_reference(
         departments=department_signals(question, links, turn=turn),
         booking=list(booking),
         known_departments=known_departments,
+        # 校验器要按同一套规则归一化后再比较（"呼吸内科门诊" = "呼吸内科"）；
+        # 规则本身属于本域，所以由这里注入，通用层不猜。
+        normalize_department=normalize_department,
         notes=problems,
     )
