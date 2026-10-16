@@ -182,34 +182,62 @@ def make_reference_builder(
     return builder
 
 
+CANCELLED_STATUSES = frozenset({"cancelled", "canceled", "已退号"})
+"""号源库里表示"这个号已经退掉"的状态取值。
+
+`cancelled` 是 `pg_provider.STATUS_CANCELLED` 与 mock 的同一取值；另外两个只是宽容写法——
+把"已退号"读成"已确认"会让模型对着一个不存在的号说话。
+"""
+
+
 def booking_facts(service: Any, patient_id: str, *, limit: int = 5) -> tuple[list[BookingFact], list[str]]:
     """把**服务端已经确认的挂号/退号**读成面板事实。返回 `(事实, 装配问题)`。
 
-    这是防"没挂上却说挂上"最直接的一条：模型手里有一份"本轮到底发生过什么"的清单。
-    读不到时**不猜**——留一条 note 让模型知道这份事实这次不可用（而不是让它以为"没有挂号"）。
+    两条入口（`/consult` 的临床管线、`/chat` 的工具循环）都用这一份：它们给模型的事实
+    必须逐字一致，各写一遍的结果是"同一句话在两条路上被理解成两件事"——最典型的是
+    **已退号的判定**（`canceled` / `已退号` 这些写法只在一处被认出来时，另一处就会对着
+    一个已经退掉的号说话）。
+
     `service` 为 None（纯离线评测）时不给事实、也不报问题：那一轮本来就没有号源服务。
+
+    读不到时**不猜**：留一条问题让模型知道这份事实这次不可用（而不是让它以为"没有挂号"）——
+    静默返回空列表会把"查不到"说成"没发生过"，那是最危险的一种沉默。
     """
     if service is None:
         return [], []
-    notes: list[str] = []
     try:
         rows = service.my_appointments(patient_id, limit)
     except Exception as e:  # noqa: BLE001 - 号源不可读不该让整轮问诊失败
-        notes.append(f"挂号记录本次读不到（{type(e).__name__}）：请勿声称任何挂号结果")
-        return [], notes
+        reason = f"{type(e).__name__}: {e}"
+        return [], [
+            f"挂号记录读取失败（{reason}）：本轮业务事实可能不完整，"
+            "不要据此否认已有挂号，也不要声称任何挂号结果"
+        ]
     out: list[BookingFact] = []
     for row in rows:
-        status = str(row.get("status") or "")
+        if not isinstance(row, dict):
+            continue
+        status = str(row.get("status", "") or "")
         out.append(
             BookingFact(
-                kind="cancelled" if status == "cancelled" else "confirmed",
-                department=str(row.get("department") or ""),
-                date=str(row.get("date") or ""),
-                time_slot=str(row.get("time") or ""),
-                fee=int(row.get("fee") or 0),
-                ticket_no=str(row.get("ticket_no") or ""),
-                queue_no=int(row.get("queue_no") or 0),
+                # 号源只把"已退号"标出来；其余（paid / pending_payment）都是服务端真的记了一笔。
+                kind="cancelled" if status in CANCELLED_STATUSES else "confirmed",
+                department=str(row.get("department", "") or ""),
+                date=str(row.get("date", "") or ""),
+                # `time` 是号源契约里的时段键（库里叫 period），不要在这里改名。
+                time_slot=str(row.get("time", "") or ""),
+                fee=_as_int(row.get("fee")),
+                ticket_no=str(row.get("ticket_no", "") or ""),
+                queue_no=_as_int(row.get("queue_no")),
                 status=status,
             )
         )
-    return out, notes
+    return out, []
+
+
+def _as_int(value: Any) -> int:
+    """号源返回的数值字段做一次**宽容**取整：畸形值不该让整轮问诊崩。"""
+    try:
+        return int(value or 0)
+    except (TypeError, ValueError):
+        return 0

@@ -163,13 +163,6 @@ BOOKING_HISTORY_LIMIT = 5
 这里看完整就诊史（那有专门的接口）。
 """
 
-_CANCELLED_STATUSES = frozenset({"cancelled", "canceled", "已退号"})
-"""号源库里表示"这个号已经退掉"的状态取值。
-
-`cancelled` 是 `pg_provider.STATUS_CANCELLED` 与 `mock._STATUS_CANCELLED` 的同一取值；
-另外两个只是宽容写法——把"已退号"读成"已确认"会让模型对着一个不存在的号说话。
-"""
-
 
 @lru_cache(maxsize=1)
 def _triage_links() -> dict[str, tuple[str, ...]]:
@@ -192,21 +185,13 @@ def _triage_links() -> dict[str, tuple[str, ...]]:
         return {}
 
 
-def _as_int(value: object) -> int:
-    """面板里的数值字段（费用/队列号）：脏值按 0 处理，不让一个字段把整轮问诊打断。
-
-    0 会被 `FactSet.known_numbers()` 过滤掉，所以它不会被当成一条"真实读到的数值"。
-    """
-    if isinstance(value, bool) or not isinstance(value, (int, float, str)):
-        return 0
-    try:
-        return int(value)
-    except ValueError:
-        return 0
-
-
 def _booking_facts(service: Any, patient_id: str) -> tuple[list[BookingFact], list[str]]:
     """把**服务端已经发生过**的挂号/退号读成面板条目，返回 `(事实, 装配说明)`。
+
+    实现是**域层那一份**（`domains.clinic.reference.booking_facts`），`/consult` 用的是同一个
+    函数：两条入口给模型的事实必须逐字一致。各写一遍的后果不是报错，而是"同一句话在两条路上
+    被理解成两件事"——例如已退号的判定（`canceled` / `已退号` 这些写法只在一处被认出来时，
+    另一处就会对着一个已经退掉的号说话）。
 
     这一条是给模型"别凭空说已挂上"用的：面板里没有对应条目时，模型就不该宣称取号成功
     （`clinical/verify.py` 的 `fabricated_booking` 也会据此把它拦下）。**没有已确认的挂号
@@ -214,36 +199,14 @@ def _booking_facts(service: Any, patient_id: str) -> tuple[list[BookingFact], li
     那句明确的否定，而这正是"模型看到空白就按对话语气补一句已为您挂上"的解毒剂。
 
     读取失败不让整轮崩，但**也不装作"没有动作"**：把问题作为装配说明回传，面板会写明
-    "这次业务事实可能不完整"。静默返回空列表会把"查不到"说成"没发生过"，那是最危险的一种
-    沉默——模型会据此否认患者真实存在的号。
+    "这次业务事实可能不完整"。
     """
-    try:
-        rows = service.my_appointments(patient_id, limit=BOOKING_HISTORY_LIMIT)
-    except Exception as e:  # noqa: BLE001 - 号源是外部服务，读不到不该让问诊中断
-        reason = f"{type(e).__name__}: {e}"
-        logger.warning("读挂号记录失败，本轮面板的业务事实不完整：%s", reason)
-        return [], [f"挂号记录读取失败（{reason}）：本轮业务事实可能不完整，不要据此否认已有挂号"]
+    from kubedocs.domains.clinic.reference import booking_facts
 
-    facts: list[BookingFact] = []
-    for row in rows:
-        if not isinstance(row, dict):
-            continue
-        status = str(row.get("status", "") or "")
-        facts.append(
-            BookingFact(
-                # 号源只把"已退号"标出来；其余（paid / pending_payment）都是服务端真的记了一笔。
-                kind="cancelled" if status in _CANCELLED_STATUSES else "confirmed",
-                department=str(row.get("department", "") or ""),
-                date=str(row.get("date", "") or ""),
-                # `time` 是号源契约里的时段键（库里叫 period），不要在这里改名。
-                time_slot=str(row.get("time", "") or ""),
-                fee=_as_int(row.get("fee")),
-                ticket_no=str(row.get("ticket_no", "") or ""),
-                queue_no=_as_int(row.get("queue_no")),
-                status=status,
-            )
-        )
-    return facts, []
+    facts, notes = booking_facts(service, patient_id, limit=BOOKING_HISTORY_LIMIT)
+    if notes:
+        logger.warning("读挂号记录失败，本轮面板的业务事实不完整：%s", notes[0])
+    return facts, notes
 
 
 class ClinicReactRuntime:
