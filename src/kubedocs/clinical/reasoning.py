@@ -5,13 +5,13 @@
 1. **装配**：把系统提示词 + 证据 + 已采集信息 + 患者原话交给模型；
 2. **校验**：把模型返回的 JSON 解析成 `ClinicalAssessment`，并检查依据是否存在、
    检查/用药有没有出处；
-3. **降级**：模型不可用或输出不可解析时**不许凭空生成**，只退回到
-   "证据能支撑的东西"（见 `_fallback`）。
+3. **没有判断者就没有结论**：模型不可用或输出不可解析时**不产出任何兜底内容**，
+   `assessment` 留空、`degraded` 记下原因（调用方据此回一句 `LLM_FAILED_MESSAGE`）。
 
 急重症由模型按**病症 + 严重程度**判断并输出到 `red_flags`（见 `contracts.RedFlag`），
-所以关键词表（`domains.clinic.redline.RiskGuard`）**退出了判断链**：
-它不进提示词、不影响 `urgency`、不触发急诊横幅。它只剩一个用途——模型不可用时
-给一句保守的对话提示。注意那只是**提示**：`degraded` 非空，前端据此不弹急诊横幅。
+所以关键词表（`domains.clinic.redline.RiskGuard`）**退出了判断链**：命中只作为线索进
+参考标准面板交给模型（见 `clinical/reference.py`），不覆盖 `urgency`、不触发急诊横幅、
+也没有任何短路分支。
 """
 
 from __future__ import annotations

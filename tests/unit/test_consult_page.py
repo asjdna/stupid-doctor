@@ -177,6 +177,22 @@ class TestBookingCardsAreRendered:
         assert "detail" in html
 
 
+class TestNoModelConclusionIsNotShownAsAFallback:
+    """没有大模型时服务端只回一句提示，页面**不许**把它说成"兜底答案"。
+
+    防的回归：文案把"系统提示"包装成"备用医学建议"。两者都显示在同一处气泡里，
+    一句"仅供参考"就足以让患者以为那是能用的意见。
+    """
+
+    def test_degraded_branch_says_it_is_not_a_medical_judgement(self, html: str) -> None:
+        assert "p.degraded" in html
+        assert "没有模型结论" in html
+        assert "不是医学判断" in html
+
+    def test_the_word_fallback_is_absent(self, html: str) -> None:
+        assert "兜底提示" not in html
+
+
 class TestNoInlineEventHandlers:
     """一律 `addEventListener`，不用内联处理器。
 

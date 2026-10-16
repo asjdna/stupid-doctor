@@ -230,6 +230,12 @@ class TestReferenceIsCarriedOut:
         assert turn.reference["evidence_ids"] == []
 
     def test_the_custom_builder_is_used(self):
+        """域层建造器被调用，且**拿到患者标识**（号源事实是按人查的）。
+
+        它会被调用**两次**：循环之前装配"线索版"（进提示词）、循环之后装配"带证据版"
+        （做校验与留档）。两次都必须拿到 `patient_id`——少了后一次，校验就不知道
+        这个人到底有没有挂号事实。
+        """
         seen: list[str] = []
 
         def builder(question: str, evidence: Any, patient_id: str) -> Any:
@@ -240,5 +246,41 @@ class TestReferenceIsCarriedOut:
 
         loop = _Loop(_payload(summary="建议到呼吸内科就诊。"))
         turn = _pipeline(loop, reference_builder=builder).advance("我咳嗽", patient_id="p9")
-        assert seen == ["p9"], "面板装配要拿到患者标识（号源事实是按人查的）"
+        assert seen and set(seen) == {"p9"}, seen
         assert turn.reference is not None and "域层装配生效" in turn.reference["notes"]
+
+
+class TestThePanelReachesTheModel:
+    """**面板必须进提示词**，否则"规则资产作为线索、由模型判断"这条架构没有生效。
+
+    这条是实测抓出来的：面板原先只在工具循环**跑完之后**装配，只用于校验与响应留档，
+    而模型那一侧一条线索都看不到（它只看得到 system.md 与自己检索到的东西）。
+    """
+
+    def test_the_clue_panel_is_in_the_system_prompt(self):
+        loop = _Loop(_payload(summary="建议到呼吸内科就诊。"))
+        _pipeline(loop).advance("我咳嗽")
+        assert loop.calls, "循环必须被调用"
+        assert "参考标准" in loop.calls[0], "线索面板没进系统提示"
+
+    def test_the_pre_loop_panel_defers_retrieval_instead_of_claiming_nothing_was_found(self):
+        """循环前那一份不能给出"知识依据为空"的结论——那是循环**之后**的状态。
+
+        混起来会让模型以为系统查过了、确实没有，于是既不检索也不再作答。
+        （注意：`system.md` 的 R6 里本来就有"没有检索到任何资料"这句话，所以这里断言的是
+        **面板那一节**的措辞，不是整段系统提示里有没有这几个字。）
+        """
+        loop = _Loop(_payload(summary="建议到呼吸内科就诊。"))
+        _pipeline(loop).advance("我咳嗽")
+        assert "由你自己决定" in loop.calls[0]
+        assert "四、知识依据：**不在这一段里**" in loop.calls[0]
+
+    def test_the_retry_prompt_also_carries_the_panel(self):
+        loop = _Loop(
+            _payload(summary="已经为您挂上了。"),
+            _payload(summary="已生成待确认的挂号单，需要您点确认后才生效。"),
+        )
+        _pipeline(loop).advance("帮我挂个号")
+        assert len(loop.calls) == 2
+        assert "参考标准" in loop.calls[1], "重生成时把面板摘掉，等于换个更差的环境要求它做对"
+        assert "完成态说法" in loop.calls[1]

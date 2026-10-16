@@ -521,11 +521,11 @@
         var html = '';
         if (a && a.degraded) {
           var why = (typeof a.degraded === 'string') ? a.degraded : JSON.stringify(a.degraded);
-          warn('未配置 LLM 密钥或索引不可用，仅检索结果：' + why + '（后端 degraded 字段，属正常降级而非报错。）');
+          warn('这一轮没有模型结论：' + why + '（后端 degraded 字段。没有大模型时不产出兜底回答，所以命中片段数也是 0。）');
         }
         html += renderNote(a && a.note);
         html += '<div class="hit"><div class="title">回答' +
-                (a && a.degraded ? ' <span class="pill yes">degraded 降级</span>' : '') + '</div>' +
+                (a && a.degraded ? ' <span class="pill yes">无模型结论</span>' : '') + '</div>' +
                 '<div class="answer" style="margin-top:6px">' +
                 renderAnswerWithCitations((a && a.answer) || '(后端未返回 answer)', normalizeCitations(a && a.citations)) +
                 '</div>' +

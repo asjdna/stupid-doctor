@@ -181,8 +181,14 @@ class FactSet:
         return {n for n in nums if n}
 
     # ------------------------------------------------------------------ 渲染
-    def render(self) -> str:
-        """渲染成提示词里的一段。**每一节都明说"这是线索，不是结论"。**"""
+    def render(self, *, defer_retrieval: bool = False) -> str:
+        """渲染成提示词里的一段。**每一节都明说"这是线索，不是结论"。**
+
+        `defer_retrieval=True` 用于**工具循环开始之前**的那一份：那一刻检索还没发生
+        （检索由模型自己调 `search_docs` 决定），所以知识依据那一节必须写"由你决定是否检索"，
+        而**不是**"没有检索到任何资料"——后者会让模型以为系统查过了、确实没有，
+        从而不该检索也不该作答。这两种状态必须分清。
+        """
         lines: list[str] = [
             "【参考标准｜系统给你的线索，**不是结论**】",
             "下面是规则资产与检索给出的线索。最终判断由你做出，并对你的判断负责；",
@@ -239,7 +245,14 @@ class FactSet:
             )
 
         lines.append("")
-        lines.extend(self.evidence.render().splitlines())
+        if defer_retrieval:
+            lines.append(
+                "四、知识依据：**不在这一段里**。要不要检索、检索什么，由你自己决定"
+                "（调 `search_docs`）；工具返回的片段才是你能引用的依据。"
+                "在拿到片段之前，不要给出检查或用药建议。"
+            )
+        else:
+            lines.extend(self.evidence.render().splitlines())
 
         lines.append("")
         lines.append("五、业务事实（号源 / 费用 / 本轮服务端实际执行过的动作）")

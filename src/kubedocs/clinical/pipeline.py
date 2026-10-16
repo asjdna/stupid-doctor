@@ -19,13 +19,16 @@ intake ─▶ evidence（仅作降级兜底）─▶ 工具循环（模型自己
 
 ## 急诊：判断权在模型，编排层只做"自相矛盾"的检查
 
-编排层**不覆盖**模型给出的 `urgency`。`RiskGuard` 的关键词命中**不进提示词、
-不影响 `urgency`**，只用于两件事：主判不可用时给一句保守提示，以及
-"命中而模型未判急重症"时留一条不一致痕迹（`ClinicalTurn.problems`）。
+编排层**不覆盖**模型给出的 `urgency`，也不给红线词任何短路分支。`RiskGuard` 的命中以
+**线索**形式进参考标准面板（关键词 + 断言 / 经验者 / 时间性三维取值，见
+`clinical/reference.py`），随系统提示交给模型——它**不替模型下结论**，
+`ClinicalTurn.urgency` 始终是模型自己给的值。命中与"模型判了什么"之间的差异不写进正文，
+只作为可审计读数留下：`red_line_positive` 与"命中而模型未判急重症"时的一条不一致痕迹
+（`ClinicalTurn.problems`）。
 契约层守住唯一的硬约束：**判出 `red_flags` 却把 `urgency` 写成非 emergency ⇒ 记违规**。
 
-> ⚠️ 这与**图路径**（`/chat`）相反：那条路上 `RiskGuard` 是
-> "LLM 不可绕过的强制边"。两条路径故意并存，取舍相反，别混着看。
+> `/chat`（`agent/clinic_react.py`）递的是**同一份面板**、同一套线索，同样没有短路分支：
+> 两条路径的判断者都是模型，只有输出形状与校验手段不同。
 """
 
 from __future__ import annotations
@@ -292,9 +295,18 @@ class ClinicalPipeline:
         from kubedocs.llm_status import LLM_FAILED_MESSAGE
 
         loop = self._tool_loop
+        # **面板要在循环之前递给模型**：不递的话，"规则资产作为线索、由模型判断"这条架构
+        # 在主路径上根本没生效——模型只会看到 system.md 与它自己检索到的东西，
+        # 红线三维、症状归一、科室候选、号源事实一条都看不到（实测就是这样）。
+        #
+        # 但递进去的必须是**线索版**：`build_evidence` 预取的知识条目**不进提示词**，
+        # 否则"模型自己决定要不要检索"就作废了（这是本管线的既有取舍）。
+        clue_evidence = fallback_evidence.model_copy(update={"items": []})
+        clue_facts = self._build_facts(question, clue_evidence, patient_id=patient_id)
+        system = f"{system_prompt()}\n\n---\n\n{clue_facts.render(defer_retrieval=True)}"
         try:
             result = loop.run(
-                system=system_prompt(),
+                system=system,
                 question=question,
                 intake=intake,
                 history=history,
@@ -347,7 +359,7 @@ class ClinicalPipeline:
         if not verification.ok():
             logger.warning("输出未通过事实校验，重生成一次：%s", verification.kinds())
             retry = self._retry_with_feedback(
-                loop, question, intake, history, patient_id, verification.feedback()
+                loop, question, intake, history, patient_id, verification.feedback(), clue_facts
             )
             if retry is not None:
                 retry_assessment = self._parse(retry.final_text)
@@ -446,13 +458,21 @@ class ClinicalPipeline:
         history: list[dict[str, Any]] | None,
         patient_id: str,
         feedback: str,
+        clue_facts: FactSet | None = None,
     ) -> Any:
-        """带违规原因重生成一次。**再失败就返回 None**，由调用方换成事实回答。"""
+        """带违规原因重生成一次。**再失败就返回 None**，由调用方换成事实回答。
+
+        重生成时**同样要把线索版面板带上**：只带回灌的违规原因、把面板摘掉，
+        等于换了一个信息更少的环境去要求它做对——那是一次必然更容易失败的重试。
+        """
         from kubedocs.clinical.prompts import system_prompt
 
+        system = system_prompt()
+        if clue_facts is not None:
+            system = f"{system}\n\n---\n\n{clue_facts.render(defer_retrieval=True)}"
         try:
             return loop.run(
-                system=f"{system_prompt()}\n\n---\n\n{feedback}",
+                system=f"{system}\n\n---\n\n{feedback}",
                 question=question,
                 intake=intake,
                 history=history,

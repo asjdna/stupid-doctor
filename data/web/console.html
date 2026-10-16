@@ -166,7 +166,7 @@
 
   <!-- 问答 -->
   <section class="panel">
-    <h2>带引用问答 <span class="hint">/ask（没有密钥时应该**降级**而不是崩）</span></h2>
+    <h2>带引用问答 <span class="hint">/ask（没有密钥时只回一句提示，不产出兜底内容）</span></h2>
     <div class="body">
       <div class="row">
         <input type="text" id="askQ" class="grow" placeholder="例如：怎么限制一个 Pod 的 CPU？" autocomplete="off">
@@ -178,7 +178,7 @@
 
   <!-- 问诊 -->
   <section class="panel" style="grid-column: 1 / -1;">
-    <h2>问诊 Agent <span class="hint">/chat（SSE 流：工具轨迹 + 急诊红线会确定性触发）</span>
+    <h2>问诊 Agent <span class="hint">/chat（SSE 流：工具轨迹 + 参考标准面板与违规留档）</span>
       <span class="spacer"></span>
       <label class="field">患者 <input type="text" id="patientId" value="anon" size="8"></label>
       <button class="ghost" id="btnNewChat">新会话</button>
@@ -436,7 +436,7 @@
       var res = await postJSON('/ask', { q: q, top_k: parseInt($('topK').value, 10) || 5, domain: $('domain').value });
       var html = '';
       if (res.degraded) {
-        html += '<div class="banner warn"><b>降级</b>：' + esc(res.degraded) + '</div>';
+        html += '<div class="banner warn"><b>系统说明</b>：' + esc(res.degraded) + '</div>';
       }
       html += res.answer
         ? '<div class="hit"><div class="body">' + esc(res.answer) + '</div></div>'
@@ -504,6 +504,12 @@
             if (obj.status === 'emergency') bot.className = 'msg emergency';
             if (obj.unpriced_llm_calls) addTrace('注意：有 ' + obj.unpriced_llm_calls + ' 次调用算不出价，已按保守上限计入预算');
             if (obj.awaiting_user) addTrace('（在等用户回答追问）');
+            // 参考标准面板与违规留档是一对：知道它看了什么，也要知道它哪里越界。
+            // 被拦下的那段散文不会出现在回复里（服务端已换成只含事实的回答），
+            // 所以这个计数是"模型是否在编造"唯一看得见的读数。
+            if (obj.reference) addTrace('reference 面板已留档：依据编号 ' + ((obj.reference.evidence_ids || []).length) + ' 个、挂号事实 ' + ((obj.reference.booking || []).length) + ' 条');
+            var bad = obj.contract_violations || [];
+            if (bad.length) addTrace('输出约束层拦下 ' + bad.length + ' 条：' + bad.map(function (v) { return v.kind + '/' + v.severity; }).join('、'));
           } else if (ev === 'error') { bot.className = 'msg err'; bot.textContent = '错误：' + (obj.error || data); }
           else if (ev === 'done') { addTrace('done'); }
         });

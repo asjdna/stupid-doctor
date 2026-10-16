@@ -205,7 +205,9 @@ async function send(text) {
       $("emg").classList.add("show");
     }
     if (p.degraded) {
-      addMsg("（系统）这次没能连上大模型（" + p.degraded + "），下面是兜底提示，仅供参考。", "note");
+      // 没有模型结论时服务端只回一句提示（`llm_status.py` 的 NO_LLM_MESSAGE / LLM_FAILED_MESSAGE），
+      // 不存在兜底医学内容——所以这里说明"下面这句不是模型判断"，不要写成像是有个备用答案。
+      addMsg("（系统）这一轮没有模型结论（" + p.degraded + "）。下面是系统提示，不是医学判断。", "note");
     }
     // 结构化字段（科室/病症/检查/用药）不在这渲染——它们已在正文里由模型讲出来
     addMsg(p.message, "sys");
