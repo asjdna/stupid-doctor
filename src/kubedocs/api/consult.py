@@ -93,6 +93,13 @@ MAX_HISTORY_TURNS = 6
 （每条消息都要计费，历史越长每次调用越贵）。
 """
 
+BOOKING_HISTORY_LIMIT = 5
+"""面板里最多回看几条服务端挂号记录（新到旧）。
+
+面板的作用是让模型**有事实可对照**（尤其别凭空说"已挂上"），不是让患者在这里看完整就诊史
+（那有专门的接口）。条数与 `agent/clinic_react.py` 的同名常量一致：两条入口给模型的事实要一样。
+"""
+
 EMERGENCY_NOTE = (
     "检测到需要立即处理的危险信号（如胸痛、呼吸困难、意识不清、大出血等）。"
     "**请立即拨打 120 或直接前往最近医院急诊科**，不要等待在线建议。"
@@ -243,6 +250,9 @@ class ConsultRuntime:
         self._pending = pending if pending is not None else PendingBookings()
         self._booking_provider = booking_provider
         self._booking: Any = None
+        # 面板建造器（域层那份）惰性建一次：关联表解析是秒级，不能每请求重来。
+        self._reference_builder: Any = None
+        self._ref_lock = threading.Lock()
         # RLock 而不是 Lock：`pipeline()` 持锁时会调 `_build()`，后者要取 store（同一把锁），
         # 用普通 Lock 会在第一次请求上自锁死。
         self._lock = threading.RLock()
@@ -317,12 +327,12 @@ class ConsultRuntime:
             return self._pipeline
 
     def _build(self) -> ClinicalPipeline:
-        from kubedocs.clinical.orchestration import ClinicalToolLoop
-        from kubedocs.clinical.rag import LocalIndexBackend
-        from kubedocs.clinical.reasoning import BudgetedClient, ClinicalReasoner, LiteLLMAdapter
-        from kubedocs.clinical.triage import RetrievalTriage, load_department_map
-        from kubedocs.domains.clinic.redline import RiskGuard
-        from kubedocs.generate import DailyBudget, LiteLLMClient
+        """装配临床管线。**装配本身在 `clinical/runtime.py`**——产品与评测共用那一份。
+
+        这里只负责把 HTTP 层的依赖（检索器、号源服务、待确认单、就诊记录落点、
+        面板建造器、审计落点）交出去。各写一遍装配的结果是评测测到一个产品不会走的形状。
+        """
+        from kubedocs.clinical.runtime import build_clinical_assembly
 
         settings = self._runtime.settings
         retriever = self._runtime.retriever()
@@ -331,59 +341,30 @@ class ConsultRuntime:
                 "clinic 索引不可用（store 未打开或索引未建）⇒ 无法装配问诊管线。"
                 "先跑 `kubedocs ingest` 建索引。"
             )
-        budget = DailyBudget(
-            settings.llm_spend_path,
-            settings.llm_daily_budget_usd,
-            unpriced_usd=settings.llm_unpriced_call_usd,
-        )
-        # **把 `search_docs` 注册进 clinic 域**——这一步是工具循环能不能工作的前提。
-        #
-        # 启动时（`app._register_tools`）故意不注册它：那会强制在启动时构造检索器、
-        # 加载嵌入模型（首次几十秒），与"资源惰性构造"冲突；而这里 retriever 已经建好了
-        # （上面那行），此时注册不增加任何成本。
-        # 漏了这一步，`tool_schemas(domain="clinic")` 在过滤掉副作用工具后是**空的**，
-        # 模型一个工具都没得调，于是退回用自己的通用医学知识作答——表面上"有回答"，
-        # 实际上 R3「检索不到就不给」被架空了。
-        from kubedocs.agent.bootstrap import register_domain_tools
-
-        register_domain_tools(
-            "clinic",
-            service=self.booking(),
+        assembly = build_clinical_assembly(
+            settings=settings,
             retriever=retriever,
+            booking=self.booking(),
             # 没有 `pending` 就不会注册 `propose_booking`，模型也就没法发起挂号——
             # 挂号的入口是"提议一张待确认单"，不是"直接取号"。
             pending=self._pending,
-        )
-        reasoner = ClinicalReasoner(LiteLLMAdapter(BudgetedClient(LiteLLMClient(settings), budget)))
-        # **工具循环**：模型自己决定调哪些模块取证（架构决定：底层约束为大模型）。
-        # 用同一个 BudgetedClient ⇒ 循环里每一次调用都过同一本日预算账。
-        budgeted = BudgetedClient(LiteLLMClient(settings), budget)
-        tool_loop = ClinicalToolLoop(budgeted, domain="clinic")
-        # 科室补全映射表：语料里近半卡片的科室是「未标注」，靠这张表把票补回来。
-        # 只信 high 档（图谱直接关系 + SameAs 别名）；含模糊归并的 medium 档准确率更差。
-        dep_map = load_department_map(min_confidence="high")
-        if not dep_map:
-            logger.warning(
-                "科室补全映射表为空（data/clinic/department_map.json 缺失）⇒ 分诊退化为只解析卡片正文，"
-                "口语召回会明显下降。跑 scripts/clinic_derive_departments.py 生成。"
-            )
-        return ClinicalPipeline(
-            backend=LocalIndexBackend(retriever),
-            reasoner=reasoner,
-            guard=RiskGuard(),
-            triage=RetrievalTriage(department_map=dep_map),
-            tool_loop=tool_loop,
             store=self.store(),
             top_k=10,
             # 参考标准面板由**域层**装配：症状词表、科室表、号源事实都是 clinic 域的知识，
             # 管线那一层不该知道（它只认 `FactSet` 这个形状）。
-            reference_builder=self.build_reference,
+            reference_builder=self.reference_builder(),
             # **有没有大模型**这条状态由 HTTP 层判定（密钥在 settings/env 里）：
             # 管线拿到它就知道该不该产出判断——没有判断者时它只回一句话。
             has_llm=self.has_llm,
             # 安全审计日志（治理）落在索引根目录，与花费账本同处：一次备份就都带上了。
             index_root=self._audit_root(),
         )
+        if assembly.extras.get("department_map_entries", 0) == 0:
+            logger.warning(
+                "科室补全映射表为空（data/clinic/department_map.json 缺失）⇒ 分诊退化为只解析卡片正文，"
+                "口语召回会明显下降。跑 scripts/clinic_derive_departments.py 生成。"
+            )
+        return assembly.pipeline
 
     # ---------------------------------------------------------------- 参考标准
     def has_llm(self) -> bool:
@@ -414,55 +395,33 @@ class ConsultRuntime:
     def booking_facts(self, patient_id: str) -> tuple[list[Any], list[str]]:
         """把**服务端已经确认的挂号/退号**读成面板事实。返回 (事实, 装配问题)。
 
-        这是防"没挂上却说挂上"最直接的一条：模型手里有一份"本轮到底发生过什么"的清单。
-        读不到时**不猜**——留一条 note 让模型知道这份事实这次不可用（而不是让它以为"没有挂号"）。
+        实现与评测共用 `domains.clinic.reference.booking_facts`（同一份口径：
+        读不到时**不猜**，留一条 note 而不是当成"没有挂号"）。
         """
-        from kubedocs.clinical.reference import BookingFact
+        from kubedocs.domains.clinic.reference import booking_facts as _booking_facts
 
-        notes: list[str] = []
-        try:
-            rows = self.booking().my_appointments(patient_id, 5)
-        except Exception as e:  # noqa: BLE001 - 号源不可读不该让整轮问诊失败
-            notes.append(f"挂号记录本次读不到（{type(e).__name__}）：请勿声称任何挂号结果")
-            return [], notes
-        out: list[BookingFact] = []
-        for row in rows:
-            status = str(row.get("status") or "")
-            out.append(
-                BookingFact(
-                    kind="cancelled" if status == "cancelled" else "confirmed",
-                    department=str(row.get("department") or ""),
-                    date=str(row.get("date") or ""),
-                    time_slot=str(row.get("time") or ""),
-                    fee=int(row.get("fee") or 0),
-                    ticket_no=str(row.get("ticket_no") or ""),
-                    queue_no=int(row.get("queue_no") or 0),
-                    status=status,
+        return _booking_facts(self.booking(), patient_id, limit=BOOKING_HISTORY_LIMIT)
+
+    def reference_builder(self) -> Any:
+        """本运行时的面板建造器（惰性建一次）。**域层的 `make_reference_builder`**。
+
+        `link_map()` / `booking_facts()` 仍然保留为独立方法：它们各自有单测，
+        也方便排查"面板里这条线索是怎么来的"。
+        """
+        with self._ref_lock:
+            if self._reference_builder is None:
+                from kubedocs.domains.clinic.reference import make_reference_builder
+
+                self._reference_builder = make_reference_builder(
+                    service=self.booking(),
+                    links=self.link_map(),
+                    booking_history_limit=BOOKING_HISTORY_LIMIT,
                 )
-            )
-        return out, notes
+            return self._reference_builder
 
     def build_reference(self, question: str, evidence: Any, patient_id: str) -> Any:
         """装配这一轮的参考标准面板（`FactSet`）。**注入给管线**，见 `_build`。"""
-        from kubedocs.domains.clinic.data.departments import DEPARTMENTS
-        from kubedocs.domains.clinic.redline import RiskGuard
-        from kubedocs.domains.clinic.reference import clinic_reference
-
-        links = self.link_map()
-        notes: list[str] = []
-        if not links:
-            notes.append("症状→科室关联表为空（卡片语料缺失）")
-        booking, booking_notes = self.booking_facts(patient_id)
-        notes.extend(booking_notes)
-        return clinic_reference(
-            question,
-            links=links,
-            guard=RiskGuard(),
-            evidence=evidence,
-            booking=booking,
-            known_departments=DEPARTMENTS,
-            notes=notes,
-        )
+        return self.reference_builder()(question, evidence, patient_id)
 
     # ---------------------------------------------------------------- 会话
     def _session(self, session_id: str) -> _Session:

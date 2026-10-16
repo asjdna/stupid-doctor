@@ -19,7 +19,8 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
+from typing import Any
 
 from kubedocs.agent import hypothesis
 from kubedocs.clinical.evidence import EvidenceBundle, Guard, red_line_from_guard
@@ -121,3 +122,94 @@ def clinic_reference(
         normalize_department=normalize_department,
         notes=problems,
     )
+
+
+def make_reference_builder(
+    *,
+    service: Any = None,
+    links: Mapping[str, Sequence[str]] | None = None,
+    known_departments: Sequence[str] | None = None,
+    booking_history_limit: int = 5,
+) -> Callable[[str, EvidenceBundle | None, str], FactSet]:
+    """构造**参考标准面板建造器**（管线与评测共用的那一个）。
+
+    面板是"模型看到的依据"，所以"产品路径"与"评测路径"必须是同一份装配：各写一遍的结果
+    是评测在测一个产品不会走的形状（线索少了、写法不一样），而分数看起来仍然合理。
+
+    - `service`（号源服务）给了就读"这个人已经确认的挂号/退号"，读不到时留一条 note
+      而不是当成"没有挂号"（见下面 `booking_facts`）；
+    - `links` 不给则惰性取域包的关联表并缓存一次（8MB 卡片语料解析一次是秒级，
+      但每次请求都解析就不行）；
+    - `known_departments` 不给则用 `DEPARTMENTS`（可挂号科室清单）。
+
+    返回的建造器签名与管线要求的 `reference_builder(question, evidence, patient_id)` 一致。
+    """
+    from kubedocs.domains.clinic.data.departments import DEPARTMENTS
+    from kubedocs.domains.clinic.redline import RiskGuard
+
+    departments: Sequence[str] = DEPARTMENTS if known_departments is None else known_departments
+    cached_links: list[Mapping[str, Sequence[str]] | None] = [links]
+
+    def _links() -> Mapping[str, Sequence[str]] | None:
+        if cached_links[0] is None:
+            from kubedocs.domains.clinic.pack import link_vocabulary
+
+            if link_vocabulary():
+                from kubedocs.domains.clinic.domain import ClinicPack
+
+                cached_links[0] = ClinicPack().triage_links()
+            else:
+                cached_links[0] = {}
+        return cached_links[0]
+
+    def builder(question: str, evidence: EvidenceBundle | None, patient_id: str) -> FactSet:
+        resolved = _links()
+        notes: list[str] = []
+        if not resolved:
+            notes.append("症状→科室关联表为空（卡片语料缺失）")
+        booking, booking_notes = booking_facts(service, patient_id, limit=booking_history_limit)
+        notes.extend(booking_notes)
+        return clinic_reference(
+            question,
+            links=resolved,
+            guard=RiskGuard(),
+            evidence=evidence,
+            booking=booking,
+            known_departments=departments,
+            notes=notes,
+        )
+
+    return builder
+
+
+def booking_facts(service: Any, patient_id: str, *, limit: int = 5) -> tuple[list[BookingFact], list[str]]:
+    """把**服务端已经确认的挂号/退号**读成面板事实。返回 `(事实, 装配问题)`。
+
+    这是防"没挂上却说挂上"最直接的一条：模型手里有一份"本轮到底发生过什么"的清单。
+    读不到时**不猜**——留一条 note 让模型知道这份事实这次不可用（而不是让它以为"没有挂号"）。
+    `service` 为 None（纯离线评测）时不给事实、也不报问题：那一轮本来就没有号源服务。
+    """
+    if service is None:
+        return [], []
+    notes: list[str] = []
+    try:
+        rows = service.my_appointments(patient_id, limit)
+    except Exception as e:  # noqa: BLE001 - 号源不可读不该让整轮问诊失败
+        notes.append(f"挂号记录本次读不到（{type(e).__name__}）：请勿声称任何挂号结果")
+        return [], notes
+    out: list[BookingFact] = []
+    for row in rows:
+        status = str(row.get("status") or "")
+        out.append(
+            BookingFact(
+                kind="cancelled" if status == "cancelled" else "confirmed",
+                department=str(row.get("department") or ""),
+                date=str(row.get("date") or ""),
+                time_slot=str(row.get("time") or ""),
+                fee=int(row.get("fee") or 0),
+                ticket_no=str(row.get("ticket_no") or ""),
+                queue_no=int(row.get("queue_no") or 0),
+                status=status,
+            )
+        )
+    return out, notes

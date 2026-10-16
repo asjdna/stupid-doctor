@@ -25,6 +25,8 @@ from typing import Any
 import pytest
 
 from kubedocs.clinical.contracts import ClinicalAssessment, DepartmentAdvice, RedFlag
+from kubedocs.clinical.evidence import EvidenceBundle, EvidenceItem
+from kubedocs.clinical.pipeline import ClinicalTurn
 from kubedocs.clinical.reasoning import ReasoningResult
 from kubedocs.config import repo_root
 
@@ -229,16 +231,16 @@ class TestBaselineIsBoundToTheGoldSet:
 # LLM 臂：真正做判断的那条路。
 #
 # 下面每个用例都用**替身 reasoner**（形状与 `ClinicalReasoner.reason` 一致），
-# 把 `_llm_arm_status` / `_build_llm_reasoner` 一起替换掉——本文件**绝不联网**、
-# 绝不读 `.env` 里的真密钥。理由与 `_stub_triage` 相同：单测要毫秒级、可复现、
-# 不花钱，而且"模型这次答得怎么样"必须是测试输入而不是测试环境。
+# 把 `_judge_arm_status` / `_build_llm_reasoner` / `_build_tool_loop_pipeline` 一起替换掉——
+# 本文件**绝不联网**、绝不读 `.env` 里的真密钥、**绝不打开真索引**。理由与 `_stub_triage`
+# 相同：单测要毫秒级、可复现、不花钱，而且"模型这次答得怎么样"必须是测试输入而不是测试环境。
 # ---------------------------------------------------------------------------
 
 _TRIAGE_GLYPH = "一二三四五"
 
 
 def _emergency() -> ClinicalAssessment:
-    """模型判为急症的伪造结论（红线的落点：`urgency=emergency` + 非空 `red_flags`）。"""
+    """模型判为急症的伪造结论（危险信号的落点：`urgency=emergency` + 非空 `red_flags`）。"""
     return ClinicalAssessment(
         urgency="emergency",
         red_flags=[RedFlag(condition="急性冠脉综合征", severity="critical", why="胸痛，需即刻排查")],
@@ -334,13 +336,80 @@ def llm_gold(tmp_path: Path) -> Path:
     return path
 
 
-def _install_stub_llm(
+def _install_stub_reasoner(
     script: ModuleType, monkeypatch: pytest.MonkeyPatch, answers: dict[str, object], *, budget: Any = None
 ) -> _StubReasoner:
-    """把脚本的 LLM 臂接到替身 reasoner 上：状态探测与装配都换成假的（离线）。"""
+    """把**单发对照臂**接到替身 reasoner 上：状态探测与装配都换成假的（离线）。"""
     stub = _StubReasoner(answers)
-    monkeypatch.setattr(script, "_llm_arm_status", lambda: (True, ""))
+    monkeypatch.setattr(script, "_judge_arm_status", lambda *, need_index: (True, ""))
     monkeypatch.setattr(script, "_build_llm_reasoner", lambda: (stub, budget or _FakeBudget()))
+    return stub
+
+
+class _StubPipeline:
+    """替身管线：按患者原话返回预设 `ClinicalTurn`（形状与真产物一致）。
+
+    它替代的是 `pipeline.advance`——也就是**产品路径**那一步。所以这里的输入必须包含
+    真管线会给出的字段：`assessment` / `evidence` / `safety` / `llm_calls` / `steps` /
+    `tool_calls` / `degraded`，否则测出来的东西不代表产品。
+    """
+
+    def __init__(self, answers: dict[str, object]) -> None:
+        self._answers = dict(answers)
+        self.calls: list[str] = []
+
+    def advance(
+        self, question: str, *, state: Any = None, history: Any = None, patient_id: str = "anon"
+    ) -> Any:
+        self.calls.append(question)
+        outcome = self._answers.get(question, _routine())
+        if isinstance(outcome, BaseException):
+            raise outcome
+        assert isinstance(outcome, ClinicalTurn)
+        return outcome
+
+
+def _turn(
+    assessment: ClinicalAssessment | None,
+    *,
+    safety: dict[str, Any] | None = None,
+    llm_calls: int = 2,
+    steps: int = 3,
+    tools: int = 1,
+    action: str = "answer",
+    degraded: str = "",
+) -> ClinicalTurn:
+    return ClinicalTurn(
+        action=action,  # type: ignore[arg-type]
+        message="（打桩）",
+        assessment=assessment,
+        evidence=EvidenceBundle(items=[EvidenceItem(id="K1", kind="knowledge", text="资料")]),
+        safety=safety if safety is not None else {"fired": [], "ids": [], "followup": ""},
+        llm_calls=llm_calls,
+        steps=steps,
+        tool_calls=[{"name": "search_docs", "ok": True, "summary": "", "result": None}] * tools,
+        degraded=degraded,
+    )
+
+
+def _pipeline_answers(*, red_line: str = "emergency", triage_hits: int = 5) -> dict[str, object]:
+    """工具循环臂每一题的伪造产物（与 `_llm_answers` 同一批病例）。"""
+    answers: dict[str, object] = {
+        "我现在胸痛": _turn(_emergency() if red_line == "emergency" else _routine()),
+        "今天天气不错": _turn(_routine()),
+    }
+    for i, glyph in enumerate(_TRIAGE_GLYPH, start=1):
+        answers[f"分诊{glyph}"] = _turn(_routine(f"科室{i}") if i <= triage_hits else _routine("全科"))
+    return answers
+
+
+def _install_stub_pipeline(
+    script: ModuleType, monkeypatch: pytest.MonkeyPatch, answers: dict[str, object], *, budget: Any = None
+) -> _StubPipeline:
+    """把**工具循环臂**（产品路径）接到替身管线上：不打开索引、不联网。"""
+    stub = _StubPipeline(answers)
+    monkeypatch.setattr(script, "_judge_arm_status", lambda *, need_index: (True, ""))
+    monkeypatch.setattr(script, "_build_tool_loop_pipeline", lambda: (stub, budget or _FakeBudget(), None))
     return stub
 
 
@@ -349,24 +418,24 @@ def _run_arm(script: ModuleType, gold: Path, tmp_path: Path, arm: str, *extra: s
     return int(script.main(["--gold", str(gold), "--baseline", str(baseline), "--arm", arm, *extra]))
 
 
-class TestLlmArmMetricsAreRecords:
+class TestJudgeArmMetricsAreRecords:
     """LLM 臂的召回/误报/分诊都是**记录**：模型不是确定性的，拿分数卡退出码等于把波动当回归。"""
 
     def test_all_red_lines_found_passes(self, script, llm_gold, tmp_path, monkeypatch, capsys):
-        _install_stub_llm(script, monkeypatch, _llm_answers(triage_hits=5))
-        code = _run_arm(script, llm_gold, tmp_path, "llm", "--gate")
+        _install_stub_reasoner(script, monkeypatch, _llm_answers(triage_hits=5))
+        code = _run_arm(script, llm_gold, tmp_path, "reasoner", "--gate")
 
         out = capsys.readouterr().out
         assert code == 0, out
         assert "闸门：通过" in out
-        assert "LLM 臂（真正的判断者）" in out
+        assert "判断臂（单发对照（不检索））" in out
 
     def test_one_missed_red_line_is_reported_but_does_not_fail(
         self, script, llm_gold, tmp_path, monkeypatch, capsys
     ):
         """漏一条危险信号 ⇒ **记在案**（`fn=1`）但不再卡退出码；人看记录判断要不要跟进。"""
-        _install_stub_llm(script, monkeypatch, _llm_answers(red_line="routine", triage_hits=5))
-        code = _run_arm(script, llm_gold, tmp_path, "llm", "--gate", "--json")
+        _install_stub_reasoner(script, monkeypatch, _llm_answers(red_line="routine", triage_hits=5))
+        code = _run_arm(script, llm_gold, tmp_path, "reasoner", "--gate", "--json")
 
         captured = capsys.readouterr()
         payload = json.loads(captured.out)
@@ -378,18 +447,18 @@ class TestLlmArmMetricsAreRecords:
         self, script, llm_gold, tmp_path, monkeypatch, capsys
     ):
         """3/5 与 2/5 都退 0，但分数必须如实打出来（记录的意义就在这里）。"""
-        _install_stub_llm(script, monkeypatch, _llm_answers(triage_hits=3))
-        code = _run_arm(script, llm_gold, tmp_path, "llm", "--gate", "--json")
+        _install_stub_reasoner(script, monkeypatch, _llm_answers(triage_hits=3))
+        code = _run_arm(script, llm_gold, tmp_path, "reasoner", "--gate", "--json")
         first = json.loads(capsys.readouterr().out)
         assert code == 0 and first["llm"]["triage"]["accuracy"] == 0.6
 
-        _install_stub_llm(script, monkeypatch, _llm_answers(triage_hits=2))
-        code = _run_arm(script, llm_gold, tmp_path, "llm", "--gate", "--json")
+        _install_stub_reasoner(script, monkeypatch, _llm_answers(triage_hits=2))
+        code = _run_arm(script, llm_gold, tmp_path, "reasoner", "--gate", "--json")
         second = json.loads(capsys.readouterr().out)
         assert code == 0 and second["llm"]["triage"]["accuracy"] == 0.4
 
 
-class TestLlmArmInvariantsAreTheGate:
+class TestJudgeArmInvariantsAreTheGate:
     """**真正卡闸门的是确定性安全不变量**：判了急症却不给急救动作 ⇒ 退 2。"""
 
     def test_emergency_without_a_directive_fails_the_gate(
@@ -411,8 +480,8 @@ class TestLlmArmInvariantsAreTheGate:
             patient_summary="需要尽快处理，请重视。",  # 判了急症却没给可执行动作
             confidence=0.9,
         )
-        _install_stub_llm(script, monkeypatch, answers)
-        code = _run_arm(script, llm_gold, tmp_path, "llm", "--gate", "--json")
+        _install_stub_reasoner(script, monkeypatch, answers)
+        code = _run_arm(script, llm_gold, tmp_path, "reasoner", "--gate", "--json")
 
         captured = capsys.readouterr()
         payload = json.loads(captured.out)
@@ -423,15 +492,15 @@ class TestLlmArmInvariantsAreTheGate:
 
     def test_a_clean_emergency_answer_is_not_flagged(self, script, llm_gold, tmp_path, monkeypatch, capsys):
         """合规的急症回答（正文里有 120）不该被记一条不变量——否则这一层会污染正确输出。"""
-        _install_stub_llm(script, monkeypatch, _llm_answers(triage_hits=5))
-        code = _run_arm(script, llm_gold, tmp_path, "llm", "--gate", "--json")
+        _install_stub_reasoner(script, monkeypatch, _llm_answers(triage_hits=5))
+        code = _run_arm(script, llm_gold, tmp_path, "reasoner", "--gate", "--json")
 
         payload = json.loads(capsys.readouterr().out)
         assert code == 0
         assert payload["llm"]["invariant_violations"] == []
 
 
-class TestLlmArmCalibrationIsReported:
+class TestJudgeArmCalibrationIsReported:
     """置信度校准只报告：有 confidence 就算，没给就如实说"没有可校准的样本"。"""
 
     def test_confidence_pairs_produce_a_calibration_block(
@@ -455,8 +524,8 @@ class TestLlmArmCalibrationIsReported:
         )
         for glyph, i in zip(_TRIAGE_GLYPH, range(1, 6), strict=True):
             answers[f"分诊{glyph}"] = _routine(f"科室{i}").model_copy(update={"confidence": 0.7})
-        _install_stub_llm(script, monkeypatch, answers)
-        code = _run_arm(script, llm_gold, tmp_path, "llm", "--gate", "--json")
+        _install_stub_reasoner(script, monkeypatch, answers)
+        code = _run_arm(script, llm_gold, tmp_path, "reasoner", "--gate", "--json")
 
         payload = json.loads(capsys.readouterr().out)
         cal = payload["llm"]["calibration"]
@@ -467,26 +536,29 @@ class TestLlmArmCalibrationIsReported:
 
     def test_missing_confidence_is_said_out_loud(self, script, llm_gold, tmp_path, monkeypatch, capsys):
         """模型没给 confidence ⇒ 明说"没有可校准的样本"，不许悄悄报一个 0 分。"""
-        _install_stub_llm(script, monkeypatch, _llm_answers(triage_hits=5))
-        _run_arm(script, llm_gold, tmp_path, "llm", "--gate", "--json")
+        _install_stub_reasoner(script, monkeypatch, _llm_answers(triage_hits=5))
+        _run_arm(script, llm_gold, tmp_path, "reasoner", "--gate", "--json")
 
         cal = json.loads(capsys.readouterr().out)["llm"]["calibration"]
         assert cal["n"] == 0 and cal["brier"] is None
         assert "没有可校准的样本" in cal["note"]
 
 
-class TestLlmArmUnevaluatedIsNotAPass:
+class TestJudgeArmUnevaluatedIsNotAPass:
     """没密钥 ⇒ `evaluated=False` ⇒ **闸门失败**：没测不等于测了没问题。"""
 
     def test_no_api_key_fails_and_says_unevaluated(self, script, llm_gold, tmp_path, monkeypatch, capsys):
         monkeypatch.setattr(
             script,
-            "_llm_arm_status",
-            lambda: (False, "未配置大模型密钥（DEEPSEEK_API_KEY 未设置或形如占位符）"),
+            "_judge_arm_status",
+            lambda *, need_index: (False, "未配置大模型密钥（DEEPSEEK_API_KEY 未设置或形如占位符）"),
         )
         # 真去装配就该失败：这里把它换成"一调就炸"，证明没密钥时根本没建客户端。
         monkeypatch.setattr(script, "_build_llm_reasoner", lambda: pytest.fail("没密钥不该装配 reasoner"))
-        code = _run_arm(script, llm_gold, tmp_path, "llm", "--gate")
+        monkeypatch.setattr(
+            script, "_build_tool_loop_pipeline", lambda: pytest.fail("没密钥不该装配工具循环")
+        )
+        code = _run_arm(script, llm_gold, tmp_path, "reasoner", "--gate")
 
         out = capsys.readouterr().out
         assert code == 2, out
@@ -496,8 +568,8 @@ class TestLlmArmUnevaluatedIsNotAPass:
 
     def test_unevaluated_llm_arm_is_reported_in_json(self, script, llm_gold, tmp_path, monkeypatch, capsys):
         """`--json` 下也要能读到"未评测"：stdout 仍是纯 JSON，退出码不变。"""
-        monkeypatch.setattr(script, "_llm_arm_status", lambda: (False, "未配置大模型密钥"))
-        code = _run_arm(script, llm_gold, tmp_path, "llm", "--gate", "--json")
+        monkeypatch.setattr(script, "_judge_arm_status", lambda *, need_index: (False, "未配置大模型密钥"))
+        code = _run_arm(script, llm_gold, tmp_path, "reasoner", "--gate", "--json")
 
         captured = capsys.readouterr()
         payload = json.loads(captured.out)  # 旁白混进来就会在这里炸
@@ -515,8 +587,8 @@ class TestPerCaseFailureDoesNotCrashTheRun:
     ):
         answers = _llm_answers(triage_hits=5)
         answers["分诊三"] = RuntimeError("连接被重置")
-        stub = _install_stub_llm(script, monkeypatch, answers)
-        code = _run_arm(script, llm_gold, tmp_path, "llm", "--gate", "--json")
+        stub = _install_stub_reasoner(script, monkeypatch, answers)
+        code = _run_arm(script, llm_gold, tmp_path, "reasoner", "--gate", "--json")
 
         captured = capsys.readouterr()
         payload = json.loads(captured.out)  # 没崩：stdout 仍是完整 JSON
@@ -540,8 +612,8 @@ class TestPerCaseFailureDoesNotCrashTheRun:
         """`assessment=None`（模型没答）按漏报计，**不许**算成"模型说没急症"（TN）。"""
         answers = _llm_answers(triage_hits=5)
         answers["我现在胸痛"] = ReasoningResult(assessment=None, raw="", degraded="模型不可用")
-        _install_stub_llm(script, monkeypatch, answers)
-        code = _run_arm(script, llm_gold, tmp_path, "llm", "--gate", "--json")
+        _install_stub_reasoner(script, monkeypatch, answers)
+        code = _run_arm(script, llm_gold, tmp_path, "reasoner", "--gate", "--json")
 
         payload = json.loads(capsys.readouterr().out)
         assert code == 2
@@ -550,12 +622,12 @@ class TestPerCaseFailureDoesNotCrashTheRun:
         assert payload["llm"]["failed_calls"]
 
 
-class TestLlmArmCallsTheRealPath:
+class TestReasonerArmCallsTheSingleShotPath:
     """这一臂必须真的走"证据包 + 每题一次调用"那条路，而不是另造一条捷径。"""
 
     def test_each_case_is_asked_once_with_the_guard_evidence(self, script, llm_gold, tmp_path, monkeypatch):
-        stub = _install_stub_llm(script, monkeypatch, _llm_answers(triage_hits=5))
-        code = _run_arm(script, llm_gold, tmp_path, "llm")
+        stub = _install_stub_reasoner(script, monkeypatch, _llm_answers(triage_hits=5))
+        code = _run_arm(script, llm_gold, tmp_path, "reasoner")
 
         assert code == 0
         assert stub.calls == [
@@ -570,8 +642,8 @@ class TestLlmArmCallsTheRealPath:
 
     def test_cost_is_read_from_the_budget_ledger(self, script, llm_gold, tmp_path, monkeypatch, capsys):
         budget = _FakeBudget(per_read=0.0005)
-        _install_stub_llm(script, monkeypatch, _llm_answers(triage_hits=5), budget=budget)
-        code = _run_arm(script, llm_gold, tmp_path, "llm", "--json")
+        _install_stub_reasoner(script, monkeypatch, _llm_answers(triage_hits=5), budget=budget)
+        code = _run_arm(script, llm_gold, tmp_path, "reasoner", "--json")
 
         payload = json.loads(capsys.readouterr().out)
         llm = payload["llm"]
@@ -581,24 +653,25 @@ class TestLlmArmCallsTheRealPath:
         assert budget.reads == 2
 
 
-class TestRuleArmNeverTouchesTheLlm:
+class TestRuleArmNeverTouchesTheModel:
     """`--arm rule` 是**离线**模式：`--arm` 默认改成 `both` 之后，这条必须被钉住。"""
 
-    def test_arm_rule_does_not_probe_or_build_the_llm(self, script, gold, tmp_path, monkeypatch, capsys):
-        def boom_status() -> tuple[bool, str]:
-            pytest.fail("--arm rule 不该探测模型密钥")
+    def test_arm_rule_does_not_probe_or_build_the_judge(self, script, gold, tmp_path, monkeypatch, capsys):
+        def boom_status(*, need_index: bool) -> tuple[bool, str]:
+            pytest.fail("--arm rule 不该探测模型密钥或索引")
 
         def boom_build() -> Any:
-            pytest.fail("--arm rule 不该装配 LLM 客户端")
+            pytest.fail("--arm rule 不该装配任何判断臂")
 
-        monkeypatch.setattr(script, "_llm_arm_status", boom_status)
+        monkeypatch.setattr(script, "_judge_arm_status", boom_status)
         monkeypatch.setattr(script, "_build_llm_reasoner", boom_build)
+        monkeypatch.setattr(script, "_build_tool_loop_pipeline", boom_build)
         _stub_triage(script, monkeypatch, top="呼吸内科")
         code = _run(script, gold, tmp_path, "--gate")
 
         out = capsys.readouterr().out
         assert code == 0
-        assert "没有跑 LLM 臂" in out
+        assert "没有跑判断臂" in out
 
 
 class TestRuleArmTriageIsReportedNotGated:
@@ -608,14 +681,19 @@ class TestRuleArmTriageIsReportedNotGated:
     "最便宜、最稳定的线索质量读数"。
     """
 
-    def test_zero_rule_triage_does_not_fail_when_the_llm_arm_passes(
+    def test_zero_rule_triage_does_not_fail_when_the_judge_arm_passes(
         self, script, gold, tmp_path, monkeypatch, capsys
     ):
         _stub_triage(script, monkeypatch, top="骨科")  # 规则臂分诊 0 分
-        _install_stub_llm(
+        # `--arm both` 的判断臂是**工具循环**（产品路径）：替身要装在管线上。
+        _install_stub_pipeline(
             script,
             monkeypatch,
-            {"我现在胸痛": _emergency(), "今天天气不错": _routine(), "我咳嗽": _routine("呼吸内科")},
+            {
+                "我现在胸痛": _turn(_emergency()),
+                "今天天气不错": _turn(_routine()),
+                "我咳嗽": _turn(_routine("呼吸内科")),
+            },
         )
         code = _run_arm(script, gold, tmp_path, "both", "--gate")
 
@@ -635,17 +713,21 @@ class TestRuleArmTriageIsReportedNotGated:
         assert "线索质量读数" in out
 
 
-class TestBaselineRecordsTheLlmArmWithoutGatingOnIt:
-    """LLM 臂进基线是**记录**，不是回归门限（模型不确定，重跑会波动）。"""
+class TestBaselineRecordsTheJudgeArmWithoutGatingOnIt:
+    """判断臂进基线是**记录**，不是回归门限（模型不确定，重跑会波动）。"""
 
     def test_write_baseline_adds_the_llm_key_and_the_volatility_note(
         self, script, gold, tmp_path, monkeypatch
     ):
         _stub_triage(script, monkeypatch, top="呼吸内科")
-        _install_stub_llm(
+        _install_stub_pipeline(
             script,
             monkeypatch,
-            {"我现在胸痛": _emergency(), "今天天气不错": _routine(), "我咳嗽": _routine("呼吸内科")},
+            {
+                "我现在胸痛": _turn(_emergency()),
+                "今天天气不错": _turn(_routine()),
+                "我咳嗽": _turn(_routine("呼吸内科")),
+            },
         )
         path = tmp_path / "b.json"
         code = int(
@@ -660,18 +742,194 @@ class TestBaselineRecordsTheLlmArmWithoutGatingOnIt:
         assert payload["metrics"]["redline"]["recall"] == 1.0
         assert "booking" in payload["metrics"]
         assert "triage" in payload["metrics"]
-        # 新增：LLM 臂的数值 + "别拿它当门限"的说明
+        # 新增：判断臂的数值（含引擎）+ "别拿它当门限"的说明
         assert payload["metrics"]["llm"]["evaluated"] is True
+        assert payload["metrics"]["llm"]["engine"] == "tool_loop"
         assert "波动" in payload["llm_note"]
 
     def test_write_baseline_needs_the_rule_arm(self, script, gold, tmp_path, monkeypatch, capsys):
-        """只跑 LLM 臂时没有可写的基线主体 ⇒ 参数错误（退出码 1），不写半个文件。"""
-        _install_stub_llm(script, monkeypatch, {"我现在胸痛": _emergency()})
+        """只跑判断臂时没有可写的基线主体 ⇒ 参数错误（退出码 1），不写半个文件。"""
+        _install_stub_reasoner(script, monkeypatch, {"我现在胸痛": _emergency()})
         path = tmp_path / "b.json"
         code = int(
-            script.main(["--gold", str(gold), "--baseline", str(path), "--arm", "llm", "--write-baseline"])
+            script.main(
+                ["--gold", str(gold), "--baseline", str(path), "--arm", "reasoner", "--write-baseline"]
+            )
         )
 
         assert code == 1
         assert not path.exists()
         assert "参数错误" in capsys.readouterr().out
+
+
+# ---------------------------------------------------------------------------
+# 工具循环臂 = **产品路径**：`pipeline.advance(原话)` 走的是与 `/consult` 同一套装配
+# （`clinical/runtime.py`），模型自己决定调不调检索。下面这些用例钉住三件事：
+#   ① 这一臂真的按产品形状读产物（assessment/safety/tool_calls），不是另算一套；
+#   ② 安全不变量取管线**实际触发**的记录，评测不自己重算；
+#   ③ 默认的 `both` / `llm` 走的是工具循环，单发只在 `--arm reasoner` 下跑。
+# ---------------------------------------------------------------------------
+
+
+class TestToolLoopArmIsTheProductPath:
+    def test_default_both_runs_the_tool_loop_and_reports_its_engine(
+        self, script, llm_gold, tmp_path, monkeypatch, capsys
+    ):
+        stub = _install_stub_pipeline(script, monkeypatch, _pipeline_answers(triage_hits=5))
+        code = _run_arm(script, llm_gold, tmp_path, "both", "--gate", "--json")
+
+        payload = json.loads(capsys.readouterr().out)
+        assert code == 0
+        assert payload["llm"]["engine"] == "tool_loop"
+        assert stub.calls, "工具循环臂必须真的调管线"
+        assert "工具循环（产品路径）" in payload["arm"] or payload["arm"] == "both"
+
+    def test_llm_alias_is_the_tool_loop(self, script, llm_gold, tmp_path, monkeypatch):
+        stub = _install_stub_pipeline(script, monkeypatch, _pipeline_answers())
+        code = _run_arm(script, llm_gold, tmp_path, "llm", "--gate")
+
+        assert code == 0
+        assert stub.calls, "`--arm llm` 现在是产品路径（工具循环），不是单发"
+
+    def test_reasoner_arm_does_not_touch_the_pipeline(self, script, llm_gold, tmp_path, monkeypatch):
+        """`--arm reasoner` 是单发对照：不许偷偷装配管线（那会把两臂的差别抹掉）。"""
+        _install_stub_reasoner(script, monkeypatch, _llm_answers(triage_hits=5))
+        monkeypatch.setattr(
+            script, "_build_tool_loop_pipeline", lambda: pytest.fail("单发臂不该装配工具循环")
+        )
+        assert _run_arm(script, llm_gold, tmp_path, "reasoner") == 0
+
+    def test_tool_and_step_counts_come_from_the_turn(self, script, llm_gold, tmp_path, monkeypatch, capsys):
+        """调用次数/步数/工具次数取**管线自己数的**（产品路径的读数），不是评估算的。"""
+        per_case = {"我现在胸痛": (4, 6, 2), "今天天气不错": (1, 2, 1)}
+        answers = {
+            "我现在胸痛": _turn(_emergency(), llm_calls=4, steps=6, tools=2),
+            "今天天气不错": _turn(_routine(), llm_calls=1, steps=2, tools=1),
+        }
+        for glyph in _TRIAGE_GLYPH:
+            answers[f"分诊{glyph}"] = _turn(_routine("科室1"), llm_calls=1, steps=3, tools=0)
+            per_case[f"分诊{glyph}"] = (1, 3, 0)
+        _install_stub_pipeline(script, monkeypatch, answers)
+        _run_arm(script, llm_gold, tmp_path, "llm", "--json")
+
+        llm = json.loads(capsys.readouterr().out)["llm"]
+        assert llm["llm_calls"] == sum(v[0] for v in per_case.values())
+        assert llm["steps"] == sum(v[1] for v in per_case.values())
+        assert llm["tool_calls"] == sum(v[2] for v in per_case.values())
+
+    def test_invariants_come_from_the_pipeline_not_recomputed(
+        self, script, llm_gold, tmp_path, monkeypatch, capsys
+    ):
+        """**关键**：触发记录取管线 `turn.safety`，评测不自己重算一遍。
+
+        重算会得到"评测认为应该触发"与"产品实际触发了"两份真相，而这两份迟早不一致。
+        因此这里构造一个"结论看起来没问题、但管线记了不变量"的产物：报告必须如实带上它。
+        """
+        answers = _pipeline_answers(triage_hits=5)
+        answers["我现在胸痛"] = _turn(
+            _emergency(),
+            safety={
+                "fired": [
+                    {
+                        "invariant": "emergency_judgment_requires_directive",
+                        "action": "append_directive",
+                        "detail": "已补固定指引",
+                        "trace_id": "e1",
+                        "domain": "clinic",
+                    }
+                ],
+                "ids": ["emergency_judgment_requires_directive"],
+                "followup": "",
+            },
+        )
+        _install_stub_pipeline(script, monkeypatch, answers)
+        code = _run_arm(script, llm_gold, tmp_path, "llm", "--gate", "--json")
+
+        captured = capsys.readouterr()
+        payload = json.loads(captured.out)
+        assert code == 2, "触发了不变量就该红"
+        assert "emergency_judgment_requires_directive" in payload["llm"]["invariant_violations"][0]
+        assert "触发了确定性安全不变量" in captured.err
+
+    def test_blocked_answer_is_still_a_judgement(self, script, llm_gold, tmp_path, monkeypatch, capsys):
+        """`action="error"` 也可能是"输出被约束层拦下、改成只含事实的回答"。
+
+        那一轮的结论仍然存在 ⇒ 属于**测到了**，不许记成"没拿到判断"（否则闸门会假红）。
+        """
+        answers = _pipeline_answers(triage_hits=5)
+        answers["我现在胸痛"] = _turn(
+            _emergency(),
+            action="error",
+            degraded="回答未通过事实校验，已改为只陈述事实",
+        )
+        _install_stub_pipeline(script, monkeypatch, answers)
+        code = _run_arm(script, llm_gold, tmp_path, "llm", "--gate", "--json")
+
+        payload = json.loads(capsys.readouterr().out)
+        assert code == 0
+        assert payload["llm"]["failed_calls"] == []
+        assert payload["llm"]["n_failed_calls"] == 0
+
+    def test_assessment_none_is_a_failed_call(self, script, llm_gold, tmp_path, monkeypatch, capsys):
+        """管线没给出判断（模型失败/输出不可解析）⇒ 记一条"没测到"，闸门红。"""
+        answers = _pipeline_answers(triage_hits=5)
+        answers["我现在胸痛"] = _turn(None, action="error", degraded="大模型调用失败，请稍后重试。")
+        _install_stub_pipeline(script, monkeypatch, answers)
+        code = _run_arm(script, llm_gold, tmp_path, "llm", "--gate", "--json")
+
+        captured = capsys.readouterr()
+        payload = json.loads(captured.out)
+        assert code == 2
+        assert payload["llm"]["failed_calls"], "没拿到判断的题必须单独可见"
+        assert payload["llm"]["redline"]["fn"] == 1, "期望危险信号却拿不到结论 ⇒ 按漏报计（保守）"
+        assert "没有得到模型判断" in captured.err
+
+    def test_raising_pipeline_is_recorded_and_the_run_finishes(
+        self, script, llm_gold, tmp_path, monkeypatch, capsys
+    ):
+        answers = _pipeline_answers(triage_hits=5)
+        answers["分诊三"] = RuntimeError("索引连接被重置")
+        stub = _install_stub_pipeline(script, monkeypatch, answers)
+        code = _run_arm(script, llm_gold, tmp_path, "llm", "--gate", "--json")
+
+        captured = capsys.readouterr()
+        payload = json.loads(captured.out)  # 没崩：stdout 仍是完整 JSON
+        assert len(stub.calls) == 7
+        assert payload["llm"]["n_failed_calls"] == 1
+        assert "t3" in payload["llm"]["failed_calls"][0]
+        assert code == 2
+
+    def test_index_missing_marks_the_arm_unevaluated_without_crashing(
+        self, script, llm_gold, tmp_path, monkeypatch, capsys
+    ):
+        """没有索引 ⇒ **未评测**（不是 0 分）：工具循环臂没法检索，测出来的东西没有意义。"""
+        monkeypatch.setattr(
+            script,
+            "_judge_arm_status",
+            lambda *, need_index: (False, "clinic 域索引为空 ⇒ 工具循环臂无法检索（先跑 ingest）"),
+        )
+        monkeypatch.setattr(script, "_build_tool_loop_pipeline", lambda: pytest.fail("未评测时不该装配管线"))
+        code = _run_arm(script, llm_gold, tmp_path, "llm", "--gate", "--json")
+
+        captured = capsys.readouterr()
+        payload = json.loads(captured.out)
+        assert code == 2
+        assert payload["llm"]["evaluated"] is False
+        assert "索引为空" in payload["llm"]["reason"]
+        assert "未评测不等于通过" in captured.err
+
+    def test_judge_arm_status_checks_the_index_only_when_needed(self, script, monkeypatch):
+        """单发臂不打开索引（它不做检索），工具循环臂必须检查索引是否为空。"""
+        calls: list[bool] = []
+
+        def fake(*, need_index: bool) -> tuple[bool, str]:
+            calls.append(need_index)
+            return True, ""
+
+        monkeypatch.setattr(script, "_judge_arm_status", fake)
+        monkeypatch.setattr(script, "_build_llm_reasoner", lambda: (object(), _FakeBudget()))
+        monkeypatch.setattr(script, "_build_tool_loop_pipeline", lambda: (object(), _FakeBudget(), None))
+        script._run_reasoner_arm([])  # noqa: SLF001
+        script._run_tool_loop_arm([])  # noqa: SLF001
+
+        assert calls == [False, True]

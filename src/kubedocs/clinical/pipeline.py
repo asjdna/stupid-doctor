@@ -111,6 +111,16 @@ class ClinicalTurn:
     两者都进审计：前者在响应里给人看，后者另有一行写入 `safety_audit.jsonl`。
     """
 
+    llm_calls: int = 0
+    """这一轮**真正调了几次模型**（工具循环自己数的）。
+
+    它进 `GET /metrics` 的花费统计与评测报告：只有知道"一次问诊几次调用"，
+    才能解释花费与延迟的变化——只看总额看不出是"来了更多人"还是"每人多问了几轮"。
+    """
+
+    steps: int = 0
+    """这一轮的循环步数（含工具调用轮）。异常高的步数通常意味着提示词或工具描述让模型绕圈了。"""
+
 
 class ClinicalPipeline:
     """把各项能力装到一起。**每个依赖都是注入的**，所以每一段都能被单测替换。
@@ -371,12 +381,44 @@ class ClinicalPipeline:
         facts = self._build_facts(question, evidence, patient_id=patient_id)
         assessment = self._parse(result.final_text)
         if assessment is None:
-            logger.warning("工具循环输出不合契约：%s", result.final_text[:200])
+            # **一次格式修复重试**：工具循环跑完之后模型偶尔会吐一段散文而不是 JSON
+            # （实测约每 30 轮出现 1~2 次，且不可预测）。直接回"模型调用失败"对患者是白等一场，
+            # 而"请只输出 JSON"这句话几乎总能修好它——代价是一次调用，收益是一次可用回答。
+            # 修不好仍然只回失败提示：**不产出任何兜底结论**。
+            logger.warning("工具循环输出不合契约，重试一次：%s", result.final_text[:200])
+            repair = self._retry_with_feedback(
+                loop,
+                question,
+                intake,
+                history,
+                patient_id,
+                "你上一次的输出不是契约要求的 JSON（可能夹了说明文字、代码围栏或缺字段）。"
+                "请**只输出那一个 JSON 对象**：不要解释、不要围栏、不要多余字段；"
+                "字段与取值范围按系统提示里的输出格式。",
+                clue_facts,
+            )
+            if repair is not None:
+                repaired = self._parse(repair.final_text)
+                if repaired is not None:
+                    result, assessment, evidence = (
+                        repair,
+                        repaired,
+                        repair.evidence.model_copy(
+                            update={
+                                "red_line": fallback_evidence.red_line,
+                                "triage": fallback_evidence.triage,
+                            }
+                        ),
+                    )
+                    facts = self._build_facts(question, evidence, patient_id=patient_id)
+
+        if assessment is None:
+            logger.warning("工具循环输出仍然不合契约：%s", result.final_text[:200])
             return ClinicalTurn(
                 action="error",
                 message=LLM_FAILED_MESSAGE,
                 evidence=evidence,
-                problems=["模型输出不符合契约（解析失败）"],
+                problems=["模型输出不符合契约（解析失败，已重试一次）"],
                 degraded="模型输出不可解析",
                 prompt_version=prompt_version(),
                 red_line_positive=evidence.red_line_positive,
@@ -386,6 +428,8 @@ class ClinicalPipeline:
                     {"name": c.name, "ok": c.ok, "summary": c.summary, "result": c.result}
                     for c in result.calls
                 ],
+                llm_calls=int(getattr(result, "llm_calls", 0) or 0),
+                steps=int(getattr(result, "rounds", 0) or 0),
             )
 
         # **先校验、再执行契约**，顺序不能反：`enforce` 会把没有依据的检查/用药建议**删掉**，
@@ -487,6 +531,8 @@ class ClinicalPipeline:
             ],
             safety=safety.to_payload(),
             degraded=degraded,
+            llm_calls=int(getattr(result, "llm_calls", 0) or 0),
+            steps=int(getattr(result, "rounds", 0) or 0),
         )
 
     def _build_facts(self, question: str, evidence: EvidenceBundle, *, patient_id: str) -> FactSet:

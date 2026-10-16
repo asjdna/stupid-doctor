@@ -72,6 +72,13 @@ class ToolLoopResult:
     evidence: EvidenceBundle = field(default_factory=EvidenceBundle)
     degraded: str = ""
     rounds: int = 0
+    llm_calls: int = 0
+    """这一轮**调了几次模型**（一轮 = 一次调用；工具执行不额外计费）。
+
+    它必须被数出来而不是靠 `rounds` 猜：`rounds` 是循环轮数，而失败重试、超时补调
+    都可能让两者不等。花费与延迟的解释全靠这个数——只看总额看不出是"来了更多患者"
+    还是"每位患者多问了几轮"。
+    """
 
 
 def tool_schemas(*, domain: str = "clinic", allow_side_effects: bool = False) -> list[dict[str, Any]]:
@@ -265,9 +272,11 @@ class ClinicalToolLoop:
         messages.append({"role": "user", "content": f"{intake.render()}\n\n【患者这一轮说的话】\n{question}"})
         items: list[EvidenceItem] = []
         calls: list[ToolCallRecord] = []
+        llm_calls = 0
 
         for round_no in range(1, self._max_rounds + 1):
             turn = self._client.complete_with_tools(messages, tools)
+            llm_calls += 1
             pending = list(getattr(turn, "tool_calls", []) or [])
             content = str(getattr(turn, "content", "") or "")
             if not pending:
@@ -277,6 +286,7 @@ class ClinicalToolLoop:
                     calls=calls,
                     evidence=EvidenceBundle(items=items),
                     rounds=round_no,
+                    llm_calls=llm_calls,
                 )
 
             messages.append(
@@ -322,6 +332,7 @@ class ClinicalToolLoop:
             calls=calls,
             evidence=EvidenceBundle(items=items),
             rounds=self._max_rounds + 1,
+            llm_calls=llm_calls + 1,
         )
 
 

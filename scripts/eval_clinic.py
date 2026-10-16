@@ -69,12 +69,15 @@ from kubedocs.evaluation.clinic_llm import (  # noqa: E402
     LLM_TRIAGE_MIN_ACCURACY,
     LlmClinicReport,
     evaluate_llm_arm,
+    evaluate_tool_loop_arm,
     llm_governance_failures,
 )
 
 GOLD = REPO_ROOT / "data" / "eval" / "clinic_gold.jsonl"
 BASELINE = REPO_ROOT / "data" / "eval" / "clinic_baseline.json"
 ARCHIVE_DIR = REPO_ROOT / "data" / "eval" / "clinic_archive"
+TREND_FILE = REPO_ROOT / "data" / "eval" / "clinic_trend.jsonl"
+"""长期监听读的那份趋势记录（每轮一行，永久追加）。"""
 
 TRIAGE_RED_NOTE = """分诊为什么是 0 分：冻结基线里记着的就是 0。
   · data/eval/clinic_baseline.json 的 triage.accuracy = 0.0（hit 0 / total 5、evaluated=true）；
@@ -90,6 +93,16 @@ LLM_TRIAGE_RED_NOTE = """LLM 臂分诊是模型的结论（`assessment.departmen
 LLM_BASELINE_NOTE = """LLM 臂的分数**每次重跑都会有波动**（模型不是确定性的）：把它写进基线是为了
 "记录当时是什么样子"，**不是**当回归门限用。基线只有规则臂的线索质量读数
 （危险信号词表漏报、误报率与基线比较）用于回归判断——那部分是确定性的，值得比。"""
+
+
+def _prompt_version() -> str:
+    """当前提示词内容指纹。评测报告与趋势记录都带上它：**改提示词后分数不可直接比**。"""
+    try:
+        from kubedocs.clinical.prompts import prompt_version
+
+        return str(prompt_version())
+    except Exception:  # noqa: BLE001 - 提示词读不到不该让评测崩（它只是记录字段）
+        return ""
 
 
 def _emit(text: str, *, json_mode: bool) -> None:
@@ -165,17 +178,17 @@ def _run_rule_arm(cases: list[ClinicCase], *, json_mode: bool) -> tuple[ClinicRe
 
 
 def _llm_settings() -> Any:
-    """LLM 臂用的 `Settings`：与 `scripts/eval_medical_cot.py` 同一套（套上 clinic 域默认值）。"""
+    """判断臂用的 `Settings`：与 `scripts/eval_medical_cot.py` 同一套（套上 clinic 域默认值）。"""
     from kubedocs.cli import apply_domain_defaults
     from kubedocs.config import Settings
 
     return apply_domain_defaults(Settings(domain="clinic"))
 
 
-def _llm_arm_status() -> tuple[bool, str]:
-    """LLM 臂能不能跑：`.env` 里有没有**真的**密钥。返回 `(可用, 不可用时的原因)`。
+def _judge_arm_status(*, need_index: bool) -> tuple[bool, str]:
+    """判断臂能不能跑：密钥 +（工具循环臂还要）索引。返回 `(可用, 不可用时的原因)`。
 
-    缺密钥必须在这里就停下并标为「未评测」：让它跑下去的话，每一题都会走降级路径，
+    缺任何一样都必须在这里就停下并标为「未评测」：让它跑下去的话，每一题都会走降级路径，
     指标全是 0 却长得像"模型表现差"——那是把"没测"伪装成"测了"。
     """
     from kubedocs.config import load_env_file
@@ -184,20 +197,37 @@ def _llm_arm_status() -> tuple[bool, str]:
     # 先把 .env 导进 os.environ：`has_api_key()` 与 litellm 读的都是它，而 pydantic-settings
     # 只填 Settings 对象；漏了这步整轮评测会全走降级路径，却照样打印指标。
     load_env_file()
-    model = str(_llm_settings().llm_model)
-    if has_api_key(model):
-        return True, ""
-    return False, f"未配置大模型密钥（{required_api_key_env(model)} 未设置或形如占位符）"
+    settings = _llm_settings()
+    if not has_api_key(str(settings.llm_model)):
+        return (
+            False,
+            f"未配置大模型密钥（{required_api_key_env(str(settings.llm_model))} 未设置或形如占位符）",
+        )
+    if need_index:
+        try:
+            from kubedocs.store import from_settings
+
+            store = from_settings(settings)
+            try:
+                n = store.stats().n_chunks
+            finally:
+                store.close()
+        except Exception as e:  # noqa: BLE001 - 存储不可用只报告原因，不崩评测
+            return False, f"{settings.domain} 域索引不可用（{type(e).__name__}: {e}）"
+        if n == 0:
+            return False, f"{settings.domain} 域索引为空 ⇒ 工具循环臂无法检索（先跑 ingest）"
+    return True, ""
 
 
 def _build_llm_reasoner() -> tuple[Any, Any]:
-    """装配 LLM 臂：`Settings` → `DailyBudget` → `BudgetedClient` → `ClinicalReasoner`。
+    """装配**单发对照臂**：`Settings` → `DailyBudget` → `BudgetedClient` → `ClinicalReasoner`。
 
     **与 `scripts/eval_medical_cot.py` 是同一套装配形状**（同一本日预算账 `llm_spend.json`），
     不另发明一套：新增一条产品路径却绕过预算闸，等于把已有的花费上限作废。
     返回 `(reasoner, budget)`；`budget` 交给评测读本次花费。
     """
     from kubedocs.clinical.reasoning import BudgetedClient, ClinicalReasoner, LiteLLMAdapter
+    from kubedocs.clinical.runtime import open_domain_index  # noqa: F401 - 见下面的说明
     from kubedocs.generate import DailyBudget, LiteLLMClient
 
     settings = _llm_settings()
@@ -210,17 +240,77 @@ def _build_llm_reasoner() -> tuple[Any, Any]:
     return ClinicalReasoner(LiteLLMAdapter(client)), budget
 
 
-def _run_llm_arm(cases: list[ClinicCase]) -> LlmClinicReport:
-    """LLM 臂：真正做判断的那条路。**任何失败都收敛成"未评测/失败调用"，不许让脚本崩。**"""
+def _build_tool_loop_pipeline() -> tuple[Any, Any, Any]:
+    """装配**工具循环臂 = 产品路径**，返回 `(pipeline, budget, index_store)`。
+
+    装配本身走 `clinical/runtime.py` 的 `build_clinical_assembly`——与 `/consult` 是**同一份**
+    代码：同一次工具注册、同一个面板建造器、同一本日预算账、同一套安全门。评测自己再写一遍
+    装配，就会得到一个"产品不会走的形状"，而分数看起来仍然合理。
+
+    号源服务用 `MockAppointmentProvider`：评测**不碰真实号源库**（那会真的占库存），
+    而挂号工具在这一臂里也只读不写（`propose_booking` 只产生待确认单）。
+    `index_store` 由调用方关闭（它是本函数打开的）。
+    """
+    from kubedocs.clinical.runtime import build_clinical_assembly, open_domain_index
+    from kubedocs.domains.clinic.booking import BookingService
+    from kubedocs.domains.clinic.mock import MockAppointmentProvider
+    from kubedocs.domains.clinic.pending import PendingBookings
+    from kubedocs.domains.clinic.reference import make_reference_builder
+
+    settings = _llm_settings()
+    index_store, retriever = open_domain_index(settings)
+    booking = BookingService(MockAppointmentProvider())
+    assembly = build_clinical_assembly(
+        settings=settings,
+        retriever=retriever,
+        booking=booking,
+        pending=PendingBookings(),
+        reference_builder=make_reference_builder(service=booking),
+        # 评测与产品一样要过安全门与审计，但**不落就诊记录、不写审计文件**：
+        # 评测会在短时间里造出大量假会话，把它们混进真库/真审计只会污染治理读数。
+        store=None,
+        index_root=None,
+    )
+    return assembly.pipeline, assembly.budget, index_store
+
+
+def _run_tool_loop_arm(cases: list[ClinicCase]) -> LlmClinicReport:
+    """工具循环臂（产品路径）。**任何失败都收敛成"未评测/失败调用"，不许让脚本崩。**"""
     n_cases = sum(1 for c in cases if c.expect_red_line is not None or c.expect_department)
-    ok, why = _llm_arm_status()
+    ok, why = _judge_arm_status(need_index=True)
     if not ok:
-        return LlmClinicReport(evaluated=False, reason=why, n_cases=n_cases)
+        return LlmClinicReport(engine="tool_loop", evaluated=False, reason=why, n_cases=n_cases)
+
+    store: Any = None
+    try:
+        pipeline, budget, store = _build_tool_loop_pipeline()
+        return evaluate_tool_loop_arm(cases, pipeline=pipeline, budget=budget)
+    except Exception as e:  # noqa: BLE001 - 装配/运行失败都只报告，不崩评测
+        return LlmClinicReport(
+            engine="tool_loop",
+            evaluated=False,
+            reason=f"工具循环臂装配失败（{type(e).__name__}: {e}）",
+            n_cases=n_cases,
+        )
+    finally:
+        if store is not None:
+            store.close()
+
+
+def _run_reasoner_arm(cases: list[ClinicCase]) -> LlmClinicReport:
+    """单发对照臂：不做检索，只测"模型自己的判断"。便宜、可离线（有密钥即可）。"""
+    n_cases = sum(1 for c in cases if c.expect_red_line is not None or c.expect_department)
+    ok, why = _judge_arm_status(need_index=False)
+    if not ok:
+        return LlmClinicReport(engine="reasoner", evaluated=False, reason=why, n_cases=n_cases)
     try:
         reasoner, budget = _build_llm_reasoner()
     except Exception as e:  # noqa: BLE001 - 密钥/依赖/网络配置问题都只报告，不崩评测
         return LlmClinicReport(
-            evaluated=False, reason=f"LLM 臂装配失败（{type(e).__name__}: {e}）", n_cases=n_cases
+            engine="reasoner",
+            evaluated=False,
+            reason=f"单发臂装配失败（{type(e).__name__}: {e}）",
+            n_cases=n_cases,
         )
     return evaluate_llm_arm(cases, reasoner=reasoner, budget=budget)
 
@@ -241,7 +331,7 @@ def _print_rule_arm(report: ClinicReport, triage_cases: list[ClinicCase], cov_nu
     print(
         f"危险信号误报: {report.redline_false_positive_rate:.2%}"
         f"  (FP={report.redline_fp} TN={report.redline_tn})"
-        f"   ← 关键词表判据（记录；判断由 LLM 臂给出）"
+        f"   ← 关键词表判据（记录；判断由判断臂给出）"
     )
     acc_booking = report.booking_accuracy
     print(
@@ -267,8 +357,9 @@ def _print_rule_arm(report: ClinicReport, triage_cases: list[ClinicCase], cov_nu
             print(f"  ✗ {label}: {item}")
 
 
-def _print_llm_arm(report: LlmClinicReport) -> None:
-    print("LLM 臂（真正的判断者）")
+def _print_judge_arm(report: LlmClinicReport) -> None:
+    engine = "工具循环（产品路径）" if report.engine != "reasoner" else "单发对照（不检索）"
+    print(f"判断臂（{engine}）")
     if not report.evaluated:
         print(f"  未评测      : {report.reason}")
         print("  · **未评测不等于通过**：这次一条用例都没跑成，召回/误报/分诊三个数一个都没测到。")
@@ -291,7 +382,14 @@ def _print_llm_arm(report: LlmClinicReport) -> None:
         f"  (hit {report.triage_hit}/{report.triage_total})   ← 参考目标 {LLM_TRIAGE_MIN_ACCURACY:.0%}"
     )
     print(f"  失败调用    : {report.n_failed_calls}   ← 没有得到模型判断的题（未评测不等于通过）")
-    print(f"  调用次数    : {report.llm_calls}")
+    print(
+        f"  模型调用    : {report.llm_calls} 次（每题平均 {report.llm_calls / max(report.n_cases, 1):.1f}）"
+    )
+    if report.engine != "reasoner":
+        print(
+            f"  工具调用    : {report.tool_calls} 次；循环步数合计 {report.steps}"
+            "   ← 模型自己决定调哪些工具（产品路径的读数）"
+        )
     print(f"  花费（美元）: {report.cost_usd:.6f}")
     print(
         "  · 上面的分数是**记录**：参考目标 "
@@ -301,7 +399,21 @@ def _print_llm_arm(report: LlmClinicReport) -> None:
     print(
         f"  安全不变量  : "
         f"{'未触发（0 条）' if not report.invariant_violations else f'触发 {len(report.invariant_violations)} 条'}"
+        + (
+            ""
+            if not report.invariant_actions
+            else "（已处置："
+            + "、".join(
+                f"{a}×{report.invariant_actions.count(a)}" for a in sorted(set(report.invariant_actions))
+            )
+            + "）"
+        )
     )
+    if report.invariant_violations:
+        print(
+            "  · 触发不等于患者看到了不该看的：每一条都被安全门处置过——"
+            "换成了只含事实的回答、或补上了急救指引。它说明的是**模型这一轮需要被纠正**。"
+        )
     cal = report.calibration()
     if cal.n:
         print(f"  置信度校准  : n={cal.n} Brier={cal.brier:.4f}（只报告，不上门限）；{cal.note}")
@@ -355,14 +467,19 @@ def _baseline_notes(
 
 
 def main(argv: list[str] | None = None) -> int:
-    p = argparse.ArgumentParser(description="clinic 域评测（规则臂 + LLM 臂；闸门只卡确定性安全不变量）")
+    p = argparse.ArgumentParser(description="clinic 域评测（规则臂 + 判断臂；闸门只卡确定性安全不变量）")
     p.add_argument("--gold", default=str(GOLD))
     p.add_argument("--baseline", default=str(BASELINE))
     p.add_argument(
         "--arm",
-        choices=("both", "rule", "llm"),
+        choices=("both", "rule", "llm", "tool", "reasoner"),
         default="both",
-        help="跑哪个臂（默认 both）：rule = 离线只跑规则轨（不花钱）；llm = 只跑真正的判断者（会花钱）",
+        help=(
+            "跑哪个臂（默认 both = 规则臂 + 工具循环臂）："
+            "rule = 离线只跑规则轨（不花钱）；"
+            "llm / tool = 工具循环臂（**产品路径**，需要索引 + 密钥，会花钱）；"
+            "reasoner = 单发对照臂（不检索，也能跑，便宜——用来对照'有工具/没工具'的差别）"
+        ),
     )
     p.add_argument("--gate", action="store_true")
     p.add_argument("--write-baseline", action="store_true")
@@ -372,14 +489,20 @@ def main(argv: list[str] | None = None) -> int:
         default="",
         help=f"把这一轮的完整报告写成治理档案（默认不写；建议 {ARCHIVE_DIR}）",
     )
+    p.add_argument(
+        "--trend-path",
+        default="",
+        help=f"趋势记录的落点（默认 {TREND_FILE}；只在与 --archive 同时使用时写入）",
+    )
     args = p.parse_args(argv)
 
     run_rule = args.arm in ("both", "rule")
-    run_llm = args.arm in ("both", "llm")
+    run_judge = args.arm in ("both", "llm", "tool", "reasoner")
+    judge_engine = "reasoner" if args.arm == "reasoner" else "tool_loop"
     json_mode = bool(args.json)
 
     if args.write_baseline and not run_rule:
-        # 基线的主体是规则臂指标（确定性的那部分）；只跑 LLM 臂时没有可写的东西。
+        # 基线的主体是规则臂指标（确定性的那部分）；只跑判断臂时没有可写的东西。
         _emit(
             "参数错误：`--write-baseline` 需要规则臂（`--arm rule` 或 `both`）——基线的主体是规则臂指标",
             json_mode=json_mode,
@@ -395,8 +518,8 @@ def main(argv: list[str] | None = None) -> int:
         rule_report, cov_num, cov_den = _run_rule_arm(cases, json_mode=json_mode)
 
     llm_report: LlmClinicReport | None = None
-    if run_llm:
-        llm_report = _run_llm_arm(cases)
+    if run_judge:
+        llm_report = _run_tool_loop_arm(cases) if judge_engine == "tool_loop" else _run_reasoner_arm(cases)
 
     baseline_notes = (
         _baseline_notes(rule_report, cases, Path(args.baseline), json_mode=json_mode)
@@ -417,12 +540,12 @@ def main(argv: list[str] | None = None) -> int:
             _print_rule_arm(rule_report, triage_cases, cov_num, cov_den)
             print(
                 "  · 规则臂的分数是**线索质量读数**（它已经是线索提供者，不再是判断者）："
-                "只记不卡，判断者是下面的 LLM 臂。"
+                "只记不卡，判断者是下面的判断臂。"
             )
         if llm_report is not None:
-            _print_llm_arm(llm_report)
+            _print_judge_arm(llm_report)
         else:
-            print("（`--arm rule`：本轮没有跑 LLM 臂，所以没有「这次判断得怎么样」的读数。）")
+            print("（`--arm rule`：本轮没有跑判断臂，所以没有「这次判断得怎么样」的读数。）")
         for note in baseline_notes:
             print(f"  · 基线：{note}")
 
@@ -444,6 +567,28 @@ def main(argv: list[str] | None = None) -> int:
         }
         out.write_text(json.dumps(archive, ensure_ascii=False, indent=2), encoding="utf-8")
         _emit(f"\n已写入治理档案：{out}", json_mode=json_mode)
+        # **同一轮同时留一行趋势记录**：长期监听（`scripts/monitor_clinic.py`）读的就是它。
+        # 与档案同时写是刻意的——只在人要看的格式里留档、却不在机器要比的格式里留痕，
+        # 趋势就只能靠人翻 JSON。
+        if llm_report is not None:
+            from kubedocs.evaluation.monitor import (
+                append_record,
+                record_from_reports,
+                trend_path,
+            )
+
+            record = record_from_reports(
+                judge=llm_report,
+                rule=rule_report,
+                prompt_version=_prompt_version(),
+                gold_sha256=clinic_gold_sha256(cases),
+                note=llm_report.reason,
+            )
+            trend_file = Path(args.trend_path) if args.trend_path else trend_path(REPO_ROOT / "data" / "eval")
+            if append_record(trend_file, record):
+                _emit(f"已追加趋势记录：{trend_file}", json_mode=json_mode)
+            else:
+                _emit(f"（趋势记录写入失败：{trend_file}）", json_mode=json_mode)
 
     # ------------------------------------------------------------------ 基线
     if args.write_baseline:
@@ -474,21 +619,21 @@ def main(argv: list[str] | None = None) -> int:
     # **只有两类事会让它失败**：这次运行不能作为证据（用例空集 / 有题没拿到判断）、
     # 以及确定性安全不变量被触发。指标一个字都不参与（见模块文档）。
     rule_fails: list[str] = []
-    llm_fails: list[str] = []
+    judge_fails: list[str] = []
     if rule_report is not None:
         rule_fails.extend(governance_failures(rule_report, label="规则臂"))
     if llm_report is not None:
-        llm_fails.extend(llm_governance_failures(llm_report))
-    elif run_llm:
-        # 要求跑 LLM 臂却拿不到报告：装配阶段就失败了，这属于"没测"。
-        llm_fails.append("LLM 臂没有产生报告（未评测）——没测不等于通过")
+        judge_fails.extend(llm_governance_failures(llm_report))
+    elif run_judge:
+        # 要求跑判断臂却拿不到报告：装配阶段就失败了，这属于"没测"。
+        judge_fails.append(f"判断臂（{judge_engine}）没有产生报告（未评测）——没测不等于通过")
 
-    fails = rule_fails + llm_fails
+    fails = rule_fails + judge_fails
     for f in fails:
         _emit("  ✗ " + f, json_mode=json_mode)
     if any("分诊" in f for f in rule_fails):
         _emit("\n" + TRIAGE_RED_NOTE, json_mode=json_mode)
-    if any("分诊" in f for f in llm_fails):
+    if any("分诊" in f for f in judge_fails):
         _emit("\n" + LLM_TRIAGE_RED_NOTE, json_mode=json_mode)
     if fails:
         _emit("\n闸门：不通过", json_mode=json_mode)
