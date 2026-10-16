@@ -244,7 +244,6 @@ class _Turn:
         self.degraded = degraded
         self.prompt_version = "v1"
         self.red_line_positive = red_line
-        self.skill = None
         self.tool_calls: list[dict[str, Any]] = []
         self.intake = IntakeState()
 

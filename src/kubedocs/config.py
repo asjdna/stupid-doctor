@@ -82,14 +82,13 @@ class Settings(BaseSettings):
     api_port: int = 8080
 
     # ---------- 存储 ----------
-    # 同一 Store 协议下的四种实现（环境变量 KUBEDOCS_STORE，前缀由 env_prefix 自动加）：
+    # 同一 Store 协议下的三种实现（环境变量 KUBEDOCS_STORE，前缀由 env_prefix 自动加）：
     #   sqlite-vec : 默认。SQLite（FTS5 全文）+ sqlite-vec 向量索引，零外部进程/零镜像/零网络
     #   sqlite     : numpy 暴力内积 + .npy 侧车矩阵，作对照与回退
     #   pgvector   : Postgres + pgvector HNSW，需要 database_url 可达
-    #   milvus     : SQLite FTS5 全文 + Milvus Lite 本地文件里的 HNSW，无需外部服务
     # 非法取值直接报错，绝不静默回退：静默回退会让"我明明切到 pgvector 了、
     # 为什么数据还是旧的"变成一个没有任何日志的谜。
-    store: Literal["sqlite-vec", "sqlite", "pgvector", "milvus"] = "sqlite-vec"
+    store: Literal["sqlite-vec", "sqlite", "pgvector"] = "sqlite-vec"
     database_url: str = "postgresql://kubedocs:kubedocs@127.0.0.1:5432/kubedocs"
     db_pool_min: int = 1
     db_pool_max: int = 10
@@ -105,27 +104,6 @@ class Settings(BaseSettings):
     # 约 29MB，而 SQLite 默认页缓存只有 2MB，KNN 会反复穿透页缓存读盘（p50 从百毫秒
     # 量级降到 12ms）。SQLite 按需分配页面，给小索引设大上限不会白占内存。
     sqlite_cache_kib: int = Field(default=131072, ge=2000)
-    # Milvus Lite 数据文件的**位置**（本地文件模式：`MilvusClient("<path>.db")`，
-    # 不需要任何外部服务/容器）。留空 = `<index_dir>/<domain>/milvus.db`，
-    # 与 `sqlite_path` 同属"按域分目录"的组织方式：两个域的语料、维度与归一化方式
-    # 都可能不同，共用一个数据目录只会让"切域时忘了切集合"无从发现。
-    # 相对路径锚定仓库根（与 index_dir 一致），绝对路径原样使用。
-    # **必须以 .db 结尾**，milvus-lite 只认这种本地数据路径或 unix/http/tcp 形式的
-    # 远端地址，否则打开时抛 `uri ... is illegal`；本实现在构造时先自己挡一道并给人话提示。
-    # 该路径在 milvus-lite 眼里是**目录**（内含 LOCK / manifest.json / wal / parquet 段
-    # 文件），且**同一目录只允许一个进程打开**。
-    milvus_db: str = ""
-    # Milvus 侧 HNSW 的建索引参数。M / efConstruction **只能重建索引才能改**：
-    # 本实现把实际用到的取值记进索引元信息，配置与索引不一致时**直接报错**，
-    # 避免"你以为调了、其实索引还是老的"。
-    milvus_hnsw_m: int = Field(default=16, ge=2, le=2048)
-    milvus_hnsw_ef_construction: int = Field(default=200, ge=8, le=4096)
-    # 查询期候选队列（HNSW 的 `ef`）：越大召回越高、越慢，**不需要重建索引**。
-    milvus_hnsw_ef_search: int = Field(default=128, ge=1, le=4096)
-    # 度量。默认 COSINE，与 sqlite-vec（`distance_metric=cosine`）和 pgvector
-    # （`vector_cosine_ops`）一致；向量已归一化时 IP 与 COSINE 严格同序，
-    # 保留这个开关是为了让"度量到底有没有影响"能在真实数据上 A/B。
-    milvus_metric: Literal["COSINE", "IP"] = "COSINE"
     # 索引与语料的根目录；实际索引在 <index_dir>/<domain>/ 下，每个域一份、互不干扰。
     index_dir: str = "data/index"
     # 当前域。域包（domains/）自带语料、归一化器与评测集，内核只认这个名字。
@@ -196,15 +174,8 @@ class Settings(BaseSettings):
     llm_unpriced_call_usd: float = Field(default=0.25, ge=0.0)
 
     # ---------- 可观测 ----------
-    # 这三个字段都有真实分支（见 `observability.py`）：
-    #   · log_level     -> configure_logging() 设 root logger 级别
-    #   · otel_enable   -> setup_tracing() 建 TracerProvider
-    #   · otel_exporter -> console / otlp 分流（`none` = 不装 processor）
-    # `otel_enable` 默认关：console 导出器会往 stdout 打 span，在测试与库场景里是噪声
-    # （pytest 下 capsys 关掉 stdout 后会抛 `ValueError: I/O operation on closed file`）。
-    # /metrics 与这个开关无关：Prometheus 指标始终可用。
-    otel_enable: bool = False
-    otel_exporter: Literal["console", "otlp", "none"] = "console"
+    # `log_level` 有真实分支（见 `observability.py`）：configure_logging() 设 root logger 级别。
+    # /metrics 与它无关：Prometheus 指标始终可用。
 
     # ---------- 数据 ----------
     corpus_dir: str = "data/raw/k8s-docs"
@@ -278,18 +249,6 @@ class Settings(BaseSettings):
     @property
     def vector_path(self) -> Path:
         return self.index_path / "chunk_vectors.npy"
-
-    @property
-    def milvus_path(self) -> Path:
-        """Milvus（milvus-lite 本地文件模式）的数据目录。
-
-        默认与 `sqlite_path` 同目录：索引的位置按域组织，换域就换一整套文件，
-        不会出现"切了域但集合名没切"。`KUBEDOCS_MILVUS_DB` 可覆盖。
-        注意它在路径上以 `.db` 结尾，在 milvus-lite 眼里却是**目录**。
-        """
-        if self.milvus_db:
-            return self._resolve(self.milvus_db)
-        return self.index_path / "milvus.db"
 
 
 @lru_cache(maxsize=1)

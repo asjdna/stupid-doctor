@@ -6,7 +6,7 @@
 
 ```
 ┌──────────────────────────────────────────────────────────────────────────┐
-│ 接入层  CLI（kubedocs.cli）· HTTP API（api/）· MCP server（mcp/）          │
+│ 接入层  CLI（kubedocs.cli）· HTTP API（api/）                              │
 ├──────────────────────────────────────────────────────────────────────────┤
 │ 应用层  agent/（工具循环 · 图编排）· clinical/（医疗产品能力）             │
 ├──────────────────────────────────────────────────────────────────────────┤
@@ -14,7 +14,7 @@
 ├──────────────────────────────────────────────────────────────────────────┤
 │ 能力层  retrieve/（混合检索 · 融合 · 重排）· generate.py（带引用回答）      │
 ├──────────────────────────────────────────────────────────────────────────┤
-│ 数据层  ingest.py（摄取）· store/（sqlite · sqlite-vec · pgvector · milvus）│
+│ 数据层  ingest.py（摄取）· store/（sqlite · sqlite-vec · pgvector）       │
 ├──────────────────────────────────────────────────────────────────────────┤
 │ 支撑    config.py · observability.py · evaluation/                        │
 └──────────────────────────────────────────────────────────────────────────┘
@@ -75,11 +75,10 @@
 工具的**唯一真相源**是 `agent/tools.py` 的 `ToolRegistry`。一个 `ToolSpec` 声明：
 名称、说明、参数模型、"什么时候**不该**用"、是否产生副作用、执行体。
 
-同一个注册表同时供给三个消费方，因此不存在"两份定义不一致"的问题：
+同一个注册表同时供给两个消费方，因此不存在"两份定义不一致"的问题：
 
 - HTTP `GET /tools`（自省）
 - Agent 工具循环（模型按需调用）
-- MCP server（暴露给外部客户端，如各类 MCP 客户端）
 
 两条编排路径：
 
@@ -104,9 +103,7 @@ intake.py       多轮采问：槽位采集与"最多问几次"的收敛
 prompts/        系统提示词（硬性条款 R1–R7 与输出契约）
 reasoning.py    主判：装配提示词、解析契约、失败降级、预算闸
 orchestration.py 工具编排：模型自行决定取证
-skills/         业务能力（挂号），框架保证确认语义与副作用约束
 pipeline.py     把上面这些装成一条链
-persistence.py  会话与就诊记录的存储接口
 ```
 
 **一次问诊的形状**
@@ -141,7 +138,6 @@ persistence.py  会话与就诊记录的存储接口
 ## 七、可观测与运维
 
 - `GET /metrics`：Prometheus 指标，含按端点的请求数与耗时、检索各路耗时、LLM 花费与预算。
-- OpenTelemetry：可导出到任意 OTLP/HTTP 后端。
 - `GET /healthz`：存活 + 当前域的块数与索引可用性。**索引不可用不算存活失败**，
   此时接口仍返回 200 并在 `diagnostics` 里说明原因，避免"探针把服务打成不健康"。
 - 花费：所有模型调用共用一本日预算账本，账本按日累计落在 `data/index/llm_spend.json`。
@@ -156,13 +152,12 @@ src/kubedocs/
   embed.py         嵌入器抽象（bge / hashing）
   normalize.py     归一化器（可选中文分词）
   generate.py      带引用回答与日预算账本
-  store/           sqlite · sqlite-vec · pgvector · milvus
+  store/           sqlite · sqlite-vec · pgvector
   retrieve/        混合检索、RRF、重排
   domains/         k8s_docs · clinic
   agent/           工具注册表、ReAct 循环、图编排
   clinical/        医疗产品层
   api/             FastAPI 端点数与页面
-  mcp/             Model Context Protocol server
   evaluation/      评测闸门与基线
 ```
 
@@ -172,7 +167,7 @@ src/kubedocs/
 |---|---|
 | 加一个域 | 新增域包 + `domains.load_all()` 注册一行 |
 | 加一个工具 | `agent/tools.py` 注册 `ToolSpec` |
-| 加一个业务能力（skill） | 实现 `Skill` 协议 + `clinical.skills.default_registry()` 注册 |
+| 加一步服务端编排 | `clinical/orchestration.py` 的工具循环 |
 | 换嵌入模型 | 域包里的 `embedding_model`，然后**重建索引** |
 | 换向量后端 | 配置 `KUBEDOCS_STORE`，实现新后端则加一个 `Store` 子类 |
 | 换精排 | 实现重排接口（`retrieve/rerank.py`），在域包里启用 |

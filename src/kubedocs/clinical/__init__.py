@@ -11,9 +11,7 @@
 | `intake` | 结构化采问槽位 + 下一问 |
 | `prompts` | 系统提示词（版本化、被单测锁死） |
 | `reasoning` | 大模型主判 → 契约化输出（解析 / 校验 / 降级） |
-| `skills` | Skill 框架 + 挂号流程 |
-| `pipeline` | 编排：采问 → 检索 → 证据 → 主判 → 动作 → 应答 |
-| `persistence` | 患者数据与机构的**占位接口** |
+| `pipeline` | 编排：采问 → 证据 → 工具循环 → 契约化应答 |
 
 一句话记住边界：**平台提供检索、图、工具、评测、可观测；判断与交付物由本层定义。**
 """
@@ -33,13 +31,11 @@ from kubedocs.clinical.pipeline import ClinicalPipeline, ClinicalTurn
 from kubedocs.clinical.prompts import prompt_version, system_prompt
 from kubedocs.clinical.rag import (
     BackendHealth,
-    HttpRagBackend,
     LocalIndexBackend,
     RetrievalBackend,
     RetrievedChunk,
 )
 from kubedocs.clinical.reasoning import ClinicalReasoner, LiteLLMAdapter
-from kubedocs.clinical.skills import SkillRegistry, default_registry
 from kubedocs.clinical.triage import RetrievalTriage
 
 __all__ = [
@@ -53,16 +49,13 @@ __all__ = [
     "EvidenceBundle",
     "EvidenceItem",
     "ExamAdvice",
-    "HttpRagBackend",
     "LiteLLMAdapter",
     "LocalIndexBackend",
     "MedicationAdvice",
     "RetrievalBackend",
     "RetrievalTriage",
     "RetrievedChunk",
-    "SkillRegistry",
     "build_evidence",
-    "default_registry",
     "prompt_version",
     "system_prompt",
     "validate_against",

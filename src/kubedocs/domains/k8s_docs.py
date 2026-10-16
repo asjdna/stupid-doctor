@@ -57,10 +57,6 @@ class K8sDocsPack:
     def retriever(self, store: Store, embedder: Embedder, settings: Settings) -> HybridRetriever:
         return HybridRetriever(store, embedder, settings)
 
-    def tools(self) -> list[object]:
-        # k8s 域目前不向 agent 暴露工具，只需能被注册与自省。
-        return []
-
     def eval_sets(self) -> list[Path]:
         return [GOLD]
 

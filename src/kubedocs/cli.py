@@ -129,13 +129,9 @@ def _snippet(text: str, width: int = 160) -> str:
 
 
 def _index_label(settings: Settings) -> str:
-    """索引位置的人类可读描述：四种后端存在的位置本来就不同。"""
+    """索引位置的人类可读描述：不同后端存在的位置本来就不同。"""
     if settings.store == "pgvector":
         return f"{settings.database_url}（schema={settings.domain}）"
-    if settings.store == "milvus":
-        # 块行/全文在 SQLite，向量在 Milvus 的本地文件里——两个位置都要说清楚，
-        # 否则"索引到底在哪"要翻源码才知道。
-        return f"{settings.sqlite_path}（块行+全文） + {settings.milvus_path}（向量）"
     return str(settings.sqlite_path)
 
 
@@ -332,7 +328,7 @@ def cmd_stats(args: argparse.Namespace) -> int:
         }
         if args.verify:
             payload["fts_integrity"] = store.verify_fts()
-            # 向量侧体检：**三个后端的方法名不一样**——`sqlite-vec` / `milvus` 叫
+            # 向量侧体检：**各后端的方法名不一样**——`sqlite-vec` 叫
             # `verify_vec`，`pgvector` 叫 `verify_hnsw`，两个都要试，否则 pgvector
             # 那一路的向量体检永远是空的。注意**不要**预先塞一个 None：那会让
             # "这个后端没有向量体检"打印成「向量一致性 : None」，比不打印更误导。
@@ -393,18 +389,14 @@ def cmd_serve(args: argparse.Namespace) -> int:
     import uvicorn
 
     from kubedocs.api.app import create_app
-    from kubedocs.observability import setup_tracing
 
     settings = make_settings(args)
-    tracer = setup_tracing(settings)
     app = create_app(settings)
     host = args.host or "127.0.0.1"
     port = int(args.port or settings.api_port)
     print(f"服务地址：http://{host}:{port}")
     print(f"域：{settings.domain}    索引：{settings.sqlite_path}")
-    print(
-        f"可观测：日志级别 {settings.log_level}／指标 /metrics／OTel {settings.otel_exporter if tracer else '未启用'}"
-    )
+    print(f"可观测：日志级别 {settings.log_level}／指标 /metrics")
     print("首页（前端演示）：/    接口文档：/docs")
     uvicorn.run(app, host=host, port=port, log_level=(args.log_level or "info").lower())
     return EXIT_OK
@@ -425,7 +417,7 @@ def _add_globals(p: argparse.ArgumentParser, default: object) -> None:
         "--store",
         choices=list(BACKENDS),
         default=default,
-        help="存储后端（默认 sqlite-vec；sqlite=旧实现，pgvector=生产，milvus=Milvus Lite 本地文件 + HNSW）",
+        help="存储后端（默认 sqlite-vec；sqlite=旧实现，pgvector=生产）",
     )
     p.add_argument(
         "--provider",

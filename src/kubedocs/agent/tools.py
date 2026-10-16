@@ -56,15 +56,6 @@ class BookParams(BaseModel):
     time_slot: str = Field(default="", description="上午 / 下午，留空自动选第一个有余号的")
 
 
-class AskUserParams(BaseModel):
-    """向用户追问（人在环路：图会在此挂起）。"""
-
-    question: str = Field(min_length=1, max_length=500, description="要问用户的问题")
-    options: list[str] = Field(
-        default_factory=list, max_length=6, description="可选项；给出选项能显著降低用户的回答成本"
-    )
-
-
 @dataclass(frozen=True)
 class ToolSpec:
     """一个可被 agent 调用的能力。**纯数据描述**，不含 IO。"""

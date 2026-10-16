@@ -10,7 +10,7 @@
 - **证据编号由本模块分配**（`K1`、`K2`…），模型引用它们。所以"模型可以不检索"
   **不会**让"建议必须有依据"失效：不检索就没有编号可用，也就给不出检查/用药建议。
 - **有副作用的工具默认不给模型**（挂号会占号源）。需要时由调用方显式
-  `allow_side_effects=True`，与 MCP server 同一套约定。
+  `allow_side_effects=True`，并在执行前拿到用户确认。
 - **轮次上限是硬的**：模型不能靠"再查一次"把预算烧穿，到顶就要求它用现有证据作答。
 - **失败不吞**：工具抛错会作为 `tool` 消息回给模型（它能看到"这次检索失败了"并换策略），
   同时记进 `ToolLoopResult.calls` 供排查。
@@ -67,7 +67,7 @@ def tool_schemas(*, domain: str = "clinic", allow_side_effects: bool = False) ->
     """取该域可给模型用的工具 schema。
 
     **有副作用的工具默认不暴露**：模型一旦能直接取号，"确认"那套语义就得同时交给它，
-    而确认是流程责任、不该由模型自觉。与 MCP server 的 `build_server` 同一套约定。
+    而确认是流程责任、不该由模型自觉。与 `agent/tools.py` 的 `ToolSpec.side_effect` 同一套约定。
     """
     from kubedocs.agent.tools import ToolRegistry
 

@@ -90,14 +90,13 @@ docker compose up -d          # → http://127.0.0.1:8080
 | 路径 | 用途 |
 |---|---|
 | `/consult` | **交互式问诊**：多轮采问 + 对话式建议；急诊时顶部出现醒目提示 |
-| `/patient` | 患者端：只保留问诊对话，无任何运维信息 |
 | `/console` | 控制台：索引体检、`/metrics` 摘要、每路检索名次、降级原因 |
 | `/` | 演示页：检索 / 工具清单 / 问诊的最小示例 |
 
 ```
 GET  /healthz  /metrics  /domains  /tools
 POST /search   /ask      /chat
-GET  /         /console  /patient
+GET  /         /console
 GET  /consult  POST /consult  POST /consult/reset  GET /consult/status
 ```
 
@@ -113,21 +112,21 @@ GET  /consult  POST /consult  POST /consult/reset  GET /consult/status
                                               │
         检索：BM25 + 向量 + RRF(k=60) ──► 可选重排（bge-reranker-base，默认关）
                                               │
-        存储：sqlite-vec（默认）· pgvector · Milvus（可选）
+        存储：sqlite-vec（默认）· pgvector（容器）· sqlite（回退）
 ```
 
 **分层**
 
 | 层 | 目录 | 职责 |
 |---|---|---|
-| 存储 | `store/` | 四种后端统一接口；文档 / 块 / 全文索引 / 向量索引 |
+| 存储 | `store/` | 三种后端统一接口；文档 / 块 / 全文索引 / 向量索引 |
 | 检索 | `retrieve/` | 混合召回、RRF 融合、重排 |
 | 摄取 | `ingest.py` | 切块、编码、分批提交、删除同步 |
 | 域 | `domains/` | 每个域自带语料、嵌入模型、检索器配置与工具 |
 | Agent | `agent/` | 工具注册表、ReAct 循环、图编排（LangGraph） |
-| 医疗产品层 | `clinical/` | 契约、分诊、证据、采问、提示词、工具编排、挂号 skill |
-| API | `api/` | FastAPI 端点、静态页面、MCP server |
-| 观测 | `observability.py` | Prometheus 指标 + OpenTelemetry 链路 |
+| 医疗产品层 | `clinical/` | 契约、分诊、证据、采问、提示词、工具编排、挂号 |
+| API | `api/` | FastAPI 端点与静态页面 |
+| 观测 | `observability.py` | Prometheus 指标 |
 
 ### 一次问诊的流程
 
@@ -161,10 +160,10 @@ GET  /consult  POST /consult  POST /consult/reset  GET /consult/status
 4. **科室补全表**：语料里有相当一部分卡片的科室标注缺失，用图谱关系与别名把它补回来，
    补回的标签带**来源与置信度**，可抽检、可回退。
 
-### 挂号作为 skill
+### 挂号
 
-挂号被封装成一个 skill：解析科室 → 查号源 → 请求确认 → 占号 → 出凭据。
-框架层保证"**未确认绝不产生副作用**"，skill 不需要自己重复实现确认逻辑。
+挂号在 `/chat` 这条链上是一个工具：解析科室 → 查号源 → 请求确认 → 占号 → 出凭据。
+带副作用的工具默认不暴露给模型，需要显式开启；产生副作用前必须由调用方确认。
 
 ## 知识依据在哪
 
@@ -231,7 +230,7 @@ python -m kubedocs.cli eval --gate           # 之后每次回归检查（指标
 | 变量 | 默认 | 说明 |
 |---|---|---|
 | `KUBEDOCS_DOMAIN` | `k8s_docs` | 当前域 |
-| `KUBEDOCS_STORE` | `sqlite-vec` | 向量后端：`sqlite-vec` / `pgvector` / `milvus` |
+| `KUBEDOCS_STORE` | `sqlite-vec` | 向量后端：`sqlite-vec` / `pgvector` / `sqlite` |
 | `KUBEDOCS_DATABASE_URL` | — | 用 pgvector 时必填 |
 | `KUBEDOCS_LLM_MODEL` | `deepseek/deepseek-chat` | 经 LiteLLM 路由，可换供应商 |
 | `KUBEDOCS_LLM_DAILY_BUDGET_USD` | `2.0` | 日花费上限，账本落在 `data/index/llm_spend.json` |
@@ -243,13 +242,12 @@ python -m kubedocs.cli eval --gate           # 之后每次回归检查（指标
 ```
 src/kubedocs/
   config.py  cli.py  ingest.py  embed.py  normalize.py  generate.py
-  store/        # sqlite · sqlite-vec · pgvector · milvus
+  store/        # sqlite · sqlite-vec · pgvector
   retrieve/     # 混合检索、RRF、重排
   domains/      # k8s_docs · clinic（各自带语料与配置）
   agent/        # 工具注册表、ReAct 循环、图编排
-  clinical/     # 契约 · 分诊 · 证据 · 采问 · 提示词 · 工具编排 · skills
+  clinical/     # 契约 · 分诊 · 证据 · 采问 · 提示词 · 工具编排
   api/          # FastAPI 端点与页面
-  mcp/          # 把工具暴露给外部客户端（Model Context Protocol）
   evaluation/   # 评测闸门与基线
 docs/           # 架构、评测、设计决策
 scripts/        # 摄取、评测、运维脚本（各脚本内 --help 有说明）
@@ -260,9 +258,9 @@ tests/          # 单元测试
 
 - **加一个域**：新增一个域包（语料路径、嵌入模型、检索器、工具），在 `domains.load_all()` 注册一行。
 - **加一个工具**：在 `agent/tools.py` 的 `ToolRegistry` 注册一个 `ToolSpec`（含"什么时候不该用"）。
-  同一个注册表同时供给 API、Agent 循环与 MCP server，不写第二份定义。
-- **加一个业务能力**：实现 `Skill` 协议并在 `clinical.skills.default_registry()` 注册，
-  确认语义与副作用约束由框架统一保证。
+  同一个注册表同时供给 HTTP 端点与 Agent 循环，不写第二份定义。
+- **加一步编排**：需要在服务端固定顺序里插入一步（采问、取证、判定、落库）时，改
+  `clinical/orchestration.py` 的工具循环，而不是在提示词里堆约束。
 - **换检索/存储后端**：实现 `Store` 或重排接口，在配置里切换即可。
 
 贡献流程见 [CONTRIBUTING.md](CONTRIBUTING.md)。

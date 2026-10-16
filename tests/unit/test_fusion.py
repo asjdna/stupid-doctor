@@ -5,7 +5,7 @@
 
 import pytest
 
-from kubedocs.retrieve.fusion import Fused, explanation, rrf_fuse, truncate_dedup
+from kubedocs.retrieve.fusion import Fused, explanation, rrf_fuse
 
 
 def test_两路共同命中排第一():
@@ -72,11 +72,6 @@ def test_记录各路名次用于解释():
 def test_忽略_None_键():
     out = rrf_fuse([("bm25", ["a", None, "b"])])  # type: ignore[list-item]
     assert {f.key for f in out} == {"a", "b"}
-
-
-def test_truncate_dedup_保序去重():
-    assert truncate_dedup(["a", "b", "a", "c", "b"]) == ["a", "b", "c"]
-    assert truncate_dedup(["a", "b", "a"], limit=2) == ["a", "b"]
 
 
 def test_explanation_可读():

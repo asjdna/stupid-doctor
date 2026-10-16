@@ -133,17 +133,12 @@ class Chunk:
     """一个可检索块。metadata 全部保留，供引用与调试。"""
 
     chunk_id: str
-    doc_path: str  # 相对语料根的路径，如 concepts/architecture/cgroups.md
     index: int  # 该文档内的块序号
     text: str
     breadcrumb: list[str] = field(default_factory=list)  # 标题路径，如 ["Cgroups", "限制"]
     title: str = ""  # 文档标题（front matter > 首个 h1 > 文件名）
     source_url: str = ""  # 可点击的官方文档地址
     content_hash: str = ""
-
-    @property
-    def breadcrumb_text(self) -> str:
-        return " › ".join(self.breadcrumb)
 
 
 def parse_front_matter(text: str) -> tuple[dict, str]:
@@ -385,7 +380,6 @@ def chunk_document(
         out.append(
             Chunk(
                 chunk_id=f"{doc_id}::{i:04d}",
-                doc_path=rel_path.replace("\\", "/"),
                 index=i,
                 text=final_text,
                 breadcrumb=breadcrumb,

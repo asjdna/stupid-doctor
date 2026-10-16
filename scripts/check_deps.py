@@ -7,7 +7,7 @@
 - 只看 `src/`（`scripts/`、`tests/` 的依赖允许更松：它们是开发期工具）
 - 跳过标准库、`kubedocs` 自身、`src/` 下的相对导入
 - import 名与分发包名不一致的由 `ALIAS` 表补上（`sqlite_vec` → `sqlite-vec`）
-- `[project.optional-dependencies]` 里声明过的也算已声明（例如 Milvus 的 `pymilvus`）
+- `[project.optional-dependencies]` 里声明过的也算已声明
 
 用法::
 
@@ -31,7 +31,6 @@ ALIAS = {
     "sqlite_vec": "sqlite-vec",
     "sentence_transformers": "sentence-transformers",
     "prometheus_client": "prometheus-client",
-    "opentelemetry": "opentelemetry-sdk",
     "sse_starlette": "sse-starlette",
     "pydantic_settings": "pydantic-settings",
     "dotenv": "python-dotenv",

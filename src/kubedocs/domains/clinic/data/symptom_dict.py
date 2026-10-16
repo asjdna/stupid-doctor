@@ -1,37 +1,9 @@
 """症状实体词典。
 
-结构：标准症状 -> 口语/同义表达列表（用于"白话 -> 标准症状"归一化）。
+结构：标准症状 -> 口语/同义表达列表，供 `match_symptom_in_text` 从患者原话里抽取症状
+（"白话 -> 标准症状"）。
 生产可替换为公开资源：OpenCMKG / 中文症状库 / CMeKG 的症状实体。
 """
-
-# 部位（用户会说的部位词）
-BODY_PARTS = [
-    "头",
-    "太阳穴",
-    "后脑勺",
-    "脸",
-    "眼睛",
-    "耳朵",
-    "鼻子",
-    "喉咙",
-    "嗓子",
-    "脖子",
-    "胸口",
-    "心口",
-    "肚子",
-    "胃",
-    "腰",
-    "后背",
-    "肩膀",
-    "胳膊",
-    "手",
-    "腿",
-    "膝盖",
-    "脚",
-    "关节",
-    "皮肤",
-    "全身",
-]
 
 # 症状 -> 口语/同义表达（含模糊词、生活化比喻）
 SYMPTOMS = {
@@ -66,19 +38,6 @@ SYMPTOMS = {
 }
 
 
-def normalize_symptom(phrase: str) -> str | None:
-    """把口语表达归一化到标准症状名，未命中返回 None。"""
-    for std, variants in SYMPTOMS.items():
-        if phrase in variants:
-            return std
-    # 反向：短语中包含某个变体
-    for std, variants in SYMPTOMS.items():
-        for v in variants:
-            if v in phrase:
-                return std
-    return None
-
-
 def match_symptom_in_text(text: str) -> list[tuple[str, str]]:
     """从一段话中找出命中的症状（返回 [(标准症状, 命中原词), ...]）。"""
     hits = []
@@ -87,11 +46,3 @@ def match_symptom_in_text(text: str) -> list[tuple[str, str]]:
             if v in text:
                 hits.append((std, v))
     return hits
-
-
-# 抽取器标准症状名 -> 知识库症状键（抽得出但查不到时做别名映射）。
-# 注意：不做「出汗->盗汗」这类临床不等价的映射（冒汗≠盗汗），宁可查不到也不误导。
-KB_SYMPTOM_ALIAS = {
-    "发热": "发烧",
-    "食欲差": "食欲不振",
-}

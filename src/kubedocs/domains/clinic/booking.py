@@ -2,7 +2,7 @@
 
 组合两件事：
 
-1. `AppointmentProvider` —— 号源从哪来（可换 SQLite / Mock / 真实 HIS）
+1. `AppointmentProvider` —— 号源从哪来（当前是进程内 Mock，接真实 HIS 时换实现）
 2. 科室归一化 —— agent 说出的科室名要能对上号源系统的科室名
 
 **这一层不做自然语言理解**：它只接受结构化参数（科室、日期、时段）。
@@ -101,12 +101,3 @@ class BookingService:
         if cancel is None:
             raise BookingError("当前号源实现不支持取消")
         cancel(ticket_no, patient_id)
-
-
-def describe_ticket(ticket: dict) -> str:
-    """把取号结果渲染成一句人话（agent 回复用）。"""
-    return (
-        f"挂号成功。取号单号 {ticket['ticket_no']}，"
-        f"{ticket['department']} {ticket['date']} {ticket['time']}，"
-        f"排队号 {ticket['queue_no']}，挂号费 {ticket.get('fee', 0)} 元。"
-    )

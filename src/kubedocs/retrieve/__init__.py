@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from kubedocs.retrieve.fusion import Fused, explanation, rrf_fuse, truncate_dedup
+from kubedocs.retrieve.fusion import Fused, explanation, rrf_fuse
 from kubedocs.retrieve.hybrid import (
     HybridRetriever,
     RetrievedChunk,
@@ -20,5 +20,4 @@ __all__ = [
     "apply_rerank",
     "explanation",
     "rrf_fuse",
-    "truncate_dedup",
 ]

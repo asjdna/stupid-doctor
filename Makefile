@@ -17,7 +17,7 @@ RUN = $(PY)
 # 受限网络下用镜像端点下载模型，并在模型已缓存后离线加载（联网校验会长时间挂起）。
 HF := --hf-endpoint https://hf-mirror.com --hf-offline
 
-.PHONY: help install check ci-local lint fmt type refs test lock corpus cstats ingest ingest-hash search stats \
+.PHONY: help install check ci-local lint fmt type refs test corpus ingest ingest-hash search stats \
         gold eval eval-baseline up down logs clean
 
 # help 用 $(PY) -c 实现：本机 PATH 上不一定有 grep / awk，而 venv 解释器是本仓库的运行前提。
@@ -53,19 +53,13 @@ refs:  ## 文档锚点校验（阻塞）
 
 # 只跑 tests/unit（tests/ 下目前只有 unit），不加载模型、不需要网络。
 # 不要叠加第二个 `-q`（addopts 里已有一个），否则汇总行会被吞掉。
-# `-rs` 把每条 skip 的原因打出来：可接受的 skip 只有 milvus 那一族（可选依赖）。
+# `-rs` 把每条 skip 的原因打出来：Postgres 不可达时 pgvector 那族会 skip，那不算跑过。
 test:  ## 单元测试（不需要网络与模型，秒级）
 	$(RUN) -m pytest tests/unit -p no:cacheprovider -rs
-
-lock:  ## 重跑依赖锁文件（改了 pyproject 依赖后必须做；只查漂移见 scripts/gen_lock.py --check）
-	$(RUN) scripts/gen_lock.py
 
 # ---------------------------------------------------------------- 数据
 corpus:  ## 拉取 Kubernetes 官方文档（1720 篇 / 16.2MB）
 	$(RUN) scripts/fetch_corpus.py
-
-cstats:  ## 语料切块体检（产出可写进 README 的数字）
-	$(RUN) scripts/chunk_stats.py
 
 ingest:  ## 建索引（增量；首次全量约 35 分钟，嵌入是瓶颈）
 	$(RUN) -m kubedocs.cli $(HF) ingest

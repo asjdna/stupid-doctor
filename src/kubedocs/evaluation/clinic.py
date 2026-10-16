@@ -44,16 +44,6 @@ DEFAULT_TRIAGE_MIN_ACCURACY = 0.60
 替代"分诊指标本身是否可信"的判断——自建用例的成绩不是临床验证，与红线 1.0 同理。
 """
 
-REDLINE_CASES = (
-    "redline_trigger",
-    "redline_other",
-    "redline_past",
-    "redline_negated",
-    "redline_hypothetical",
-    "redline_uncertain",
-    "safe_normal",
-)
-
 
 @dataclass(frozen=True)
 class ClinicCase:

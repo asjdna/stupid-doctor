@@ -1,11 +1,11 @@
-"""进程内号源替身（`MockAppointmentProvider`）——**只用于测试**。
+"""进程内号源实现（`MockAppointmentProvider`）——**当前唯一的号源实现**。
 
-单独留一个 Mock 而不是让测试直接用 SQLite 版，是为了三件事：**快**（不必为每次挂号
-付建库建表的代价）、**可注入故障**（一行代码就能让它抛错，用于测降级路径）、
-**契约一致性**（两个实现同属一个 ABC，测试里换实现不该影响断言——
-如果影响了，说明有实现偏离了契约）。
+生产装配点（`api/app.py`、`api/consult.py`）与测试都用它。号源放在进程内存里：
+快、无 IO、可注入故障（`failing_departments`），代价是**进程退出即丢**，
+也没有并发/持久化保证（那两条是对真实实现的要求，见 `AppointmentProvider.book`）。
 
-它**不是**持久化的：进程退出即丢。真实使用一律走 `SqliteAppointmentProvider`。
+接真实号源（HIS）时，实现 `AppointmentProvider` 的同一份契约再换装配点即可，
+上层（`BookingService` 与 agent 工具）不用改。
 """
 
 from __future__ import annotations

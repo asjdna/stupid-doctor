@@ -7,7 +7,7 @@
     候选打分 ← hypothesis.score（规则权重 + 来源折扣）
     选题/建议 ← hypothesis.next_question / suggest_hypothesis（红线保护内置）
     急诊红线 ← redline.RiskGuard（确定性，LLM 不可绕过）
-    挂号 ← BookingService → AppointmentProvider（SQLite / Mock 可换）
+    挂号 ← BookingService → AppointmentProvider（当前是进程内 Mock；接真实 HIS 时换实现）
     回答 ← **注入的 `answerer`**；未注入时用"最佳候选 + 就医提醒"的保守兜底
 
 **来源判定为什么在这里做**：`hypothesis` 的权重表区分"用户自发说的"与"系统建议后
@@ -202,8 +202,7 @@ def build_clinic_deps(
 
     `answerer` 是**可选注入**的检索回答器（需要检索器与 LLM）；
     不注入时 `_answer` 走"最佳候选 + 就医提醒"的保守兜底——
-    **宁可信息少，也不要没答案**。注意 `agent/selfask.py` 不在这条链上：
-    当前没有任何生产路径注入它。
+    **宁可信息少，也不要没答案**。
     """
     guard = RiskGuard()
     service = BookingService(provider)

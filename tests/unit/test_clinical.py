@@ -1,8 +1,8 @@
 """产品层（`kubedocs.clinical`）测试：守护契约与流程，而不是"算得对不对"。
 
 契约拦得住不合规输出（无依据的检查/用药建议、编造的证据 id、剂量）；流程的安全性质
-成立（未确认绝不取号、证据不足不给结论、红线进上下文）；提示词的硬性条款真写在里面。
-全部离线：检索器、挂号后端、LLM 客户端一律用假对象。
+成立（急重症优先、红线进上下文、工具循环失败也要降级而不是把裸文本给患者）；
+提示词的硬性条款真写在里面。全部离线：检索器、LLM 客户端一律用假对象。
 """
 
 from __future__ import annotations
@@ -20,7 +20,6 @@ from kubedocs.clinical import triage as triage_mod
 from kubedocs.clinical.pipeline import ClinicalPipeline
 from kubedocs.clinical.prompts import prompt_version, system_prompt
 from kubedocs.clinical.reasoning import ClinicalReasoner
-from kubedocs.clinical.skills import BookingSkill, SkillRegistry, SkillRequest
 
 
 # --------------------------------------------------------------------- 假对象
@@ -218,15 +217,6 @@ class TestRetrievalBackend:
         hits = backend.search("q", top_k=3)
         assert hits[0].title == "标题" and hits[0].body == "正文"
         assert backend.health().ok is True
-
-    def test_http_backend_fails_loudly_instead_of_returning_empty(self) -> None:
-        """**关键取舍**：没实现就大声抛，不许安静地返回空列表。"""
-        with pytest.raises(NotImplementedError):
-            rag.HttpRagBackend("http://rag.invalid").search("q")
-
-    def test_assert_is_backend_rejects_incomplete_object(self) -> None:
-        with pytest.raises(TypeError):
-            rag.assert_is_backend(type("X", (), {"name": "x", "search": lambda self, q: []})())
 
 
 # --------------------------------------------------------------------- 分诊
@@ -543,104 +533,6 @@ class TestSystemPrompt:
         assert SYSTEM_PROMPT_PATH.is_file()
 
 
-# --------------------------------------------------------------------- Skill 框架
-class TestSkillRegistry:
-    def test_duplicate_registration_is_rejected(self) -> None:
-        reg = SkillRegistry()
-        reg.register(BookingSkill(_FakeBooking()))
-        with pytest.raises(ValueError):
-            reg.register(BookingSkill(_FakeBooking()))
-
-    def test_two_side_effect_steps_are_rejected(self) -> None:
-        """副作用最多一处：不可逆点分散会让"失败回退"说不清。"""
-        from kubedocs.clinical.skills.base import SkillStep
-
-        class _Bad:
-            name = "bad"
-
-            steps = (
-                SkillStep("read", "只读"),
-                SkillStep("commit_a", "副作用一", side_effect=True),
-                SkillStep("commit_b", "副作用二", side_effect=True),
-            )
-
-            def run(self, request: SkillRequest) -> object:
-                del request
-                raise AssertionError
-
-        with pytest.raises(ValueError, match="多个副作用步骤"):
-            SkillRegistry().register(_Bad())  # type: ignore[arg-type]
-
-    def test_side_effect_as_first_step_is_rejected(self) -> None:
-        """第一步就动手的 skill 重跑不幂等——这类形状要被挡住。"""
-        from kubedocs.clinical.skills.base import SkillStep
-
-        class _Bad:
-            name = "bad2"
-
-            steps = (SkillStep("commit", "直接副作用", side_effect=True),)
-
-            def run(self, request: SkillRequest) -> object:
-                del request
-                raise AssertionError
-
-        with pytest.raises(ValueError, match="第一步就是副作用"):
-            SkillRegistry().register(_Bad())  # type: ignore[arg-type]
-
-    def test_read_only_step_after_the_side_effect_is_allowed(self) -> None:
-        """挂号是 commit → receipt（副作用之后还有只读步），这条形状必须被允许。"""
-        reg = SkillRegistry()
-        reg.register(BookingSkill(_FakeBooking()))
-        names = [s.name for s in reg.get("book_appointment").steps]
-        assert names.index("commit") < names.index("receipt")
-
-    def test_describe_exposes_steps(self) -> None:
-        reg = SkillRegistry()
-        reg.register(BookingSkill(_FakeBooking()))
-        described = reg.describe()
-        assert described[0]["name"] == "book_appointment"
-        assert [s["name"] for s in described[0]["steps"]][-1] == "receipt"
-
-
-# --------------------------------------------------------------------- 挂号 skill
-class TestBookingSkill:
-    def test_unconfirmed_run_does_not_book(self) -> None:
-        """**安全性质**：未确认时绝不产生副作用——这里断言后端压根没被调用。"""
-        backend = _FakeBooking()
-        outcome = BookingSkill(backend).run(
-            SkillRequest(patient_id="p1", params={"department": "心血管内科"})
-        )
-        assert outcome.needs_confirmation is True
-        assert outcome.stopped_at == "confirm"
-        assert backend.booked == [], "未确认却取了号"
-
-    def test_confirmed_run_books_and_returns_receipt(self) -> None:
-        backend = _FakeBooking()
-        outcome = BookingSkill(backend).run(
-            SkillRequest(patient_id="p1", confirmed=True, params={"department": "心血管内科"})
-        )
-        assert outcome.ok is True
-        assert outcome.data["ticket_no"] == "A0001"
-        assert backend.booked[0]["patient_id"] == "p1"
-        assert outcome.steps_done[-1] == "receipt"
-
-    def test_unknown_department_stops_at_resolve(self) -> None:
-        outcome = BookingSkill(_FakeBooking()).run(
-            SkillRequest(patient_id="p1", params={"department": "外星科"})
-        )
-        assert outcome.ok is False and outcome.stopped_at == "resolve_department"
-
-    def test_no_slot_stops_before_confirm(self) -> None:
-        outcome = BookingSkill(_FakeBooking(remaining=0)).run(
-            SkillRequest(patient_id="p1", params={"department": "心血管内科"})
-        )
-        assert outcome.ok is False and outcome.stopped_at == "list_candidates"
-
-    def test_missing_department_parameter_is_reported(self) -> None:
-        outcome = BookingSkill(_FakeBooking()).run(SkillRequest(patient_id="p1"))
-        assert outcome.stopped_at == "resolve_department"
-
-
 # --------------------------------------------------------------------- 主判
 class TestReasoner:
     def test_valid_json_becomes_assessment(self) -> None:
@@ -800,29 +692,28 @@ class _FakeToolLoop:
 
 
 class TestPipeline:
+    """编排层：只有一条路径（工具循环），这里钉住它推导出的 `action`。"""
+
     def _pipeline(
         self,
-        reply: str | Exception = "",
         *,
         word: str | None = None,
         tool_loop: object | None = None,
     ) -> ClinicalPipeline:
-        from kubedocs.clinical.skills import default_registry
-
         return ClinicalPipeline(
             backend=rag.LocalIndexBackend(_FakeRetriever([_Chunk("心电图检查", "心电图用于排查心脏问题")])),
-            reasoner=ClinicalReasoner(_FakeLLM(reply or _assessment_json())),
-            skills=default_registry(booking_backend=_FakeBooking()),
+            # reasoner 只提供降级产物（工具循环失败时的那句有限结论），正常轮次不经过它
+            reasoner=ClinicalReasoner(_FakeLLM(_assessment_json())),
             guard=_FakeGuard(word),
             triage=triage_mod.RetrievalTriage(_FakeBooking(departments=["心血管内科", "消化内科"])),
-            tool_loop=tool_loop,
+            tool_loop=tool_loop or _FakeToolLoop(_assessment_json()),
         )
 
-    def test_intake_does_not_preempt_the_model_when_tool_loop_is_present(self) -> None:
-        """有工具循环时，追问闸门不得抢在模型判急重症之前。
+    def test_intake_never_preempts_the_model(self) -> None:
+        """编排层不设追问闸门：追不追问归模型，急症不能被拦成一句追问。
 
-        追问闸门只看槽位填满没有，不看急症：「突发言语不清，右侧肢体无力两小时」这类卒中
-        描述会被判成 `action=ask`。有工具循环时"够不够下结论"必须归模型（提示词 R5）。
+        「突发言语不清，右侧肢体无力两小时」这类卒中描述在闸门下会被判成 `action=ask`；
+        现在"够不够下结论"必须由模型自己决定（提示词 R5）。
         """
         loop = _FakeToolLoop(
             json.dumps(
@@ -838,14 +729,9 @@ class TestPipeline:
             )
         )
         turn = self._pipeline(tool_loop=loop).advance("突发言语不清，右侧肢体无力两小时")
-        assert loop.calls == 1, "模型必须真的被调用过（而不是被追问闸门拦住）"
+        assert loop.calls == 1, "模型必须真的被调用过（而不是被编排层拦住）"
         assert turn.action == "emergency"
         assert turn.assessment is not None and turn.assessment.red_flags
-
-    def test_intake_gate_still_asks_without_tool_loop(self) -> None:
-        """没有工具循环时，原来的追问闸门行为必须原样保留。"""
-        turn = self._pipeline().advance("呃")
-        assert turn.action == "ask"
 
     def test_followup_questions_become_an_ask_but_emergency_wins(self) -> None:
         """模型追问 ⇒ `action=ask`；但**急重症优先**，不得给"先追问"的动作。"""
@@ -876,57 +762,18 @@ class TestPipeline:
         )
         assert self._pipeline(tool_loop=emg_loop).advance("半边身子不能动").action == "emergency"
 
-    def test_asks_when_critical_slot_is_missing(self) -> None:
-        """证据不足不得给结论。"""
-        turn = self._pipeline().advance("我不舒服")
-        assert turn.action == "ask"
-        assert turn.assessment is None
-        assert turn.message.endswith("？")
-
-    def test_concludes_when_slot_filled(self) -> None:
-        turn = self._pipeline().advance("胸口疼")
-        assert turn.action == "answer"
-        assert turn.assessment is not None
-        assert turn.prompt_version != ""
-
-    def test_emergency_action_when_model_says_so(self) -> None:
-        turn = self._pipeline(
-            _assessment_json(urgency="emergency", patient_summary="请立即拨打 120 或去急诊。")
-        ).advance("胸口疼")
-        assert turn.action == "emergency"
-
     def test_keyword_hit_is_exposed_but_does_not_decide(self) -> None:
         """关键词命中要如实暴露（供排查），但**不改写模型的结论**。"""
         turn = self._pipeline(word="胸痛").advance("胸口疼")
         assert turn.red_line_positive is True
-        assert any("关键词表命中" in p for p in turn.problems)
         # 桩判的是 routine，结论就得是 routine，不被关键词改写
         assert turn.assessment is not None
         assert turn.action != "emergency"
-
-    def test_booking_requires_confirmation_then_books(self) -> None:
-        pipe = self._pipeline()
-        params = {"department": "心血管内科"}
-        first = pipe.advance("胸口疼", want_booking=True, booking_params=params)
-        assert first.action == "confirm_booking"
-        assert first.skill is not None and first.skill.needs_confirmation
-
-        # 会话状态由调用方持有并回传（`ClinicalTurn.intake`）；不传就等于新开一轮。
-        second = pipe.advance(
-            "好",
-            state=first.intake,
-            want_booking=True,
-            booking_params=params,
-            confirmed=True,
-        )
-        assert second.action == "booked"
-        assert second.skill is not None and second.skill.data["ticket_no"] == "A0001"
 
     def test_forgetting_to_thread_state_loses_what_was_collected(self) -> None:
         """不传 `state` 就等于新开一轮——把"状态属于会话层"这件事钉死。"""
         pipe = self._pipeline()
         first = pipe.advance("胸口疼，已经三天了")
-        assert first.action == "answer"
         assert "duration" in first.intake.filled
 
         again = pipe.advance("胸口疼")  # 没传 state

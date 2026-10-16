@@ -21,7 +21,7 @@
 
 - **别名表很小**（`ALIASES`），真正的提升要靠按真实问法补表。
 - **42 个科室名与挂号系统的科室名未必一致**：本模块只输出"知识库认为该去哪个科"，
-  到号源系统还要一次映射（`BookingService.resolve_department` 负责，见挂号 skill）。
+  到号源系统还要一次映射（`BookingService.resolve_department` 负责）。
 """
 
 from __future__ import annotations
@@ -152,17 +152,6 @@ def load_department_map(
     return out
 
 
-DEFAULT_COARSE_K = 50
-"""**粗排**候选池大小。
-
-分诊本质是**投票**——"这些候选卡片分别建议去哪个科"。既然是投票，候选池就不该只取 5 条：
-池子越大，投出正确科室的机会越大，而粗排取 5 条与取 50 条**代价几乎相同**
-（瓶颈在生成候选，不在返回条数）。所以"多拿候选、再精排"几乎免费。
-
-**精排不需要模型**：用 jieba 词元的 IDF 加权重合度给候选重新定序（见 `_refine`）。
-`retrieve/rerank.py` 里的 `CrossEncoderReranker` 是更强的选择，但要额外 1.1GB 模型。
-"""
-
 DEFAULT_PRECISION_K = 0
 """**精排**之后**参与投票**的候选条数；`0` = 不截断（默认）。
 
@@ -197,7 +186,7 @@ class RetrievalTriage:
     不传 `department_map` 时只解析卡片正文，这是为了**评测可比性**保留的默认值，
     不是推荐配置。
 
-    > ⚠️ 本类由调用方**依赖注入**进 `ClinicalPipeline`，而产品路径当前还没装配它。
+    > ⚠️ 本类由调用方**依赖注入**进 `ClinicalPipeline`；
     > 装配时务必按上面的推荐写法传入 `department_map`，否则拿不到补全的收益。
     """
 

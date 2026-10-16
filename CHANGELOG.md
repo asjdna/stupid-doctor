@@ -31,7 +31,7 @@
 - 混合检索（BM25 + 向量 + RRF 融合）与可选重排。
 - 分诊采用两阶段检索（粗排候选池 → IDF 精排 → 科室投票），并叠加科室补全表；
   补回的标签带来源与置信度。
-- 支持 sqlite / sqlite-vec / pgvector / Milvus 四种向量后端，按配置切换。
+- 支持 sqlite / sqlite-vec / pgvector 三种向量后端，按配置切换。
 
 ### 评测
 

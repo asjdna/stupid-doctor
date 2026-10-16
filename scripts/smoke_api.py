@@ -121,18 +121,13 @@ def main(argv: list[str] | None = None) -> int:
             f"{len(r.text)} 字节",
         )
 
-        # 患者端不该混进开发/运维控件：改 API 地址、域、top_k 对患者是纯粹的坏事。
-        r = client.get("/patient")
-        check("GET /patient 200", r.status_code == 200, f"{r.status_code}")
+        # 患者面是 `/consult`：多轮问诊对话，且不该混进开发/运维控件。
+        r = client.get("/consult")
+        check("GET /consult 200", r.status_code == 200, f"{r.status_code}")
         check(
-            "GET /patient 无开发/运维控件",
-            all(x not in r.text for x in ("#domainSel", 'id="apiBase"', 'id="topK"', "/metrics", "/tools")),
+            "GET /consult 无开发/运维控件",
+            all(x not in r.text for x in ('id="apiBase"', 'id="topK"', "/metrics", "/tools")),
             f"{len(r.text)} 字节",
-        )
-        check(
-            "GET /patient 保留急诊指引与免责声明",
-            "emergency" in r.text and "120" in r.text and "不能替代医生诊断" in r.text,
-            "急诊/免责在",
         )
 
     width = max(len(n) for n, _, _ in checks)

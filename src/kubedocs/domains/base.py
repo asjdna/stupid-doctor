@@ -76,13 +76,6 @@ class DomainPack(Protocol):
     def retriever(self, store: Store, embedder: Embedder, settings: Settings) -> HybridRetriever:
         """构造该域的检索器。域不同，检索器内部配置可以不同。"""
 
-    def tools(self) -> list[object]:
-        """该域暴露给 agent 的工具列表。
-
-        返回 `ToolSpec`（见 `agent/tools.py`）。**必须是纯数据描述**，
-        不在这里执行任何 IO——工具的执行由内核统一编排与计时。
-        """
-
     def eval_sets(self) -> list[Path]:
         """该域声明的金标集路径（相对仓库根）。
 
@@ -93,7 +86,7 @@ class DomainPack(Protocol):
 
 
 class DomainRegistry:
-    """按名字找域包。与 `SkillRegistry` 同一套路数：注册 + 按名解析 + 可列举。"""
+    """按名字找域包。注册 + 按名解析 + 可列举。"""
 
     _packs: dict[str, DomainPack] = {}
 

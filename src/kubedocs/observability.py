@@ -1,11 +1,10 @@
-"""可观测性：结构化日志级别、OTel 追踪、Prometheus 指标。
+"""可观测性：结构化日志级别与 Prometheus 指标。
 
-三块配置都在这里落到真实代码路径上：
+两块配置都在这里落到真实代码路径上：
 
 | 配置 | 作用 |
 |---|---|
 | `log_level` | `configure_logging()` 设置 root logger 级别 |
-| `otel_enable` / `otel_exporter` | `setup_tracing()` 建 `TracerProvider` 并导出（console / otlp），检索与 LLM 调用真的开 span |
 | `/metrics` | Prometheus 文本格式端点，计数器与直方图在真实请求路径上被 +1 / observe |
 
 指标口径：
@@ -17,20 +16,17 @@
 - `kubedocs_llm_cost_usd_total`：累计花费（与 `llm_spend.json` 同一口径，便于对账）
 - `kubedocs_llm_budget_usd`：当前日上限（gauge，**0 表示不限**）
 
-不引第三方 instrumentation 包：手工 span + 手工计数，依赖少、离线可跑。
+不引第三方 instrumentation 包：手工计数，依赖少、离线可跑。
 """
 
 from __future__ import annotations
 
 import logging
-from contextlib import contextmanager
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING
 
 from prometheus_client import CONTENT_TYPE_LATEST, Counter, Gauge, Histogram, generate_latest
 
 if TYPE_CHECKING:
-    from collections.abc import Iterator
-
     from kubedocs.config import Settings
 
 logger = logging.getLogger(__name__)
@@ -84,58 +80,6 @@ def configure_logging(settings: Settings) -> None:
     else:
         root.setLevel(level)
     logger.debug("日志级别设为 %s", logging.getLevelName(level))
-
-
-_TRACER: Any | None = None
-
-
-def setup_tracing(settings: Settings) -> Any | None:
-    """按配置建 `TracerProvider` 并返回 tracer；关闭时返回 `None`。
-
-    幂等：重复调用返回同一个 provider（`uvicorn --reload` 会重复 import）。
-    """
-    global _TRACER
-    if not settings.otel_enable or settings.otel_exporter == "none":
-        logger.info(
-            "OTel 追踪未启用（otel_enable=%s exporter=%s）", settings.otel_enable, settings.otel_exporter
-        )
-        return None
-    if _TRACER is not None:
-        return _TRACER
-
-    from opentelemetry import trace
-    from opentelemetry.sdk.resources import Resource
-    from opentelemetry.sdk.trace import TracerProvider
-    from opentelemetry.sdk.trace.export import BatchSpanProcessor, ConsoleSpanExporter
-
-    provider = TracerProvider(resource=Resource.create({"service.name": "kubedocs"}))
-    if settings.otel_exporter == "otlp":
-        from opentelemetry.exporter.otlp.proto.http.trace_exporter import OTLPSpanExporter
-
-        # OTLP 端点由标准环境变量 OTEL_EXPORTER_OTLP_ENDPOINT 提供
-        provider.add_span_processor(BatchSpanProcessor(OTLPSpanExporter()))
-    else:
-        provider.add_span_processor(BatchSpanProcessor(ConsoleSpanExporter()))
-    trace.set_tracer_provider(provider)
-    _TRACER = trace.get_tracer("kubedocs")
-    logger.info("OTel 追踪已启用（exporter=%s）", settings.otel_exporter)
-    return _TRACER
-
-
-@contextmanager
-def span(name: str, **attributes: object) -> Iterator[Any]:
-    """开一个 span 并写入属性；未启用追踪时是**零开销的空操作**。
-
-    用法一律是 `with span("retrieve", channel="bm25"):`——调用方不需要知道追踪
-    有没有开，也就不必写 `if tracing_enabled` 这类容易漏路径的分支。
-    """
-    if _TRACER is None:
-        yield None
-        return
-    with _TRACER.start_as_current_span(name) as current:
-        for key, value in attributes.items():
-            current.set_attribute(key, value)
-        yield current
 
 
 def metrics_payload() -> tuple[bytes, str]:

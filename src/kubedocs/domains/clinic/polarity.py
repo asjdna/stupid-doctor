@@ -37,8 +37,6 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterable
-
 # 否定词（长词在前，避免「无明显」被「无」抢先匹配）。
 # 不含「非/否」——「非常疼」「否则」里的非/否是程度/连词，不是否定。
 NEGATION_WORDS = [
@@ -328,20 +326,6 @@ def polarity(text: str, phrase: str) -> str:
     return _polarity_at(positions[0], _negation_ranges(text))
 
 
-def verdicts(text: str, phrases: Iterable[str]) -> dict[str, str]:
-    """批量返回 {短语: 三值极性}（作用域只算一次）。
-
-    供抗噪层的「删除影响守卫」使用：它要在原句与清洗句之间逐个比对十几个症状候选的极性，
-    逐个调 polarity() 会把否定作用域重复计算十几遍。
-    """
-    ranges = _negation_ranges(text)
-    out: dict = {}
-    for phrase in phrases:
-        positions = _find_all(text, phrase)
-        out[phrase] = _polarity_at(positions[0], ranges) if positions else "absent"
-    return out
-
-
 def is_negated(text: str, phrase: str) -> bool:
     """True = 所有出现处均为 absent（应剔除）；False = 至少一处 present 或 possible。"""
     positions = _find_all(text, phrase)
@@ -493,32 +477,3 @@ def is_reportable(text: str, phrase: str) -> bool:
         and a["experiencer"] == "self"
         and a["temporality"] == "present"
     )
-
-
-def assertion_verdicts(text: str, phrases: Iterable[str]) -> dict[str, tuple[str, str, str]]:
-    """批量 {短语: (status, experiencer, temporality)}（供抗噪层的删除影响守卫复用）。"""
-    hits = {
-        "exp": _marker_hits(text, EXPERIENCER_MARKERS, _EXPERIENCER_MAP),
-        "tmp": _marker_hits(text, TEMPORAL_MARKERS, _TEMPORAL_MAP),
-        "hyp": _marker_hits(text, HYPOTHETICAL_MARKERS, _HYPOTHETICAL_MAP),
-    }
-    combined = _combined_hits(text)
-    neg_ranges = _negation_ranges(text)
-    out: dict = {}
-    for phrase in phrases:
-        positions = _find_all(text, phrase)
-        if not positions:
-            out[phrase] = ("absent", "self", "present")
-            continue
-        if all(_polarity_at(p, neg_ranges) == "absent" for p in positions):
-            status = "absent"
-        elif all(_label_at(text, p, hits["hyp"], "present", combined) == "hypothetical" for p in positions):
-            status = "hypothetical"
-        else:
-            status = _polarity_at(positions[0], neg_ranges)
-        out[phrase] = (
-            status,
-            _attribution(text, phrase, EXPERIENCER_MARKERS, _EXPERIENCER_MAP, "self"),
-            _attribution(text, phrase, TEMPORAL_MARKERS, _TEMPORAL_MAP, "present"),
-        )
-    return out

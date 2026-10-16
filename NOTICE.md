@@ -17,10 +17,8 @@
 | `phenomenon_to_symptom.json` | 口语表述 → 规范症状 |
 | `manual_annotation.csv` | 人工实体等价标注 |
 | `department_scope.md` | 科室导诊范围说明 |
-| `departments.json` | 科室词表 |
-| `rag_gold.jsonl`、`symptom_status_gold.jsonl`、`noise_ood_gold.jsonl` | 评测用例 |
 
-这些文件在本仓库中**只用于研究与评测**（分诊与检索的评测用例、否定/主体/时间性判定的回归），
+这些文件在本仓库中**只用于研究与评测**（分诊与急诊的评测用例、派生科室补全表），
 不参与任何运行时路径，也不随任何产品分发。
 
 使用或再分发前请自行确认上游许可。若上游权利人提出异议，删除该目录即可——
@@ -38,6 +36,6 @@
 
 ## 依赖与模型
 
-Python 依赖各自的许可记录在 `pyproject.toml` 与锁文件中。
+Python 依赖各自的许可记录在 `pyproject.toml` 中。
 嵌入模型（`BAAI/bge-small-*`）与重排模型（`BAAI/bge-reranker-base`）在运行时下载，
 **不随仓库分发**，其许可以上游模型页为准。

@@ -54,7 +54,6 @@ DEFAULT_WINDOW = 2
 DOC_GLOBS = (
     "*.md",
     "docs/**/*.md",
-    ".github/**/*.md",
     "src/**/*.py",
     "tests/**/*.py",
     "scripts/**/*.py",
@@ -176,7 +175,6 @@ class Anchor:
     text: str  # 反引号里的引用原文（形如 路径:行号）
     target: str  # 解析出的目标文件（仓内相对路径）
     ranges: tuple[tuple[int, int], ...]
-    bare: bool  # 是否是无文件名的续写引用（冒号开头的那种，沿用同段上文的目标文件）
     unit: str  # 用来抽标识符的"同一句散文"
 
 
@@ -343,12 +341,12 @@ def _resolve_target(name: str, index: list[str]) -> tuple[str | None, str]:
 # 1. 含 `/`（裸文件名跳过：`_index.md` 这种"举个例子"太常见）；
 # 2. 不以 `/` 开头（`/content/en/docs/...` 那种是**上游语料**里的路径，不是本仓的）；
 # 3. 不含 `...` / `*` / `{}` / `<>`（省略号与通配是"示意"，不是引用）；
-# 4. **首段是已知的仓内顶层目录**（`docs/` / `src/` / `scripts/` / `tests/` / `.github/` / `docker/`）。
+# 4. **首段是已知的仓内顶层目录**（`docs/` / `src/` / `scripts/` / `tests/` / `docker/`）。
 # 代价：**裸文件名**形式的悬空引用（正文写 `README.md` 而它被删了）查不出来——刻意换来的精度。
 _FILE_REF_RE = re.compile(r"(?<![\w./-])([A-Za-z0-9_./\-\u4e00-\u9fff]+\.md)")
 _MD_LINK_RE = re.compile(r"\]\(([^)\s]+?\.md)(?:#[^)\s]*)?\)")
 _FENCE_RE = re.compile(r"^\s*(```|~~~)")
-_CHECKED_ROOTS = ("docs/", "src/", "scripts/", "tests/", ".github/", "docker/")
+_CHECKED_ROOTS = ("docs/", "src/", "scripts/", "tests/", "docker/")
 
 
 def _is_checkable_ref(name: str) -> bool:
@@ -388,8 +386,8 @@ def _resolve_file_ref(raw: str, doc: str, index: list[str]) -> str | None:
 
     依次试：相对仓库根、相对该文档所在目录（markdown 链接的常见写法）、按路径后缀唯一匹配。
     """
-    # 用"反复去掉 ./ 前缀"而不是 `lstrip("./")`：后者是**字符集**剥离，会把 `.github/...`
-    # 开头的点也吃掉，解析出 `github/...` 这种不存在的路径。
+    # 用"反复去掉 ./ 前缀"而不是 `lstrip("./")`：后者是**字符集**剥离，会把 `./` 后面的点
+    # 也吃掉，把 `./docs/...` 解析成 `docs/...` 之外的怪路径。
     name = raw
     while name.startswith("./"):
         name = name[2:]
@@ -451,7 +449,6 @@ def collect_anchors(doc: str, text: str, index: list[str]) -> list[Anchor]:
                         text=token.strip(),
                         target=target or raw_path,
                         ranges=ranges,
-                        bare=False,
                         unit=unit,
                     )
                 )
@@ -463,7 +460,6 @@ def collect_anchors(doc: str, text: str, index: list[str]) -> list[Anchor]:
                         text=token.strip(),
                         target=carry or "",
                         ranges=ranges,
-                        bare=True,
                         unit=unit,
                     )
                 )

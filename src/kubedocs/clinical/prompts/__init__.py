@@ -42,7 +42,10 @@ def prompt_version() -> str:
 
 
 def build_user_message(question: str, evidence: EvidenceBundle, intake: IntakeState) -> str:
-    """把这一轮的全部动态输入拼成一条 user 消息（**固定路径**用；工具循环不用它）。
+    """把这一轮的全部动态输入拼成一条 user 消息。
+
+    工具循环不用它（工具循环的消息由 `clinical/orchestration.py` 自己拼）；
+    它是 `ClinicalReasoner.reason()` 的输入，也就是评测脚本直接调主判时走的那条路。
 
     顺序是刻意的：**证据 → 已采集 → 患者原话**。
     证据在前，是因为"这一轮依据是什么"应该先于患者这句话进入视野。

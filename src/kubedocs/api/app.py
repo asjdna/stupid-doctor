@@ -90,8 +90,6 @@ from kubedocs.observability import (
     configure_logging,
     metrics_payload,
     publish_config_gauges,
-    setup_tracing,
-    span,
 )
 from kubedocs.retrieve.hybrid import HybridRetriever
 from kubedocs.store import Store, StoreError, from_settings
@@ -117,12 +115,9 @@ CONSOLE_HTML = ("data", "web", "console.html")
 STATS_TTL_S = 2.0
 """`_DomainRuntime.stats()` 的缓存有效期（秒），取值理由见该方法 docstring。"""
 
-PATIENT_HTML = ("data", "web", "patient.html")
-"""患者端页面。**只**保留问诊 agent，面向真实使用者（见 `patient` 端点的说明）。"""
-
 # `CONSULT_HTML` 由 `kubedocs.api.consult` 定义并 import（单一来源，避免两处不一致）。
-# 与 `patient.html` 的区别：`patient` 走**图 + 工具循环**，`consult` 走 `ClinicalPipeline`
-# （契约化输出 + 确定性红线 + 检索式分诊）。两者并存是刻意的：两条路径的取舍不同。
+# 三个页面各司其职：`/consult` 给患者（对话式问诊）、`/` 给开发者（检索 / 工具清单的最小示例）、
+# `/console` 给运维（索引体检、`/metrics`、每路检索名次、降级原因）。
 
 
 # ===========================================================================
@@ -507,18 +502,17 @@ def _run_turn(app: FastAPI, request: ChatRequest, thread_id: str) -> _ChatOutcom
         react = _get_clinic_react(app)
     except Exception:  # noqa: BLE001 - 装配失败就退图，不能因此让 /chat 挂掉
         logger.exception("装配工具循环失败，回退到确定性图")
-    with span("chat.turn", thread_id=thread_id, llm=bool(react is not None and react.has_llm())):
-        if react is not None and react.has_llm():
-            return _converse_with_tools(app, request, thread_id)
+    if react is not None and react.has_llm():
+        return _converse_with_tools(app, request, thread_id)
 
-        agent = _get_clinic_agent(app)
-        resuming = agent.pending_question(thread_id=thread_id) is not None
-        if resuming:
-            state = agent.resume(request.message, thread_id=thread_id)
-        else:
-            state = agent.start(request.message, thread_id=thread_id, patient_id=request.patient_id)
-        # 跑完再看一次：这一轮可能又停在一个新追问上
-        return _ChatOutcome(state, resuming=resuming, pending=agent.pending_question(thread_id=thread_id))
+    agent = _get_clinic_agent(app)
+    resuming = agent.pending_question(thread_id=thread_id) is not None
+    if resuming:
+        state = agent.resume(request.message, thread_id=thread_id)
+    else:
+        state = agent.start(request.message, thread_id=thread_id, patient_id=request.patient_id)
+    # 跑完再看一次：这一轮可能又停在一个新追问上
+    return _ChatOutcome(state, resuming=resuming, pending=agent.pending_question(thread_id=thread_id))
 
 
 async def _chat_events(app: FastAPI, request: ChatRequest, thread_id: str) -> AsyncIterator[ServerSentEvent]:
@@ -649,16 +643,14 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     app = FastAPI(title="kubedocs", version="0.1.0", lifespan=lifespan)
     app.state.settings = cfg
-    # 两个"设了要有反应"的开关在装配点生效（见 observability.py 的说明）：
-    # 日志级别真正设到 root logger，OTel 真正建 provider。
+    # "设了要有反应"的开关在装配点生效（见 observability.py 的说明）：
+    # 日志级别真正设到 root logger。
     configure_logging(cfg)
-    setup_tracing(cfg)
     # 预算上限与"有没有调用过 LLM"无关，必须在装配点就发出去；否则控制台会把一个
     # 真实存在的上限读成 gauge 默认值 0，而 0 的约定是"不限"（假信息）。
     publish_config_gauges(cfg)
     app.state.index_html = repo_root().joinpath(*INDEX_HTML)
     app.state.console_html = repo_root().joinpath(*CONSOLE_HTML)
-    app.state.patient_html = repo_root().joinpath(*PATIENT_HTML)
     app.state.consult_html = repo_root().joinpath(*CONSULT_HTML)
     app.state.runtimes_lock = threading.Lock()
     app.state.agent_lock = threading.Lock()
@@ -702,7 +694,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     # ---------------------------------------------------------------- 指标
     @app.get("/metrics")
     def metrics() -> Response:
-        """Prometheus 文本格式指标。`otel_enable` 与它无关：指标始终可用。"""
+        """Prometheus 文本格式指标，始终可用（与是否配置 LLM 无关）。"""
         payload, content_type = metrics_payload()
         return Response(content=payload, media_type=content_type)
 
@@ -740,8 +732,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 diagnostics={"degraded": [f"索引不可用：{runtime.index_error}"]},
                 note=_index_note(runtime, 0),
             )
-        with span("http.search", domain=runtime.settings.domain, top_k=body.top_k):
-            result = retriever.search(body.q, top_k=body.top_k)
+        result = retriever.search(body.q, top_k=body.top_k)
         hits = [Hit.from_chunk(chunk) for chunk in result.results]
         return SearchResponse(
             query=result.query,
@@ -817,18 +808,6 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         `/search`、`/chat` 等请求，而 API 没有开 CORS，换源就会全线失败。
         """
         return _serve_page(request.app.state.console_html)
-
-    @app.get("/patient", response_class=HTMLResponse)
-    def patient(request: Request) -> HTMLResponse:
-        """患者端：**只**保留问诊 agent，面向真实使用者。
-
-        三个页面的分工：`/patient` 给患者，
-        只有对话、急诊提示、追问与依据；`/` 给开发者（检索 / 工具清单 / 问诊的最小示例）；
-        `/console` 给运维（索引体检、`/metrics`、每路检索名次、降级原因）。
-        `/` 与 `/console` 上的输入项（`API 地址`、`域`、`top_k`）对患者是额外的认知负担，
-        而且**能改到不该改的东西**，所以患者端一律**同源**、不暴露任何可调参数。
-        """
-        return _serve_page(request.app.state.patient_html)
 
     return app
 

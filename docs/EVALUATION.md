@@ -54,14 +54,6 @@ python scripts/eval_triage.py                        # 多口径：规范名 / �
 **为什么分层**：同一个分诊器在"规范术语"和"口语含糊表述"上的表现差异很大，
 合并成一个总数会掩盖真正的短板。
 
-### 检索与端到端
-
-```bash
-python scripts/bench_api.py --port 8080              # 并发、延迟、吞吐
-python scripts/bench_store_latency.py                # 各存储后端的检索延迟
-python scripts/eval_prototype_cases.py               # 原型用例回归（症状三维判定、OOD 噪声）
-```
-
 ## 五、模型评测（需要密钥，会计费）
 
 ```bash

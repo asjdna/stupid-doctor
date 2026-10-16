@@ -12,11 +12,8 @@ BM25 分数与余弦相似度量纲不同（前者无上界、随语料长度漂
 
 from __future__ import annotations
 
-from collections.abc import Iterable, Sequence
+from collections.abc import Sequence
 from dataclasses import dataclass
-from typing import TypeVar
-
-T = TypeVar("T")
 
 
 @dataclass(frozen=True)
@@ -57,20 +54,6 @@ def rrf_fuse(
     out = [Fused(key=key, score=round(score, 6), ranks=ranks.get(key, {})) for key, score in scores.items()]
     # 同分时按 key 排序：排序结果必须确定，否则下游评测会随哈希种子抖动
     out.sort(key=lambda f: (-f.score, f.key))
-    return out
-
-
-def truncate_dedup(items: Iterable[str], limit: int | None = None) -> list[str]:
-    """保序去重（多路召回里同一文档重复出现是常态），可选截断。"""
-    seen: set[str] = set()
-    out: list[str] = []
-    for it in items:
-        if it in seen:
-            continue
-        seen.add(it)
-        out.append(it)
-        if limit is not None and len(out) >= limit:
-            break
     return out
 
 

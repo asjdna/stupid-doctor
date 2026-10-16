@@ -1,4 +1,4 @@
-"""clinic 域包与检索接线测试：卡片 -> 索引 -> 中文检索 -> self-ask 回答。
+"""clinic 域包与检索接线测试：卡片 -> 索引 -> 中文检索。
 
 不加载真实模型：HashingEmbedder 只负责建索引，断言只覆盖 BM25 通道，
 稠密通道的语义质量由离线全量编码负责——测试因此秒级完成且不联网。
@@ -11,7 +11,6 @@ from pathlib import Path
 
 import pytest
 
-from kubedocs.agent.selfask import needs_decomposition, self_ask
 from kubedocs.config import Settings
 from kubedocs.domains import DomainRegistry, load_all
 from kubedocs.domains.clinic.domain import ClinicPack, cards_to_inputs
@@ -120,54 +119,6 @@ class TestPackBuildIndex:
         assert "呼吸内科" in links["咳嗽"]
 
 
-# self-ask 接在检索上
-class _StubDecomposer:
-    def __init__(self, subs: list[str] | None = None) -> None:
-        self.subs = subs or ["咳嗽可能是什么原因？", "应该去哪个科室？"]
-        self.calls = 0
-
-    def decompose(self, question: str, max_sub: int) -> list[str]:
-        self.calls += 1
-        return self.subs[:max_sub]
-
-    def compose(self, question: str, parts) -> str:  # noqa: ANN001
-        self.calls += 1
-        return "；".join(f"{p.question} -> {p.answer}" for p in parts)
-
-
-class TestSelfAskOverClinicIndex:
-    def test_self_ask_retrieves_and_composes_with_citations(self, tmp_path, monkeypatch):
-        cards_file = tmp_path / "cards.json"
-        cards_file.write_text(json.dumps(CARDS, ensure_ascii=False), encoding="utf-8")
-        monkeypatch.setattr("kubedocs.domains.clinic.domain.clinic_cards_path", lambda: cards_file)
-        settings = _settings(tmp_path)
-        store = _store(settings)
-        try:
-            ClinicPack().build_index(store, HashingEmbedder(dim=32), settings)
-            from kubedocs.retrieve.hybrid import HybridRetriever
-
-            retriever = HybridRetriever(store, HashingEmbedder(dim=32), settings)
-
-            def search(query: str):  # noqa: ANN202
-                # 只用 BM25 通道：占位向量不该参与断言
-                return retriever.search(query, channels=("bm25",))
-
-            # needs_decomposition 有长度闸门（默认 ≥12 字），所以这里必须用长问题
-            result = self_ask(
-                "我咳嗽而且头痛，分别该去哪个科室？要不要做检查？",
-                search=search,
-                llm=_StubDecomposer(),
-                max_sub=2,
-            )
-            assert result.decomposed is True
-            assert result.citations, "self-ask 没有带回引用"
-            indexes = [c["index"] for c in result.citations]
-            assert indexes == list(range(1, len(indexes) + 1)), "引用编号不连续"
-            assert len({c["chunk_id"] for c in result.citations}) == len(indexes), "引用未去重"
-        finally:
-            store.close()
-
-
 # 域注册
 class TestClinicDomainRegistration:
     def setup_method(self):
@@ -203,7 +154,3 @@ class TestClinicDomainRegistration:
         a = Settings(index_dir=str(tmp_path), domain="k8s_docs")
         b = Settings(index_dir=str(tmp_path), domain="clinic")
         assert a.sqlite_path != b.sqlite_path
-
-    def test_needs_decomposition_is_deterministic(self):
-        assert needs_decomposition("咳嗽") is False
-        assert needs_decomposition("咳嗽和头痛分别该去哪个科室？要不要做检查？") is True

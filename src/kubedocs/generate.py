@@ -344,16 +344,12 @@ class DailyBudget:
         with _lock_for(self.path):
             return int(self._load().get(self._today() + _UNPRICED_SUFFIX, 0.0))
 
-    def pending_usd(self) -> float:
-        """当前在途（已预留、尚未记账）的金额。"""
-        return _pending_for(self.path)
-
     def check(self, estimated_usd: float = 0.0) -> None:
         """到达上限即拒绝**新的**调用（不是等超了才拒）。
 
         边界写清楚：「已达上限」用 `>=`，「加上本次预估会超」用 `>`。
         否则 spent 恰好等于 limit 时会放行一次调用，实际花掉的钱就超过上限了。
-        判断里还包含**在途预留**（`pending_usd()`），否则并发请求会一起冲过上限。
+        判断里还包含**在途预留**，否则并发请求会一起冲过上限。
         """
         with _lock_for(self.path):
             self._check_locked(estimated_usd)

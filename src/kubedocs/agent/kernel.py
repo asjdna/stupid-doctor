@@ -75,7 +75,7 @@ class ClinicDeps:
     answer: Callable[[str, ClinicState], dict[str, Any]] = field(
         default=lambda q, state: {"text": "", "citations": []}
     )
-    """生成带引用的回答（self-ask 走这里）。"""
+    """生成带引用的回答（作答节点走这里）。"""
 
     book: Callable[[ClinicState], dict[str, Any]] = field(default=lambda state: {})
     """挂号（有副作用，仅在确认后调用）。"""
@@ -245,7 +245,6 @@ def build_clinic_graph(
     *,
     max_turns: int = DEFAULT_MAX_TURNS,
     checkpointer: BaseCheckpointSaver[Any] | None = None,
-    recursion_limit: int = 25,
 ) -> Any:
     """装配并编译 clinic 域的 agent 图。
 

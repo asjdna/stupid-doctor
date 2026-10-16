@@ -6,7 +6,7 @@
 | 索引 | 每张卡片 = 一篇文档 + 一个块；中文经 `chinese` 归一化器（jieba 预分词）进 FTS5 |
 | 检索 | 复用 kubedocs 的混合检索内核（FTS5 BM25 + 向量 + RRF） |
 | 工具 | `search_docs` / `citation_check`（`agent/rag_tools.py`） |
-| 回答 | self-ask（分解 → 检索 → 合成，带引用重编号） |
+| 回答 | 由 agent 的工具循环取证后合成（带引用重编号） |
 
 ## 稠密路是"可选的第二遍"
 
@@ -33,8 +33,6 @@ from kubedocs.embed import Embedder, embed_texts
 from kubedocs.ingest import IngestReport
 from kubedocs.retrieve.hybrid import HybridRetriever
 from kubedocs.store.base import ChunkInput, DocInput, Store
-
-CARDS_PER_DOC = 1
 
 
 def cards_to_inputs(
@@ -163,12 +161,6 @@ class ClinicPack:
 
     def retriever(self, store: Store, embedder: Embedder, settings: Settings) -> HybridRetriever:
         return HybridRetriever(store, embedder, settings)
-
-    def tools(self) -> list[object]:
-        from kubedocs.agent.rag_tools import make_citation_check_tool, make_search_tool
-
-        # 检索器在运行时注入（域包只声明工具形状，不持有连接）
-        return [make_search_tool(None, domain=self.name), make_citation_check_tool()]
 
     def eval_sets(self) -> list[Path]:
         """**刻意返回空**。

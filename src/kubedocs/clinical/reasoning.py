@@ -24,7 +24,6 @@ from typing import Any, Protocol
 from kubedocs.clinical.contracts import (
     ClinicalAssessment,
     DepartmentAdvice,
-    validate_against,
 )
 from kubedocs.clinical.evidence import EvidenceBundle
 from kubedocs.clinical.intake import IntakeState
@@ -177,7 +176,6 @@ class ClinicalReasoner:
                 prompt_version=version,
             )
 
-        problems = validate_against(assessment, evidence.ids())
         from kubedocs.clinical.contracts import enforce
 
         enforced = enforce(assessment, evidence.ids())

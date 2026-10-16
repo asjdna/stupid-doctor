@@ -12,7 +12,7 @@ reducer 约定：`evidence` / `asked` / `diagnostics` 用 `operator.add` 累加�
 from __future__ import annotations
 
 import operator
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from enum import Enum
 from typing import Annotated, Any, TypedDict
 
@@ -47,42 +47,9 @@ class SymptomEvidence:
     weight: float = 0.0
     note: str = ""
 
-    @property
-    def is_positive(self) -> bool:
-        return self.present
-
     def describe(self) -> str:
         sign = "+" if self.present else "-"
         return f"{sign}{self.symptom}[{self.source.value} w={self.weight:.2f}]"
-
-
-@dataclass
-class RedLine:
-    """急诊红线命中（确定性规则，LLM 无权绕过）。"""
-
-    word: str
-    status: str
-    experiencer: str
-    temporality: str
-    advice_given: bool = False
-
-    def to_dict(self) -> dict[str, Any]:
-        return {
-            "word": self.word,
-            "status": self.status,
-            "experiencer": self.experiencer,
-            "temporality": self.temporality,
-            "advice_given": self.advice_given,
-        }
-
-
-@dataclass
-class CitedAnswer:
-    """一条带引用的回答（self-ask 的子答案与最终答案都用它）。"""
-
-    text: str
-    citations: list[dict] = field(default_factory=list)
-    sub_question: str = ""
 
 
 class ClinicState(TypedDict, total=False):
@@ -109,7 +76,7 @@ class ClinicState(TypedDict, total=False):
     # ---- 结果 ----
     red_line: dict[str, Any] | None
     triage: dict[str, Any]  # {departments, diseases, reason}
-    answer: dict[str, Any]  # CitedAnswer 的序列化形式
+    answer: dict[str, Any]  # 作答节点的输出（正文 + 引用）
     ticket: dict[str, Any]  # 挂号结果
     booking_confirmed: bool
     """用户是否**明确确认**了挂号。副作用只有在它为 True 时才允许发生。"""

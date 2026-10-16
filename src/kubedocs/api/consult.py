@@ -17,7 +17,7 @@
 | 路径 | 入口 | 急重症怎么判 | `RiskGuard` 的作用 |
 |---|---|---|---|
 | **本路径**（临床管线） | `/consult` | **模型**按病症 + 严重程度判，输出 `red_flags` | **已退出判断链**：不进提示词、不影响 `urgency`、不触发横幅；只在主判不可用时给一句保守提示，并在"命中而模型未判"时留一条不一致痕迹 |
-| 图路径 | `/chat`、`/patient` | `RiskGuard` 关键词命中即强制转急诊（`agent/kernel.py` 的强制边） | **仍是确定性强制边，LLM 不可绕过** |
+| 图路径 | `/chat` | `RiskGuard` 关键词命中即强制转急诊（`agent/kernel.py` 的强制边） | **仍是确定性强制边，LLM 不可绕过** |
 
 两条路径**故意并存**，但取舍完全相反：图路径宁可我多发一次急诊（词表覆盖不到的表述
 会漏），本路径把判断权交给模型（模型漏判时没有确定性兜底）。
@@ -40,7 +40,6 @@ from __future__ import annotations
 
 import logging
 import threading
-import time
 from collections import OrderedDict
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -101,8 +100,6 @@ class ConsultRequest(BaseModel):
 
     question: str = Field(min_length=1, max_length=2000)
     session_id: str = Field(default="", max_length=128)
-    want_booking: bool = False
-    confirmed: bool = False
 
 
 class ResetRequest(BaseModel):
@@ -116,8 +113,6 @@ class ResetRequest(BaseModel):
 class _Session:
     intake: IntakeState = field(default_factory=IntakeState)
     turns: int = 0
-    created_at: float = field(default_factory=time.time)
-    last_used: float = field(default_factory=time.time)
     history: list[dict[str, Any]] = field(default_factory=list)
     """本会话的对话上文（user/assistant 成对）。
 
@@ -179,7 +174,6 @@ class ConsultRuntime:
         from kubedocs.clinical.orchestration import ClinicalToolLoop
         from kubedocs.clinical.rag import LocalIndexBackend
         from kubedocs.clinical.reasoning import BudgetedClient, ClinicalReasoner, LiteLLMAdapter
-        from kubedocs.clinical.skills import default_registry
         from kubedocs.clinical.triage import RetrievalTriage, load_department_map
         from kubedocs.domains.clinic.redline import RiskGuard
         from kubedocs.generate import DailyBudget, LiteLLMClient
@@ -223,7 +217,6 @@ class ConsultRuntime:
         return ClinicalPipeline(
             backend=LocalIndexBackend(retriever),
             reasoner=reasoner,
-            skills=default_registry(booking_backend=self._booking_backend()),
             guard=RiskGuard(),
             triage=RetrievalTriage(department_map=dep_map),
             tool_loop=tool_loop,
@@ -244,7 +237,6 @@ class ConsultRuntime:
             if sess is None:
                 sess = _Session()
                 self._sessions[key] = sess
-            sess.last_used = time.time()
             self._sessions.move_to_end(key)
             while len(self._sessions) > MAX_SESSIONS:
                 evicted, _ = self._sessions.popitem(last=False)
@@ -264,28 +256,17 @@ class ConsultRuntime:
             sess = self._sessions.get(session_id or "anon")
             return sess.turns if sess else 0
 
-    def session_history(self, session_id: str) -> list[dict[str, Any]]:
-        with self._sessions_lock:
-            sess = self._sessions.get(session_id or "anon")
-            return list(sess.history) if sess else []
-
     # ---------------------------------------------------------------- 推进
     def advance(
         self,
         session_id: str,
         question: str,
-        *,
-        want_booking: bool = False,
-        confirmed: bool = False,
     ) -> ClinicalTurn:
         sess = self._session(session_id)
         pipeline = self.pipeline()
         turn = pipeline.advance(
             question,
             state=sess.intake,
-            want_booking=want_booking,
-            confirmed=confirmed,
-            patient_id="anon",
             history=list(sess.history),
         )
         sess.turns += 1
@@ -371,18 +352,6 @@ def to_payload(turn: ClinicalTurn, session_id: str, *, turns: int = 0) -> dict[s
             "asked": dict(turn.intake.asked),
             "unfillable": list(turn.intake.unfillable()),
         },
-        "skill": (
-            {
-                "ok": turn.skill.ok,
-                "stopped_at": turn.skill.stopped_at,
-                "needs_confirmation": turn.skill.needs_confirmation,
-                "message": turn.skill.message,
-                "steps_done": list(turn.skill.steps_done),
-                "data": dict(turn.skill.data),
-            }
-            if turn.skill is not None
-            else None
-        ),
     }
     payload.update(_assessment_payload(assessment))
     bundle = turn.evidence
@@ -441,8 +410,6 @@ def build_consult_router(
             turn = rt.advance(
                 body.session_id,
                 body.question,
-                want_booking=body.want_booking,
-                confirmed=body.confirmed,
             )
         except RuntimeError as e:
             # 索引没建好是**可预期的运维状态**，给出可执行的指引而不是 500 堆栈

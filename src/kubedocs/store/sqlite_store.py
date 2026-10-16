@@ -31,7 +31,6 @@
 
 from __future__ import annotations
 
-import json
 import sqlite3
 import threading
 import time
@@ -62,7 +61,6 @@ __all__ = [
     "SqliteStore",
     "StoreError",
     "build_match_expr",
-    "dump_json",
     "from_settings",
 ]
 
@@ -269,7 +267,7 @@ class SqliteStore:
                 "成因通常是**删除文档后没有调用 finalize()**（纯删除的一轮 ingest 曾漏掉它）。"
                 "向量与块已经错位，继续查询会返回错误内容。\n"
                 "⚠️ 重建时**必须指定同一个后端**：`vector_row` 与 `chunk_vectors.npy` 是 "
-                "`sqlite` 后端独有的，**`sqlite-vec` / `pgvector` / `milvus` 后端不维护它们**"
+                "`sqlite` 后端独有的，**`sqlite-vec` / `pgvector` 后端不维护它们**"
                 "（在那些后端上这一列是 -1，本后端因此打不开）。所以「照默认重建」会原样再失败：\n"
                 "    kubedocs --store sqlite ingest --rebuild      # 要读这份索引就得用 sqlite 后端重建\n"
                 "    # 或者：继续用 sqlite-vec/pgvector，改回对应后端即可（那份数据本来就是它们的）"
@@ -579,7 +577,3 @@ def from_settings(settings: Settings) -> SqliteStore:
         normalizer=build_normalizer(settings.normalizer),
         domain=settings.domain,
     )
-
-
-def dump_json(obj: object) -> str:
-    return json.dumps(obj, ensure_ascii=False, indent=2, default=str)

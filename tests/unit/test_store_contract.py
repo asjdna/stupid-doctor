@@ -1,16 +1,15 @@
-"""多后端一致性测试：同一批输入在 `sqlite` / `sqlite-vec` / `pgvector` / `milvus` 上的行为对照。
+"""多后端一致性测试：同一批输入在 `sqlite` / `sqlite-vec` / `pgvector` 上的行为对照。
 
-存储层的四个实现必须满足同一个契约：`dense_search` / `keyword_search` 返回 `list[(chunk_id, rank)]`
-且 rank 从 1 起连续；同一批输入下向量路给出同样的排序；全文路在共用 FTS5 的三个后端之间逐字节
-相同；覆盖、删除与"缺向量拒绝写入"三条写入语义在四个后端上一致。
+存储层的三个实现必须满足同一个契约：`dense_search` / `keyword_search` 返回 `list[(chunk_id, rank)]`
+且 rank 从 1 起连续；同一批输入下向量路给出同样的排序；全文路在共用 FTS5 的两个后端之间逐字节
+相同；覆盖、删除与"缺向量拒绝写入"三条写入语义在三个后端上一致。
 
 允许的差异：`pgvector` 的全文路走 pg_search（ParadeDB）的 BM25，与 FTS5 的 `bm25()` 是两份独立
-实现、分词器也不同，所以只断言**命中集合相同**，排序差异是已知的；`pgvector` / `milvus` 的向量路
+实现、分词器也不同，所以只断言**命中集合相同**，排序差异是已知的；`pgvector` 的向量路
 是 HNSW 近似索引，在本文件 5 块的小索引上与精确检索一致，大索引上的召回率是另一个问题。
 
 接入方式：`pgvector` 不可达时整个参数不出现（否则"本地没 Docker"会让报告里出现一堆带 skip 的
-绿点，掩盖这一路没跑过）；`milvus` 依赖本地文件、始终留在参数化里，真不可用时由夹具 skip 并
-打印原因——显式可见的"没跑过"胜过悄悄从参数里消失。
+绿点，掩盖这一路没跑过）。
 """
 
 from __future__ import annotations
@@ -23,7 +22,6 @@ import pytest
 
 from kubedocs.config import Settings
 from kubedocs.store.base import ChunkInput, DocInput, Store, StoreError
-from kubedocs.store.milvus_store import deps_available
 from kubedocs.store.sqlite_store import MissingVectorError, SqliteStore
 from kubedocs.store.sqlite_vec_store import SqliteVecStore
 from tests.unit.store_seed import DIM, make_seed, vec
@@ -42,27 +40,17 @@ def _pg_available() -> tuple[bool, str]:
     return pgvector_store.probe(Settings().database_url, timeout=2.0)
 
 
-def _milvus_available() -> tuple[bool, str]:
-    """探测 Milvus Lite 依赖是否装好（本地数据目录，无需服务端）。
-
-    刻意只查依赖、不打开数据目录：milvus-lite 一旦打开数据目录，LOCK 会一直占到进程退出，
-    模块级探测不该为此在每个测试进程里留一份垃圾；真正打不开的情形由夹具 skip 并打印原因。
-    """
-    return deps_available()
-
-
 _PG_OK, _PG_WHY = _pg_available()
-_MILVUS_OK, _MILVUS_WHY = _milvus_available()
 
 
-@pytest.fixture(params=["sqlite", "sqlite-vec", "milvus"] + (["pgvector"] if _PG_OK else []))
+@pytest.fixture(params=["sqlite", "sqlite-vec"] + (["pgvector"] if _PG_OK else []))
 def backend(request: pytest.FixtureRequest) -> str:
     return str(request.param)
 
 
 @pytest.fixture
 def stores(backend: str, tmp_path: Any) -> Iterator[Store]:
-    """按后端构造 store：三个本地后端各用一个独立文件，pgvector 用一个独立 schema。"""
+    """按后端构造 store：两个本地后端各用一个独立文件，pgvector 用一个独立 schema。"""
     settings = Settings(
         index_dir=str(tmp_path / "index"),
         domain="contract",
@@ -90,29 +78,6 @@ def stores(backend: str, tmp_path: Any) -> Iterator[Store]:
         finally:
             _drop_schema(store, schema)
             store.close()
-        return
-
-    if backend == "milvus":
-        if not _MILVUS_OK:
-            pytest.skip(f"Milvus Lite 不可用，milvus 这一路未验证：{_MILVUS_WHY}")
-        from kubedocs.store.milvus_store import MilvusStore
-
-        try:
-            ms = MilvusStore(
-                db_path=settings.sqlite_path,
-                vector_path=settings.vector_path,
-                dim=DIM,
-                embedding_model="hashing-test",
-                milvus_path=tmp_path / "milvus" / "contract.db",
-            )
-        except StoreError as e:
-            # 打不开（例如数据目录被另一个进程独占）属于环境原因：skip 并带上原因，
-            # 不失败、也不假装跑过。真正的代码缺陷会在这里之外的地方红。
-            pytest.skip(f"Milvus Lite 数据目录打不开，milvus 这一路未验证：{e}")
-        try:
-            yield ms
-        finally:
-            ms.close()
         return
 
     store_cls = SqliteStore if backend == "sqlite" else SqliteVecStore
@@ -173,9 +138,9 @@ def test_dense_query_dim_mismatch_is_refused(seeded: Store) -> None:
 
 # --------------------------------------------------------------------------- 排序一致
 def test_dense_ranking_is_identical_across_backends(seeded: Store) -> None:
-    """契约第 2 条：向量已归一化时，四个后端的向量路排序必须**完全相同**。
+    """契约第 2 条：向量已归一化时，三个后端的向量路排序必须**完全相同**。
 
-    换后端（numpy 内积 / sqlite-vec 余弦 / pgvector HNSW / Milvus HNSW）不许改变检索顺序，
+    换后端（numpy 内积 / sqlite-vec 余弦 / pgvector HNSW）不许改变检索顺序，
     否则评测指标的变化就无法归因。查询取 top-2 而不是 top-3：0 分是并列的，并列名次没有唯一
     答案，拿它做跨实现断言只会得到一个随机变红的测试。
     """
@@ -238,7 +203,7 @@ def test_upsert_overwrites_and_keeps_vectors_aligned(stores: Store) -> None:
     """覆盖语义：整篇重写后，两个通道看到的都是新内容与新向量。
 
     覆盖的粒度是**文档**（先删该 doc 的全部块再写），所以必须连 `DocInput` 一起传，只传块会
-    撞主键；这条断言专盯"向量与块行错位"，四个后端都必须过。
+    撞主键；这条断言专盯"向量与块行错位"，三个后端都必须过。
     """
     seed = make_seed()
     stores.upsert_docs(seed.docs, seed.chunks, seed.vectors)
