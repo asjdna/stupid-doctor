@@ -2,6 +2,10 @@
 
 参数名写错、退出码写错、子命令不兼容这类接线问题，只有从命令行入口跑一遍才暴露。
 全部走哈希向量，不下载模型、不联网。
+
+`ask` 的契约（新架构）：**没有大模型密钥时只回一句话**（`NO_LLM_MESSAGE`），退出码走
+`EXIT_PRECONDITION`（缺配置 ≠ 用户参数错），**不打印检索结果**——没有判断者就没有结论。
+检索不需要大模型，走 `kubedocs search`。
 """
 
 from __future__ import annotations
@@ -12,6 +16,7 @@ from pathlib import Path
 import pytest
 
 from kubedocs.cli import EXIT_GATE_FAIL, EXIT_OK, EXIT_PRECONDITION, main
+from kubedocs.llm_status import NO_LLM_MESSAGE
 
 BODY = (
     "## Limits\n\nThe kubelet enforces memory limits for each container and the "
@@ -147,6 +152,17 @@ class TestExitCodes:
     def test_search_on_empty_index_is_precondition_failure(self, tmp_path):
         assert main(_args(tmp_path, "search", "pod limits")) == EXIT_PRECONDITION
 
+    def test_ask_without_key_is_precondition_failure_even_with_an_empty_index(self, tmp_path, capsys):
+        """`ask` 的前置条件是"有判断者"（密钥），排在索引检查之前：退出码同为 3。
+
+        所以空索引 + 无密钥时给的是"未连接大模型"那句话，而不是"索引为空"——
+        两件事都能让人拿不到回答，但要做的事完全不同。
+        """
+        assert main(_args(tmp_path, "ask", "pod limits")) == EXIT_PRECONDITION
+        captured = capsys.readouterr()
+        assert NO_LLM_MESSAGE in captured.err
+        assert "索引为空" not in captured.err
+
     def test_eval_without_gold_is_precondition_failure(self, tmp_path):
         assert _ingest(tmp_path, _corpus(tmp_path)) == EXIT_OK
         rc = main(_args(tmp_path, "eval", "--gold", str(tmp_path / "nope.jsonl")))
@@ -201,7 +217,7 @@ class TestExitCodes:
 
 
 class TestFullPipeline:
-    """一条命令串起来：摄取 -> 体检 -> 检索 -> 回答（无密钥应降级而不是崩）。"""
+    """一条命令串起来：摄取 -> 体检 -> 检索 -> 回答（无密钥只回一句话，不返回检索兜底）。"""
 
     def test_pipeline_runs_end_to_end(self, tmp_path, capsys, monkeypatch):
         monkeypatch.delenv("DEEPSEEK_API_KEY", raising=False)
@@ -218,21 +234,58 @@ class TestFullPipeline:
         assert payload["fts_integrity"] == "ok"
         assert payload["embedding_model"] == "hashing-384"
 
+        # 检索不需要大模型：照常返回结果（`ask` 的收口不影响这条路）
         assert main(_args(tmp_path, "search", "memory limits", "--json")) == EXIT_OK
         results = json.loads(capsys.readouterr().out)["results"]
         assert results and results[0]["source_url"].startswith("https://kubernetes.io/docs/")
 
-        # ask：没有密钥 -> 明确拒答 + 仍返回检索来源，而不是 traceback
-        assert main(_args(tmp_path, "ask", "how are memory limits enforced?", "--json")) == EXIT_OK
-        answer = json.loads(capsys.readouterr().out)
-        assert answer["refused"] is True
-        assert answer["citations"], "降级时也要给出检索来源"
-        assert "DEEPSEEK_API_KEY" in answer["refusal_reason"]
+        # ask：没有密钥 -> 只回一句话 + 前置条件失败退出码，**stdout 上一个检索结果都没有**
+        assert main(_args(tmp_path, "ask", "how are memory limits enforced?", "--json")) == EXIT_PRECONDITION
+        captured = capsys.readouterr()
+        assert NO_LLM_MESSAGE in captured.err
+        assert captured.out == "", "无密钥时不许把检索结果当兜底打印出来"
 
-    def test_ask_show_context_prints_the_prompt_context(self, tmp_path, capsys, monkeypatch):
+    def test_ask_without_key_says_so_even_on_a_non_empty_index(self, tmp_path, capsys, monkeypatch):
+        """**新契约**：无密钥时的那句话是"未连接大模型"，而不是索引为空。
+
+        密钥检查排在 `open_store` 之前：没有判断者时索引里有什么都不改变结论，
+        也就不该为这一条命令加载嵌入器、跑一遍注定不用的检索。
+        """
         monkeypatch.delenv("DEEPSEEK_API_KEY", raising=False)
         assert _ingest(tmp_path, _corpus(tmp_path)) == EXIT_OK
         capsys.readouterr()
+
+        rc = main(_args(tmp_path, "ask", "memory limits"))
+
+        assert rc == EXIT_PRECONDITION
+        captured = capsys.readouterr()
+        assert captured.err.strip() == NO_LLM_MESSAGE
+        assert "索引为空" not in captured.err
+        # 检索结果（标题、来源 URL）一个都不许出现：没有兜底层
+        assert "Resource Management" not in captured.out + captured.err
+        assert "https://" not in captured.out + captured.err
+
+    def test_ask_show_context_prints_the_prompt_context(self, tmp_path, capsys, monkeypatch):
+        """`--show-context` 打印喂给模型的上下文：它需要**有密钥**才走得到生成分支。
+
+        打桩打在 `LiteLLMClient` 与 `has_api_key` 上（CLI 里是函数内 import，
+        所以补丁打在被导入的模块属性上），绝不联网。
+        """
+        assert _ingest(tmp_path, _corpus(tmp_path)) == EXIT_OK
+        capsys.readouterr()
+        monkeypatch.setattr("kubedocs.generate.has_api_key", lambda _model: True)
+
+        class _StubClient:
+            def __init__(self, _settings) -> None:
+                pass
+
+            def complete(self, system: str, user: str):
+                from kubedocs.generate import LLMResult
+
+                return LLMResult(text="答案 [1]")
+
+        monkeypatch.setattr("kubedocs.generate.LiteLLMClient", _StubClient)
+
         assert main(_args(tmp_path, "ask", "memory limits", "--show-context")) == EXIT_OK
         out = capsys.readouterr().out
         assert "提供给模型的上下文" in out

@@ -1,6 +1,13 @@
-"""回答生成测试：引用核对、拒答、预算、无密钥降级。
+"""回答生成测试：引用核对、拒答、预算、无密钥 / 调用失败的唯一回复。
 
 全部走打桩 LLM：不联网、不调真实模型、不需要密钥。
+
+## 两条失败文案必须分开
+
+"压根没配密钥"回 `NO_LLM_MESSAGE`（用户要去做的是配密钥），"配了但这次调用没成功"
+回 `LLM_FAILED_MESSAGE`（用户只需重试、运维去看网络/额度）。两句都定义在
+`kubedocs.llm_status`，本模块只 re-export —— 把"连了但失败"说成"未连接"会让运维去翻
+一个其实配好的密钥。两种情况下**都不给检索兜底内容**：没有判断者就没有结论。
 """
 
 from __future__ import annotations
@@ -27,6 +34,7 @@ from kubedocs.generate import (
     strip_context_header,
     validate_citations,
 )
+from kubedocs.llm_status import LLM_FAILED_MESSAGE, NO_LLM_MESSAGE
 from kubedocs.store.base import ChunkHit
 
 
@@ -423,6 +431,31 @@ class TestApiKeyDetection:
         assert has_api_key("deepseek/deepseek-chat") is True
 
 
+# --------------------------------------------------------------------- 唯一文案来源
+class TestTheTwoNoAnswerMessages:
+    """ "没配密钥"与"配了但这次失败"是两句不同的话，且只有一份定义。"""
+
+    def test_generate_only_reexports_the_single_source_of_truth(self):
+        """定义只在 `kubedocs.llm_status`：`generate` 里那个名字必须是同一个对象。
+
+        身份比较（`is`）而不是字符串比较：值相等但各写一份的实现，改文案时必然漏一处，
+        而"`/chat` 说未连接、`/ask` 说未配置"这种不一致正是这句文案要防的事。
+        """
+        from kubedocs import generate, llm_status
+
+        assert generate.NO_LLM_MESSAGE is llm_status.NO_LLM_MESSAGE
+        assert generate.LLM_FAILED_MESSAGE is llm_status.LLM_FAILED_MESSAGE
+        assert generate.NO_LLM_MESSAGE != generate.LLM_FAILED_MESSAGE
+
+    def test_missing_key_and_call_failure_are_told_apart(self, settings):
+        """无密钥与调用失败走两句话：把"连了但失败"说成"未连接"会让运维翻错地方。"""
+        unavailable = _answerer(settings, [_hit(1)], StubLLM(raises=LLMUnavailable("没有密钥"))).answer("q")
+        failed = _answerer(settings, [_hit(1)], StubLLM(raises=RuntimeError("boom"))).answer("q")
+
+        assert unavailable.text == NO_LLM_MESSAGE
+        assert failed.text == LLM_FAILED_MESSAGE
+
+
 # --------------------------------------------------------------------- 主流程（用打桩检索器）
 class StubRetriever:
     def __init__(self, hits: list[ChunkHit], degraded: list[str] | None = None) -> None:
@@ -471,19 +504,28 @@ class TestAnswerer:
         assert "没有找到" in ans.refusal_reason
         assert llm.calls == []  # 一次都没调用
 
-    def test_missing_key_degrades_but_still_returns_retrieval(self, settings, monkeypatch):
+    def test_missing_key_replies_with_the_single_message(self, settings, monkeypatch):
+        """**新契约**：没有密钥时只回 `NO_LLM_MESSAGE`，且**不给检索兜底内容**。
+
+        以前这里返回"检索结果 + degraded 说明"（有记录的降级）。降级层已经删掉：
+        没有判断者就没有结论，把检索结果挂在拒答旁边会被读成"没答案但有依据"的半个结论。
+        """
         monkeypatch.delenv("DEEPSEEK_API_KEY", raising=False)
         llm = StubLLM(raises=LLMUnavailable("未配置 DEEPSEEK_API_KEY"))
         ans = _answerer(settings, [_hit(1)], llm).answer("q")
+
         assert ans.refused is True
+        assert ans.text == NO_LLM_MESSAGE
+        assert ans.citations == [], "无密钥时不许回检索兜底内容"
+        # 底层原因保留（哪个环境变量没配），运维与审计要用它定位
         assert "DEEPSEEK_API_KEY" in ans.refusal_reason
-        assert ans.citations, "降级时仍应给出检索来源"
-        assert any("仅返回检索结果" in d for d in ans.degraded)
+        assert llm.calls, "模型是被问了才失败的（这条分支来自 LLMUnavailable）"
 
     def test_provider_error_degrades_instead_of_crashing(self, settings):
-        """供应商失败（401/429/超时/宕机）只降级，不让整个请求崩掉。
+        """供应商失败（401/429/超时/宕机）不再崩，也不给兜底内容。
 
-        用户仍应拿到检索结果和一句明确的失败原因；异常类型必须进诊断，否则就是静默吞异常。
+        用户看到的是**另一句**文案（`LLM_FAILED_MESSAGE`："配了密钥但这次没成功"），
+        异常类型必须进 `refusal_reason`，否则就是静默吞异常。
         """
 
         class AuthenticationError(Exception):
@@ -491,11 +533,13 @@ class TestAnswerer:
 
         llm = StubLLM(raises=AuthenticationError("invalid api key"))
         ans = _answerer(settings, [_hit(1)], llm).answer("q")
+
         assert ans.refused is True
+        assert ans.text == LLM_FAILED_MESSAGE
+        assert ans.text != NO_LLM_MESSAGE, "调用失败不等于没配密钥：两句必须分开"
+        assert ans.citations == [], "调用失败时同样不把检索结果当成半个结论交付"
         assert "AuthenticationError" in ans.refusal_reason
         assert "invalid api key" in ans.refusal_reason
-        assert ans.citations, "生成失败时仍应返回检索来源"
-        assert any("仅返回检索结果" in d for d in ans.degraded)
 
     def test_unexpected_error_is_recorded_not_swallowed(self, settings):
         ans = _answerer(settings, [_hit(1)], StubLLM(raises=RuntimeError("boom"))).answer("q")
@@ -510,6 +554,10 @@ class TestAnswerer:
         a.llm = llm
         ans = a.answer("q")
         assert ans.refused is True
+        # 预算用尽归入"这次调用没成功"，但具体原因（今天花了多少/上限多少）要留着，
+        # 否则运维分不出"该加额度"与"该重试"。
+        assert ans.text == LLM_FAILED_MESSAGE
+        assert ans.citations == []
         assert "上限" in ans.refusal_reason
         assert llm.calls == []
 
@@ -546,8 +594,11 @@ class TestAnswerer:
         assert any("没有任何引用标记" in d for d in ans.degraded)
 
     def test_empty_model_output_is_treated_as_refusal(self, settings):
+        """模型回空内容 = 这次调用没有产出可用输出 ⇒ `LLM_FAILED_MESSAGE`，不猜、不兜底。"""
         ans = _answerer(settings, [_hit(1)], StubLLM("   ")).answer("q")
         assert ans.refused is True
+        assert ans.text == LLM_FAILED_MESSAGE
+        assert ans.citations == []
         assert "空内容" in ans.refusal_reason
 
     def test_retrieval_degradation_is_surfaced(self, settings):

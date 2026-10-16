@@ -20,6 +20,7 @@ from kubedocs.clinical import triage as triage_mod
 from kubedocs.clinical.pipeline import ClinicalPipeline
 from kubedocs.clinical.prompts import prompt_version, system_prompt
 from kubedocs.clinical.reasoning import ClinicalReasoner
+from kubedocs.llm_status import LLM_FAILED_MESSAGE
 
 
 # --------------------------------------------------------------------- 假对象
@@ -548,21 +549,29 @@ class TestReasoner:
         result = ClinicalReasoner(_FakeLLM(raw)).reason("q", bundle, intake_mod.IntakeState())
         assert result.assessment is not None
 
-    def test_llm_failure_degrades_without_inventing(self) -> None:
+    def test_llm_failure_yields_no_clinical_content(self) -> None:
+        """**没有判断者就没有结论**：调用失败时不给任何"按证据推断"的内容。
+
+        以前这里会退回 `_fallback`（"按现有证据给出有限结论"）并断言 `assessment` 非空。
+        那种产物没有经过判断者，把它当结论交付等于用一段没人负责的内容冒充医学判断，
+        而且会让评测把**兜底产物**当成模型输出打分。现在的契约是：只有一句话，
+        `assessment` 为空——调用方必须显式处理"这一轮没有结论"。
+        """
         bundle = ev.build_evidence("q", backend=rag.LocalIndexBackend(_FakeRetriever([_Chunk("T", "B")])))
         result = ClinicalReasoner(_FakeLLM(RuntimeError("网络断了"))).reason(
             "q", bundle, intake_mod.IntakeState()
         )
-        assert result.assessment is not None
-        assert result.assessment.exams == [] and result.assessment.medications == []
-        assert "降级" in result.degraded or "失败" in result.degraded
+        assert result.assessment is None
+        assert result.degraded.startswith(LLM_FAILED_MESSAGE)
+        assert result.problems and "模型调用失败" in result.problems[0]
 
-    def test_garbage_output_degrades(self) -> None:
+    def test_garbage_output_yields_no_clinical_content(self) -> None:
         bundle = ev.build_evidence("q", backend=rag.LocalIndexBackend(_FakeRetriever([])))
         result = ClinicalReasoner(_FakeLLM("我不知道该怎么回答")).reason(
             "q", bundle, intake_mod.IntakeState()
         )
-        assert result.assessment is not None
+        assert result.assessment is None
+        assert result.raw == "我不知道该怎么回答", "原始输出要留档，便于排查是模型还是提示词的问题"
         assert result.problems and "契约" in result.problems[0]
 
     def test_keyword_hit_without_red_flag_is_recorded_not_silently_ignored(self) -> None:
@@ -594,17 +603,25 @@ class TestReasoner:
         result = ClinicalReasoner(_FakeLLM(raw)).reason("q", bundle, intake_mod.IntakeState())
         assert any("却把 urgency 定为 routine" in p for p in result.problems)
 
-    def test_red_line_fallback_without_llm_is_emergency(self) -> None:
-        """**决策者缺席时，证据本身成为结论**：模型挂了 + 红线阳性 ⇒ 必须给急救指引。"""
+    def test_red_line_alone_no_longer_becomes_a_conclusion_when_the_model_is_down(self) -> None:
+        """**规则不再代行判断**：模型挂了 + 红线阳性 ⇒ 仍然只回"调用失败"，不出结论。
+
+        这条以前叫 `test_red_line_fallback_without_llm_is_emergency`，断言"证据本身成为结论、
+        必须给急救指引"。现在这条被明确撤掉了：判断权只属于大模型，规则资产的输出是**线索**
+        （它照旧进参考标准面板），谁都不能在判断者缺席时替它下结论。
+        代价是承认：这一轮患者拿不到急救指引——所以生产部署必须保证模型可用
+        （`/healthz` 与 `LLM_FAILED_MESSAGE` 的告警就是为这件事存在的）。
+        """
         bundle = ev.build_evidence(
             "q", backend=rag.LocalIndexBackend(_FakeRetriever([])), guard=_FakeGuard("胸痛")
         )
         result = ClinicalReasoner(_FakeLLM(RuntimeError("挂了"))).reason(
             "q", bundle, intake_mod.IntakeState()
         )
-        assert result.assessment is not None
-        assert result.assessment.urgency == "emergency"
-        assert "120" in result.assessment.patient_summary
+        assert result.assessment is None
+        assert result.degraded.startswith(LLM_FAILED_MESSAGE)
+        # 红线线索本身还在证据包里（面板照常会把它交给模型），只是不再被当成结论
+        assert bundle.red_line_positive is True
 
 
 class TestLiteLLMAdapter:

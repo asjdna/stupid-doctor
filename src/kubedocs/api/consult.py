@@ -374,6 +374,86 @@ class ConsultRuntime:
             tool_loop=tool_loop,
             store=self.store(),
             top_k=10,
+            # 参考标准面板由**域层**装配：症状词表、科室表、号源事实都是 clinic 域的知识，
+            # 管线那一层不该知道（它只认 `FactSet` 这个形状）。
+            reference_builder=self.build_reference,
+            # **有没有大模型**这条状态由 HTTP 层判定（密钥在 settings/env 里）：
+            # 管线拿到它就知道该不该产出判断——没有判断者时它只回一句话。
+            has_llm=self.has_llm,
+        )
+
+    # ---------------------------------------------------------------- 参考标准
+    def has_llm(self) -> bool:
+        """这个部署到底有没有可用的模型密钥。**一次判定，两处使用**（管线与端点）。"""
+        from kubedocs.generate import has_api_key
+
+        settings = getattr(self._runtime, "settings", None)
+        if settings is None:  # 测试接缝里的假 runtime：当"有"，否则所有用例都会退化成无模型
+            return True
+        return bool(has_api_key(settings.llm_model))
+
+    def link_map(self) -> Any:
+        """症状→科室关联表（进程内缓存一次）。缺语料时返回空表，面板会如实写出来。"""
+        from kubedocs.domains.clinic.pack import link_vocabulary
+
+        keys = link_vocabulary()
+        if not keys:
+            return {}
+        from kubedocs.domains.clinic.domain import ClinicPack
+
+        return ClinicPack().triage_links()
+
+    def booking_facts(self, patient_id: str) -> tuple[list[Any], list[str]]:
+        """把**服务端已经确认的挂号/退号**读成面板事实。返回 (事实, 装配问题)。
+
+        这是防"没挂上却说挂上"最直接的一条：模型手里有一份"本轮到底发生过什么"的清单。
+        读不到时**不猜**——留一条 note 让模型知道这份事实这次不可用（而不是让它以为"没有挂号"）。
+        """
+        from kubedocs.clinical.reference import BookingFact
+
+        notes: list[str] = []
+        try:
+            rows = self.booking().my_appointments(patient_id, 5)
+        except Exception as e:  # noqa: BLE001 - 号源不可读不该让整轮问诊失败
+            notes.append(f"挂号记录本次读不到（{type(e).__name__}）：请勿声称任何挂号结果")
+            return [], notes
+        out: list[BookingFact] = []
+        for row in rows:
+            status = str(row.get("status") or "")
+            out.append(
+                BookingFact(
+                    kind="cancelled" if status == "cancelled" else "confirmed",
+                    department=str(row.get("department") or ""),
+                    date=str(row.get("date") or ""),
+                    time_slot=str(row.get("time") or ""),
+                    fee=int(row.get("fee") or 0),
+                    ticket_no=str(row.get("ticket_no") or ""),
+                    queue_no=int(row.get("queue_no") or 0),
+                    status=status,
+                )
+            )
+        return out, notes
+
+    def build_reference(self, question: str, evidence: Any, patient_id: str) -> Any:
+        """装配这一轮的参考标准面板（`FactSet`）。**注入给管线**，见 `_build`。"""
+        from kubedocs.domains.clinic.data.departments import DEPARTMENTS
+        from kubedocs.domains.clinic.redline import RiskGuard
+        from kubedocs.domains.clinic.reference import clinic_reference
+
+        links = self.link_map()
+        notes: list[str] = []
+        if not links:
+            notes.append("症状→科室关联表为空（卡片语料缺失）")
+        booking, booking_notes = self.booking_facts(patient_id)
+        notes.extend(booking_notes)
+        return clinic_reference(
+            question,
+            links=links,
+            guard=RiskGuard(),
+            evidence=evidence,
+            booking=booking,
+            known_departments=DEPARTMENTS,
+            notes=notes,
         )
 
     # ---------------------------------------------------------------- 会话
@@ -613,6 +693,11 @@ def to_payload(turn: ClinicalTurn, session_id: str, *, turns: int = 0) -> dict[s
         "keyword_hit_conflict": keyword_hit_conflict,
         # 模型这一轮**自己决定**调用了哪些模块（架构决定的可见落点：工具由模型驱动）
         "tool_calls": list(turn.tool_calls),
+        # 这一轮**给它看了什么依据**、以及**它的输出哪里越界被拦了**。
+        # 两者必须成对回传：只有同时看到"依据"与"违规"，才能回答
+        # "这次是依据不够，还是模型没守规矩"——这是这套架构唯一可信的自证材料。
+        "reference": turn.reference,
+        "contract_violations": list(turn.contract_violations),
         # 挂号的两张卡片：`pending_action` 需要患者点"确认"才会真的取号；
         # `appointments` 是患者本人的挂号记录（卡片上带"退号"按钮）。
         # 两者都由工具结果生成，不由模型那段话生成（见 `_booking_cards`）。

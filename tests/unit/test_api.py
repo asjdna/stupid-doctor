@@ -1,4 +1,4 @@
-"""API 层测试：路由形状、降级路径、SSE 事件格式。
+"""API 层测试：路由形状、无密钥收口、SSE 事件格式。
 
 三条硬约束：
 1. 绝不联网、绝不加载真实模型：索引建在 `tmp_path`、嵌入用 `hashing`，
@@ -6,6 +6,13 @@
 2. 不依赖磁盘语料：直接构造 store 灌块——这里验证的是 HTTP 层的协议转换；
 3. 空索引是重点用例：`/healthz` `/domains` `/tools` `/search` `/ask` `/chat`
    在没有索引时都必须能返回而不是 500，这是部署中间态。
+
+## 无密钥时的契约（新架构）
+
+`/ask` 与 `/chat` 都**只回一句话**（`NO_LLM_MESSAGE`）：`/ask` 给空引用 + `n_hits=0`，
+`/chat` 的 message 事件就是那句话（`status="no_llm"`）。确定性图（`ClinicAgent`）
+**不在请求路径上**，它保留为"规则判断 vs 模型判断"的对照臂——下面有一条用例专门钉住
+"请求期间它一次都没被调用"。
 """
 
 from __future__ import annotations
@@ -20,11 +27,13 @@ from typing import Any, TypedDict
 import pytest
 from fastapi.testclient import TestClient
 
+from kubedocs.agent.clinic_react import ClinicReactRuntime
 from kubedocs.api.app import create_app
 from kubedocs.api.threads import ThreadOwnershipError
 from kubedocs.config import Settings
 from kubedocs.embed import HashingEmbedder
 from kubedocs.generate import Answerer, LLMResult
+from kubedocs.llm_status import LLM_FAILED_MESSAGE, NO_LLM_MESSAGE
 from kubedocs.store import from_settings
 from kubedocs.store.base import ChunkInput, DocInput
 
@@ -42,6 +51,13 @@ class _StubLLM:
 
     def complete(self, system: str, user: str) -> LLMResult:
         return LLMResult(text="打桩答案 [1]", prompt_tokens=1, completion_tokens=1)
+
+
+class _FailingLLM:
+    """打桩 LLM：这次调用失败（限流/超时那一类），不碰任何网络。"""
+
+    def complete(self, system: str, user: str) -> LLMResult:
+        raise RuntimeError("供应商 429")
 
 
 # --------------------------------------------------------------------------- 辅助
@@ -239,28 +255,65 @@ class TestSearch:
 
 # --------------------------------------------------------------------------- /ask
 class TestAsk:
-    def test_without_llm_key_degrades_instead_of_500(self, api_settings: Settings) -> None:
-        """没有 LLM 密钥 → 200 + `degraded` 说明 + 引用照常返回，不是 500；autouse 夹具清掉了所有密钥，分支确定性。"""
+    def test_without_llm_key_returns_only_the_message(self, api_settings: Settings) -> None:
+        """**新契约**：没有 LLM 密钥 → 200 + 只回 `NO_LLM_MESSAGE`，**不回检索兜底内容**。
+
+        以前这里返回"检索结果 + degraded 说明"。降级层已经删掉：`citations=[]`、`n_hits=0`，
+        而且**连检索都不跑**（autouse 夹具清掉了所有密钥，分支是确定的）。
+        """
         _seed_index(api_settings, [LONG_BODY])
         with TestClient(create_app(api_settings)) as client:
             resp = client.post("/ask", json={"q": "kubelet"})
 
         assert resp.status_code == 200
         body = resp.json()
-        assert body["answer"] == ""
-        assert body["degraded"] == "未配置 LLM 密钥，仅返回检索结果"
-        assert body["n_hits"] >= 1
-        assert body["citations"], "回答降级不等于引用也降级：来源必须照常返回"
-        assert body["citations"][0]["source_url"].startswith("https://")
+        assert body["answer"] == NO_LLM_MESSAGE
+        assert body["citations"] == [], "无密钥时不许回检索兜底内容"
+        assert body["n_hits"] == 0
+        assert "未连接大模型" in body["degraded"]
 
-    def test_empty_index_returns_200_with_explanation(self, client: TestClient) -> None:
-        """空索引下 /ask 也返回 200 + 说明：没有语料就明说没有，不许编造。"""
-        resp = client.post("/ask", json={"q": "pod"})
+    def test_provider_failure_says_a_different_sentence(
+        self, api_settings: Settings, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """配了密钥但这次调用失败 → `LLM_FAILED_MESSAGE`（**不是**"未连接大模型"）。
+
+        两句必须分开：把"连了但失败"说成"未连接"会让运维去翻一个其实配好的密钥。
+        具体原因（异常类型）留在 `degraded` 里。
+        """
+        _seed_index(api_settings, [LONG_BODY])
+        monkeypatch.setattr("kubedocs.api.app.has_api_key", lambda _model: True)
+        monkeypatch.setattr(
+            "kubedocs.api.app.build_answerer",
+            lambda retriever, settings: Answerer(retriever, _FailingLLM(), settings),
+        )
+        with TestClient(create_app(api_settings)) as client:
+            resp = client.post("/ask", json={"q": "kubelet"})
+
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["answer"] == LLM_FAILED_MESSAGE
+        assert body["answer"] != NO_LLM_MESSAGE
+        assert body["citations"] == []
+        assert body["n_hits"] == 0
+        assert "RuntimeError" in body["degraded"]
+
+    def test_empty_index_returns_200_with_explanation(
+        self, api_settings: Settings, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """**有模型**而索引为空时：200 + 说明"检索结果为空"，不编造（空索引不是故障）。
+
+        需要把密钥判成有：无密钥时 `/ask` 在**检索之前**就收口成那一句话
+        （见上一条用例），根本走不到"空索引"这条分支。
+        """
+        monkeypatch.setattr("kubedocs.api.app.has_api_key", lambda _model: True)
+        with TestClient(create_app(api_settings)) as client:
+            resp = client.post("/ask", json={"q": "pod"})
         assert resp.status_code == 200
         body = resp.json()
         assert body["answer"] == ""
         assert body["n_hits"] == 0
-        assert body["degraded"]
+        assert body["citations"] == []
+        assert "检索结果为空" in body["degraded"]
 
     def test_answer_and_citations_are_passed_through(
         self, api_settings: Settings, monkeypatch: pytest.MonkeyPatch
@@ -304,8 +357,83 @@ class TestChat:
         text = _event(events, "message")["text"]
         assert text, "最终文本不能是空串"
 
+    def test_without_llm_key_the_message_is_one_sentence(self, api_settings: Settings) -> None:
+        """**新契约**：没有密钥的 `/chat` 只回 `NO_LLM_MESSAGE`，不发 tool 事件、不回落规则轨。
+
+        以前这里会回退到确定性图（`ClinicAgent`）跑红线与挂号。降级层已经删掉：
+        没有判断者就没有结论，`status="no_llm"` 让调用方能与正常轮次分开。
+        """
+        settings = api_settings.model_copy(update={"domain": "clinic"})
+        with TestClient(create_app(settings)) as client:
+            resp = client.post("/chat", json={"message": "我现在胸痛", "patient_id": "p1"})
+
+        assert resp.status_code == 200
+        events = _sse_events(resp.text)
+        message = _event(events, "message")
+        assert message["text"] == NO_LLM_MESSAGE
+        assert message["status"] == "no_llm"
+        assert message["citations"] == []
+        assert message["pending_action"] is None
+        # 无密钥时那一轮没有依据可言，也没有参考标准面板
+        assert message["reference"] is None
+        assert [data for name, data in events if name == "tool"] == [], "无密钥时不该有 tool 事件"
+
+    def test_the_deterministic_graph_is_not_on_the_request_path(
+        self, api_settings: Settings, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """**回归（新契约）**：请求期间 `_get_clinic_agent` 一次都不许被调用。
+
+        确定性图保留为对照臂（评测里比较"规则判断 vs 模型判断"），但 `/chat` 只有模型
+        驱动的一条路；把它接回请求路径会让同一个问题又由两个"脑"分别作答。
+        """
+        called: list[int] = []
+
+        def _boom(_app: Any) -> Any:
+            called.append(1)
+            raise AssertionError("确定性图被接回请求路径了")
+
+        monkeypatch.setattr("kubedocs.api.app._get_clinic_agent", _boom)
+        settings = api_settings.model_copy(update={"domain": "clinic"})
+        with TestClient(create_app(settings)) as client:
+            resp = client.post("/chat", json={"message": "我现在胸痛"})
+
+        assert resp.status_code == 200
+        assert _event(_sse_events(resp.text), "message")["text"] == NO_LLM_MESSAGE
+        assert called == [], "确定性图不在请求路径上"
+
+    def test_message_event_carries_the_reference_panel(
+        self, api_settings: Settings, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """有密钥时 `message` 事件带 `reference`（键名与 `/consult` 一致），可逐轮对账。
+
+        面板是**依据**的留档：模型说了什么在 `text` 里，依据是什么在 `reference` 里。
+        """
+        monkeypatch.setattr("kubedocs.api.app.has_api_key", lambda _model: True)
+        monkeypatch.setattr(ClinicReactRuntime, "has_llm", lambda self: True)
+        # 真实关联表来自 8MB 卡片语料：单测不读它，换一张打桩的。
+        monkeypatch.setattr("kubedocs.agent.clinic_react._triage_links", lambda: {"咳嗽": ("呼吸内科",)})
+
+        class _Capturing:
+            def __init__(self, _settings: Any) -> None:
+                pass
+
+            def choose(self, messages: list[dict[str, Any]], tools: list[dict[str, Any]]) -> dict[str, Any]:
+                return {"content": "建议挂呼吸内科。", "tool_calls": []}
+
+        monkeypatch.setattr("kubedocs.agent.llm_tool_caller.LiteLLMToolCaller", _Capturing)
+        with TestClient(create_app(api_settings)) as client:
+            resp = client.post("/chat", json={"message": "我咳嗽", "patient_id": "p-ref"})
+
+        message = _event(_sse_events(resp.text), "message")
+        assert message["text"] == "建议挂呼吸内科。"
+        assert message["status"] == "done"
+        reference = message["reference"]
+        assert reference, "有密钥的那一轮必须带上面板"
+        assert {"red_line", "symptoms", "booking", "known_departments"} <= set(reference)
+        assert reference["booking"] == [], "本轮服务端没有挂号动作"
+
     def test_thread_id_is_respected_and_conversation_continues(self, client: TestClient) -> None:
-        """带同一个 thread_id 再来一次 = 续聊：内核的 interrupt 挂起点会被 resume。"""
+        """带同一个 thread_id 再来一次 = 续聊：会话属于调用方，服务端按 id 记账。"""
         first = client.post("/chat", json={"message": "我最近咳嗽", "thread_id": "t-api-1"})
         assert _event(_sse_events(first.text), "thread")["thread_id"] == "t-api-1"
 
@@ -316,48 +444,17 @@ class TestChat:
         assert message["text"]
 
     def test_chat_works_without_index_or_corpus(self, api_settings: Settings) -> None:
-        """无索引/无语料也要能返回：clinic 的规则轨（红线）不依赖索引。
-
-        「胸痛」是急诊红线词，所以这一轮必走 emergency 分支；它以 `tool` 事件可见，
-        即"agent 真的做了这件事"，而不只是在文本里提一句。
-        """
+        """无索引/无语料也要能返回：这一轮不检索，也不许 500。"""
         settings = api_settings.model_copy(update={"domain": "clinic"})
         with TestClient(create_app(settings)) as client:
-            resp = client.post("/chat", json={"message": "我现在胸痛", "patient_id": "p1"})
+            resp = client.post("/chat", json={"message": "我咳嗽", "patient_id": "p1"})
 
         assert resp.status_code == 200
-        events = _sse_events(resp.text)
-        tools = [data for name, data in events if name == "tool"]
-        assert any(t["tool"] == "check_red_line" for t in tools), tools
-        assert "120" in _event(events, "message")["text"]
+        assert _event(_sse_events(resp.text), "message")["text"] == NO_LLM_MESSAGE
 
     def test_too_long_message_is_422(self, client: TestClient) -> None:
         """message 超过 2000 字符 → 422（单轮对话文本的上限在 schema 里）。"""
         assert client.post("/chat", json={"message": "咳" * 2001}).status_code == 422
-
-    def test_interrupted_question_is_streamed_and_resumed(
-        self, api_settings: Settings, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        """被 `interrupt` 挂起的追问以 message 事件送出（`awaiting_user=true`），
-        同一 `thread_id` 再来一次即 `resumed=true`——是"真挂起"，不是内存里记标志位。
-
-        症状关联表用打桩：真实卡片语料不入库，靠它这条用例在干净克隆里只会走兜底回答。
-        """
-        monkeypatch.setattr(
-            "kubedocs.api.app._clinic_links",
-            lambda: {"咳嗽": ("支气管炎", "呼吸内科"), "发热": ("支气管炎", "感染科")},
-        )
-        with TestClient(create_app(api_settings)) as client:
-            first = client.post("/chat", json={"message": "我咳嗽", "thread_id": "t-resume"})
-            asking = _event(_sse_events(first.text), "message")
-            assert asking["awaiting_user"] is True, asking
-            assert asking["status"] == "asking"
-            assert asking["text"], "追问的问题不能是空串"
-
-            second = client.post("/chat", json={"message": "没有别的了", "thread_id": "t-resume"})
-            resumed = _event(_sse_events(second.text), "message")
-            assert resumed["resumed"] is True, "第二轮必须是从挂起点续跑，而不是开新会话"
-            assert resumed["thread_id"] == "t-resume"
 
     def test_message_event_reports_zero_unpriced_calls(self, client: TestClient) -> None:
         """`unpriced_llm_calls` 是"未知成本可见"的契约：正常情况下必须是 0（不是缺失）。"""
@@ -452,7 +549,11 @@ class TestChatBudget:
                 calls.append(1)
                 return {"content": "答", "tool_calls": []}
 
+        # 有密钥才走得到工具循环（无密钥时 `/chat` 在检索之前就收口成一句话）；
+        # 打桩关联表避免单元测试去读 8MB 卡片语料。
+        monkeypatch.setattr("kubedocs.api.app.has_api_key", lambda _model: True)
         monkeypatch.setattr("kubedocs.agent.clinic_react.ClinicReactRuntime.has_llm", lambda self: True)
+        monkeypatch.setattr("kubedocs.agent.clinic_react._triage_links", lambda: {})
         monkeypatch.setattr("kubedocs.agent.llm_tool_caller.LiteLLMToolCaller", _CountingCaller)
         with TestClient(create_app(api_settings)) as client:
             resp = client.post("/chat", json={"message": "我咳嗽", "thread_id": "t-budget"})
@@ -607,7 +708,12 @@ class TestClinicStatePersistence:
         second.conn.close()  # type: ignore[attr-defined]
 
     def test_app_does_not_build_one_by_default(self, api_settings: Settings) -> None:
-        """装配层默认不建：不配就不该多出一个文件、多一条连接。"""
+        """装配层默认不建：不配就不该多出一个文件、多一条连接。
+
+        这里**直接调用** `_get_clinic_agent` 是刻意的：它不在请求路径上（见类文档与
+        `test_the_deterministic_graph_is_not_on_the_request_path`），对照实验与回归测试
+        仍然要能单独构造它。
+        """
         from kubedocs.api.app import _get_clinic_agent
 
         app = create_app(api_settings)

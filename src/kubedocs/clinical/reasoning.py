@@ -21,20 +21,13 @@ import logging
 from dataclasses import dataclass, field
 from typing import Any, Protocol
 
-from kubedocs.clinical.contracts import (
-    ClinicalAssessment,
-    DepartmentAdvice,
-)
+from kubedocs.clinical.contracts import ClinicalAssessment
 from kubedocs.clinical.evidence import EvidenceBundle
 from kubedocs.clinical.intake import IntakeState
 from kubedocs.clinical.prompts import build_user_message, prompt_version, system_prompt
+from kubedocs.llm_status import LLM_FAILED_MESSAGE
 
 logger = logging.getLogger(__name__)
-
-EMERGENCY_FALLBACK_TEXT = (
-    "你描述的情况可能比较紧急。请立即拨打 120，或马上前往最近的急诊科。"
-    "在等待或前往途中如症状加重，请让身边的人协助。"
-)
 
 
 class LLMClient(Protocol):
@@ -150,29 +143,36 @@ class ClinicalReasoner:
         self._client = client
 
     def reason(self, question: str, evidence: EvidenceBundle, intake: IntakeState) -> ReasoningResult:
+        """跑一次主判。**失败时不给任何临床内容**——没有判断者就没有结论。
+
+        以前失败会走 `_fallback`（"按现有证据给出有限结论"）。那种结论没有经过判断者，
+        把它当结论交付，等于用一段没人负责的内容冒充医学判断；而且它会让评测把一个
+        **兜底产物**当成模型输出打分。现在只回一句可执行的话，`assessment` 留空——
+        调用方必须显式处理"这一轮没有结论"。
+        """
         version = prompt_version()
         user = build_user_message(question, evidence, intake)
         try:
             raw = self._client.complete(system_prompt(), user)
-        except Exception as e:  # noqa: BLE001 - LLM 是外部服务：任何失败都走降级，不崩对话
-            logger.warning("主判调用失败，走降级：%s: %s", type(e).__name__, e)
+        except Exception as e:  # noqa: BLE001 - LLM 是外部服务：任何失败都只报告，不编内容
+            logger.warning("主判调用失败：%s: %s", type(e).__name__, e)
             return ReasoningResult(
-                assessment=self._fallback(evidence, intake),
-                problems=[],
-                degraded=f"模型调用失败（{type(e).__name__}: {e}），已按证据给出有限结论",
+                assessment=None,
+                problems=[f"模型调用失败（{type(e).__name__}）"],
+                degraded=f"{LLM_FAILED_MESSAGE}（{type(e).__name__}: {e}）",
                 prompt_version=version,
             )
 
         try:
             payload = json.loads(_extract_json(raw))
             assessment = ClinicalAssessment.model_validate(payload)
-        except Exception as e:  # noqa: BLE001 - 解析失败也要降级，不能把原始文本塞给患者
-            logger.warning("主判输出无法解析，走降级：%s: %s", type(e).__name__, e)
+        except Exception as e:  # noqa: BLE001 - 解析失败同样不给内容
+            logger.warning("主判输出无法解析：%s: %s", type(e).__name__, e)
             return ReasoningResult(
-                assessment=self._fallback(evidence, intake),
+                assessment=None,
                 raw=raw,
-                problems=[f"模型输出不符合契约（{type(e).__name__}），已降级"],
-                degraded="模型输出不可解析，已按证据给出有限结论",
+                problems=[f"模型输出不符合契约（{type(e).__name__}）"],
+                degraded=f"{LLM_FAILED_MESSAGE}（输出不可解析）",
                 prompt_version=version,
             )
 
@@ -191,40 +191,3 @@ class ClinicalReasoner:
                 "但模型未判出任何急重症（按既定设计由模型决定，此处仅记录不一致）"
             )
         return ReasoningResult(assessment=assessment, raw=raw, problems=problems, prompt_version=version)
-
-    def _fallback(self, evidence: EvidenceBundle, intake: IntakeState) -> ClinicalAssessment:
-        """降级产物：只用证据能支撑的内容，**不引入任何模型知识**。
-
-        主判不可用时**没有"模型判断"这回事**，所以这里不退化成沉默：
-        若关键词表命中，就给一句保守的"请立即就医"提示（并把命中的词说出来，
-        让用户明白系统在担心什么）。**这不冒充模型判断**——`degraded` 非空，
-        前端据此不弹急诊横幅（见 `api/consult.py`），提示只出现在对话正文里。
-        **没有命中时也不假装没事**：统一提示"没能给出建议，请线下就医"，
-        绝不说"你应该没事"。
-        """
-        if evidence.red_line_positive:
-            assert evidence.red_line is not None  # 由 red_line_positive 保证
-            return ClinicalAssessment(
-                urgency="emergency",
-                departments=list(evidence.triage),
-                patient_summary=f"「{evidence.red_line.word}」需要立刻处理。{EMERGENCY_FALLBACK_TEXT}",
-            )
-        departments = list(evidence.triage) or [
-            DepartmentAdvice(name="内科", confidence=0.0, reason="模型不可用，先按内科门诊分诊")
-        ]
-        if evidence.items:
-            summary = (
-                "这次没能生成完整建议，下面是检索到的相关资料，建议带上去医院问医生。"
-                "如果你希望我继续判断，请再描述一下症状。"
-            )
-        else:
-            summary = (
-                "这次没能生成完整建议，也没有检索到相关资料。"
-                "请补充描述症状（哪里不舒服、多久了），或直接到医院分诊台咨询。"
-            )
-        return ClinicalAssessment(
-            urgency="routine",
-            departments=departments,
-            patient_summary=summary,
-            followup_questions=[s.question for s in intake.missing()[:2]],
-        )

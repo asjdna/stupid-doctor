@@ -8,8 +8,16 @@
 3. **引用标记必须可核对**：`[n]` 只能指向真实提供给模型的那 n 段上下文。指向不
    存在编号的标记会被剥掉并记入诊断——指向不存在来源的引用比没有引用更糟。
 
-"未配置密钥"也是一种正常输出（**有记录的降级**）：检索结果与引用照常返回，只是
-`text` 为空、`refused=True` 并给出原因，没有密钥的环境（离线机器等）依然能跑通整条链路。
+"未配置密钥"**不是**一种降级输出：本仓库没有降级层——没有判断者就没有结论。此时
+`Answerer.answer()` 只回 `NO_LLM_MESSAGE`，**不把检索结果当成回答交付**（那种"没答案但
+有依据"的半个结论正是被删掉的兜底），`refused=True` 且 `refusal_reason` 保留底层原因
+（哪个环境变量没配）供审计。检索本身不受影响：它走 `/search` 与 `kubedocs search`，
+那些入口不需要大模型。
+
+"配了密钥但这次调用没成功"（超时/限流/输出不可解析/预算用尽）回 `LLM_FAILED_MESSAGE`，
+与"压根没配密钥"**分开**：两者要用户/运维做的事不同（后者去配密钥，前者去重试/加额度），
+而说错一句会让运维去翻一个其实配好的密钥。两句文案的唯一来源是 `kubedocs.llm_status`，
+本模块只 re-export（`from kubedocs.generate import NO_LLM_MESSAGE` 仍然可用），不另起一份。
 
 系统提示里专门要求参数名、字段名、命令行、错误码**逐字保留**：LLM 很容易把
 `--eviction-hard` 改写成"驱逐硬阈值"、把 `topologySpreadConstraints` 缩写，
@@ -31,11 +39,16 @@ from pathlib import Path
 from typing import Any, Protocol
 
 from kubedocs.config import Settings
+from kubedocs.llm_status import LLM_FAILED_MESSAGE, NO_LLM_MESSAGE
 from kubedocs.observability import observe_llm_call, span, span_attrs
 from kubedocs.retrieve.hybrid import HybridRetriever, SearchResult
 from kubedocs.store.base import ChunkHit
 
 logger = logging.getLogger(__name__)
+
+# `NO_LLM_MESSAGE` / `LLM_FAILED_MESSAGE` 在这里**只是 re-export**：定义在
+# `kubedocs.llm_status`（唯一真相源），而 CLI / API / 测试历史上都从本模块取那句文案，
+# 所以保留这个出口，避免有人另起一份字符串。
 
 SYSTEM_PROMPT = """你是一个 Kubernetes 官方文档助手。严格遵循以下规则：
 
@@ -682,6 +695,25 @@ class LiteLLMClient:
 
 
 # --------------------------------------------------------------------------- 主流程
+def _failed(ans: Answer, message: str, reason: str) -> Answer:
+    """把一次失败的生成收口成"只有一句话"的拒答。
+
+    三条失败路径（预算用尽 / 没有密钥 / 供应商异常）都走这里，语义一致：
+
+    - **清掉检索兜底内容**（`citations = []`）：没有经过判断者的东西不许以"结论"或
+      "半个结论"的形式交付——这正是本仓库删掉降级层的那条架构；
+    - 用户可见文案由调用方给（来自 `llm_status` 的两句之一），**"没配密钥"与"配了但失败"
+      必须分开说**；
+    - `refusal_reason` 保留底层原因（哪个环境变量、超限金额、异常类型），运维与审计要能
+      分辨"该去配密钥"还是"该去重试/加额度"。
+    """
+    ans.refused = True
+    ans.refusal_reason = reason
+    ans.text = message
+    ans.citations = []
+    return ans
+
+
 class Answerer:
     """检索 + 生成 + 引用核对 + 预算控制。"""
 
@@ -757,22 +789,19 @@ class Answerer:
                     budget_usd=self.settings.llm_daily_budget_usd,
                 )
         except BudgetExceeded as e:
-            ans.refused = True
-            ans.refusal_reason = str(e)
-            return ans
+            # 预算用尽也属于"这次调用没成功"（`llm_status` 把它归入 `LLM_FAILED_MESSAGE`）；
+            # 具体原因（今天已经花了多少、上限多少）留在 `refusal_reason` 里，
+            # 让运维能分出"该加额度"与"该重试"。
+            return _failed(ans, LLM_FAILED_MESSAGE, str(e))
         except LLMUnavailable as e:
-            ans.refused = True
-            ans.refusal_reason = str(e)
-            ans.degraded.append("仅返回检索结果（生成回答不可用）")
-            return ans
+            # 没有降级层：没有判断者就没有结论。检索结果**不作为回答交付**，
+            # 只回唯一那句文案；底层原因（缺哪个环境变量）留在 refusal_reason 里审计。
+            return _failed(ans, NO_LLM_MESSAGE, str(e))
         except Exception as e:  # noqa: BLE001
             # 供应商侧的失败（密钥无效 401、限流 429、超时、服务不可用）不该让整个请求崩掉：
-            # 检索结果本身有价值，用户应当拿到它 + 一句明确的失败原因；但**异常类型
-            # 必须记进诊断**，否则就成了静默吞异常。
-            ans.refused = True
-            ans.refusal_reason = f"调用大模型失败：{type(e).__name__}: {e}"
-            ans.degraded.append("仅返回检索结果（生成回答失败）")
-            return ans
+            # 用户该看到的是"这次没成功、可以重试"，但**异常类型必须记进诊断**，
+            # 否则就成了静默吞异常。
+            return _failed(ans, LLM_FAILED_MESSAGE, f"调用大模型失败：{type(e).__name__}: {e}")
 
         ans.text, problems = validate_citations(result.text, len(citations))
         ans.prompt_tokens = result.prompt_tokens
@@ -785,8 +814,9 @@ class Answerer:
                 "当日预算，请勿把它当成免费调用"
             )
         if not ans.text:
-            ans.refused = True
-            ans.refusal_reason = "模型返回空内容"
+            # 模型回了空内容 = 这次调用没有产出可用输出（归 `LLM_FAILED_MESSAGE`）。
+            # 先前会留一句"模型返回空内容"的拒答原因，现在文案也由 `llm_status` 统一。
+            _failed(ans, LLM_FAILED_MESSAGE, "模型返回空内容")
         return ans
 
 

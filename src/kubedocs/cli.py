@@ -4,7 +4,8 @@
 所以"能跑通"这件事可以在没有容器、没有数据库、没有网络的情况下复现。
 
 退出码约定（供脚本与闸门判断，而不是靠解析 stdout）：
-    0 成功      1 参数/用户错误      2 评测闸门不通过      3 索引为空等前置条件不满足
+    0 成功      1 参数/用户错误      2 评测闸门不通过      3 前置条件不满足（索引为空、
+    未连接大模型等——环境/配置没到位，不是用户把参数写错了）
 """
 
 from __future__ import annotations
@@ -237,10 +238,24 @@ def cmd_search(args: argparse.Namespace) -> int:
 
 # --------------------------------------------------------------------------- ask
 def cmd_ask(args: argparse.Namespace) -> int:
+    """检索 + 生成（`Answerer`）。**没有大模型密钥时不检索、不兜底**，只回一句话。
+
+    "没配密钥"是**前置条件不满足**（缺配置），不是用户参数错，所以退出码走
+    `EXIT_PRECONDITION`；调用失败（配了密钥但超时/限流/预算超限）由 `Answerer` 收口成
+    `LLM_FAILED_MESSAGE`，原因写在 `refusal_reason` 里，仍然返回 `EXIT_OK`
+    （命令本身跑通了，是"这一轮没答上"）。检索不需要大模型，走 `kubedocs search`。
+    """
     from kubedocs.embed import build_embedder
-    from kubedocs.generate import build_answerer
+    from kubedocs.generate import build_answerer, has_api_key
+    from kubedocs.llm_status import NO_LLM_MESSAGE
 
     settings = make_settings(args)
+    if not has_api_key(settings.llm_model):
+        # 早于 open_store 判断：没有判断者时索引里有什么都不改变结论，
+        # 也就不该为这一条命令加载嵌入器、跑一遍检索。
+        print(NO_LLM_MESSAGE, file=sys.stderr)
+        return EXIT_PRECONDITION
+
     pack = _get_pack(settings)
     store = open_store(settings)
     try:

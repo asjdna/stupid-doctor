@@ -31,9 +31,16 @@
 
 `data` 一律 `json.dumps(..., ensure_ascii=False)` 并压成一行：SSE 的 data 遇到换行会被
 拆成多条 `data:` 行、需要接收端自己拼回来。这里流的是**事件**，不是 LLM 的 token——
-clinic 内核的推理是确定性的规则 + 词表（`ClinicAgent` 是同步 `graph.invoke`），本文件
-用线程池把它挪出事件循环，使 `thread` 事件能先于这一轮推理送达客户端；token 级流式
-要等生成层给出流式接口。
+clinic 内核是同步的（工具循环逐轮调模型；对照臂 `ClinicAgent` 是同步 `graph.invoke`），
+本文件用线程池把它挪出事件循环，使 `thread` 事件能先于这一轮推理送达客户端；token 级
+流式要等生成层给出流式接口。
+
+## 没有大模型密钥时只有一句话
+
+`/ask` 与 `/chat` 在无密钥时**不检索、不兜底**：`/ask` 回 `NO_LLM_MESSAGE` + 空引用 +
+`n_hits=0`；`/chat` 的 message 事件就是那一句话（`status="no_llm"`，不发 tool 事件）。
+没有判断者就没有结论，也不需要假装有（见 `kubedocs/llm_status.py`）。确定性图
+（`_get_clinic_agent`）**不在请求路径上**：它保留为"规则判断 vs 模型判断"的对照臂。
 
 `thread_id` 由客户端自带，服务端管住两件事（实现见 `api/threads.py`）：**属主校验**
 （首次出现即绑定 `patient_id`，换一个 `patient_id` 用同一个 `thread_id` → **409**；
@@ -85,6 +92,7 @@ from kubedocs.domains.base import DomainRegistry
 from kubedocs.domains.clinic.pending import PendingBookings
 from kubedocs.embed import Embedder, build_embedder
 from kubedocs.generate import Answer, Answerer, build_answerer, has_api_key
+from kubedocs.llm_status import NO_LLM_MESSAGE
 from kubedocs.observability import (
     HTTP_LATENCY,
     HTTP_REQUESTS,
@@ -291,8 +299,12 @@ def _index_note(runtime: _DomainRuntime, n_hits: int) -> str:
     return "没有任何块命中：换一种说法再试，或确认语料里确实包含这个话题"
 
 
-def _ask_response(ans: Answer, runtime: _DomainRuntime) -> AskResponse:
+def _ask_response(ans: Answer) -> AskResponse:
     """把 `generate.Answer` 映射成 HTTP 响应，并把"为什么没有回答"写清楚。
+
+    **回答与来源同进同出**：只有真的生成了回答才回传引用。拒答（没有密钥 / 调用失败 /
+    检索为空）时 `citations` 与 `n_hits` 一律为空——把检索结果挂在一句拒答上，读者会把它
+    读成"没答案但有依据"的半个结论，而那正是本仓库删掉的降级层。
 
     `degraded` 按"最相关的原因在前"拼装：先讲检索有没有依据，再讲生成为什么没跑，
     最后把检索层自己的降级（例如向量路不可用、已退化成纯 BM25）带出来。这些调用方
@@ -301,22 +313,24 @@ def _ask_response(ans: Answer, runtime: _DomainRuntime) -> AskResponse:
     """
     hits = list(ans.retrieval.results) if ans.retrieval is not None else []
     notes: list[str] = []
-    if not hits:
-        notes.append("检索结果为空，没有可依据的片段，因此不调用大模型")
-    if not has_api_key(runtime.settings.llm_model):
-        notes.append("未配置 LLM 密钥，仅返回检索结果")
-    elif not ans.text:
-        notes.append(ans.refusal_reason or "未能生成回答，仅返回检索结果")
+    citations: list[CitationOut] = []
+    if ans.refused:
+        if not hits:
+            notes.append("检索结果为空，没有可依据的片段，因此不调用大模型")
+        # 拒答的具体原因（缺哪个环境变量 / 调用失败 / 预算超限）必须露出来：
+        # 用户看到的文案是 `llm_status` 那两句之一，运维要的是这里的原因。
+        notes.append(ans.refusal_reason or "未能生成回答")
     else:
         notes.extend(ans.degraded)  # 生成成功时才需要：引用越界被剥除之类的问题
+        citations = [CitationOut.model_validate(c) for c in ans.citations]
     if ans.retrieval is not None:
         retrieval_notes = ans.retrieval.diagnostics.get("degraded")
         if isinstance(retrieval_notes, list):
             notes.extend(str(note) for note in retrieval_notes)
     return AskResponse(
         answer=ans.text,
-        citations=[CitationOut.model_validate(c) for c in ans.citations],
-        n_hits=len(hits),
+        citations=citations,
+        n_hits=0 if ans.refused else len(hits),
         degraded="；".join(notes),
     )
 
@@ -362,9 +376,17 @@ def _make_checkpointer(settings: Settings) -> object | None:
 def _get_clinic_agent(app: FastAPI) -> ClinicAgent:
     """惰性构造 clinic agent 并缓存到 `app.state`。
 
+    ## 它**不在请求路径上**
+
+    `/chat` 只走模型驱动的工具循环（`_get_clinic_react` → `ClinicReactRuntime.turn`）；
+    这个确定性图**保留给对照实验与回归测试**：评测里用它跑同一批问题，比较"规则判断 vs
+    模型判断"的差异（那是"规则资产降级为证据提供者"这条改动的直接证据），
+    `tests/unit/test_api.py` 也仍在直接调用它。任何新的请求路径都不要再接它，
+    否则同一个问题又会由两个"脑"分别作答。
+
     必须缓存：agent 持有 `MockAppointmentProvider` 与图的 checkpointer，每请求新建会
     丢掉上一轮的追问状态，`thread_id` 续跑静默失效。必须惰性：构造要编译 LangGraph 图
-    （秒级），不碰 `/chat` 的请求不该付这个代价。必须持锁：`/chat` 跑在线程池里，
+    （秒级），不碰它的请求不该付这个代价。必须持锁：构造会跑在线程池里，
     两个并发的首次请求各自建一个 agent 的话，只有一个能留下。
     """
     agent: ClinicAgent | None = getattr(app.state, "clinic_agent", None)
@@ -410,9 +432,10 @@ def _tool_events(state: ClinicState) -> list[tuple[str, dict[str, Any]]]:
 
 
 class _ChatOutcome:
-    """一轮 `/chat` 的结果：要发的 tool 事件 + 最终文本 + 是否又停在追问上。"""
+    """一轮 `/chat` 的结果：要发的 tool 事件 + 最终文本 + 参考标准面板留档。"""
 
     def __init__(self, state: ClinicState, *, resuming: bool, pending: str | None = None) -> None:
+        """从**确定性图**的一轮状态构造（对照臂，见 `_get_clinic_agent`，不在请求路径上）。"""
         self.state = state
         self.resuming = resuming
         # 这一轮结束后**仍然挂着**的追问问题（内核在等用户回答）；None 表示流程已结束
@@ -427,6 +450,29 @@ class _ChatOutcome:
         # 图路径没有 `propose_booking`（它的挂号是确定性节点直接取号），所以没有待确认单。
         # 字段仍然给出来，让前端只有一条渲染分支。
         self.pending_action = None
+        # 图路径没有"参考标准面板"这个东西（它自己就是规则轨），留 None 保持形状一致。
+        self.reference = None
+
+    @classmethod
+    def no_llm(cls) -> _ChatOutcome:
+        """**没有大模型密钥**时的一轮：只回一句话。
+
+        不发任何 tool 事件、不回落确定性图、不返回检索兜底内容——没有判断者就没有结论
+        （见 `kubedocs/llm_status.py`）。`status="no_llm"` 让调用方（前端 / 评测 / 日志）
+        能把这一轮与"正常回答"、"模型判了急症"分开处理。
+        """
+        self = cls.__new__(cls)
+        self.state = {}
+        self.resuming = False
+        self.pending = None
+        self.tools = []
+        self.text = NO_LLM_MESSAGE
+        self.citations = []
+        self.status = "no_llm"
+        self.unpriced_calls = 0
+        self.pending_action = None
+        self.reference = None
+        return self
 
     @classmethod
     def from_clinic_turn(cls, turn: Any) -> _ChatOutcome:
@@ -454,6 +500,9 @@ class _ChatOutcome:
         # 待确认挂号单（如果模型这一轮提议了）：前端据此渲染"确认挂号"卡片。
         # 与 `/consult` 是同一个形状、同一个 `proposal_id`，所以确认按钮走的是同一个端点。
         self.pending_action = getattr(turn, "pending_action", None)
+        # 这一轮交给模型的参考标准面板（形状与 `/consult` 的 `reference` 一致）：
+        # 规则资产说了什么、原话怎么被归一、服务端有哪些挂号事实，都能逐轮对账。
+        self.reference = getattr(turn, "reference", None)
         return self
 
 
@@ -473,10 +522,10 @@ def _shared_booking(app: FastAPI) -> Any:
 
 
 def _get_clinic_react(app: FastAPI) -> Any:
-    """装配 LLM 驱动的 clinic 运行期（幂等缓存）。
+    """装配 LLM 驱动的 clinic 运行期（幂等缓存）。**`/chat` 唯一的路径**。
 
-    与 `_get_clinic_agent` 并存：**有 LLM 密钥时优先走这条**（控制流由模型决定），
-    没有密钥时回退到确定性图（红线与挂号仍可用，只是不会主动追问）。
+    与 `_get_clinic_agent` 的关系：那个确定性图是对照臂、不在请求路径上；这里才是真实
+    请求走的路（控制流由模型决定，红线线索只进参考标准面板）。
 
     号源与待确认单**取自 app 级共享状态**，与 `/consult` 是同一份——挂号的提议与确认
     因此可以跨页面进行。
@@ -522,31 +571,18 @@ def _converse_with_tools(app: FastAPI, request: ChatRequest, thread_id: str) -> 
 def _run_turn(app: FastAPI, request: ChatRequest, thread_id: str) -> _ChatOutcome:
     """同步跑一轮问诊（在线程池里调用，别挡住事件循环）。
 
-    **两条路径的取舍**：有 LLM 密钥 → 走 `run_tool_loop`，控制流交给模型，它会自己
-    决定"先查号源再回答"还是"先追问"，工具调用是模型选的而不是代码排的；无密钥 →
-    回退到确定性图（`ClinicAgent`），红线与挂号照常可用，只是不会主动追问。
-    **宁可降级也不报错。**
+    **只有一条路径**：有 LLM 密钥 → `run_tool_loop`，控制流交给模型（它自己决定"先查号源
+    再回答"还是"先追问"，工具调用是模型选的而不是代码排的）；没有密钥 → 直接回
+    `NO_LLM_MESSAGE`，**不回退到确定性图**（那条路只是对照臂，见 `_get_clinic_agent`），
+    也不返回任何检索兜底内容。
 
-    红线在两条路径里都在**进循环之前**用确定性规则判定（见 clinic_react），所以这条
-    安全不变量不因走哪条路径而改变。
+    急诊判断同样在模型手里：红线词表只作为线索进参考标准面板（见 `clinic_react`），
+    这条路径上没有任何"命中词表就短路"的分支。
     """
-    react = None
-    try:
-        react = _get_clinic_react(app)
-    except Exception:  # noqa: BLE001 - 装配失败就退图，不能因此让 /chat 挂掉
-        logger.exception("装配工具循环失败，回退到确定性图")
-    with span("chat.turn", thread_id=thread_id, llm=bool(react is not None and react.has_llm())):
-        if react is not None and react.has_llm():
-            return _converse_with_tools(app, request, thread_id)
-
-    agent = _get_clinic_agent(app)
-    resuming = agent.pending_question(thread_id=thread_id) is not None
-    if resuming:
-        state = agent.resume(request.message, thread_id=thread_id)
-    else:
-        state = agent.start(request.message, thread_id=thread_id, patient_id=request.patient_id)
-    # 跑完再看一次：这一轮可能又停在一个新追问上
-    return _ChatOutcome(state, resuming=resuming, pending=agent.pending_question(thread_id=thread_id))
+    if not has_api_key(app.state.settings.llm_model):
+        return _ChatOutcome.no_llm()
+    with span("chat.turn", thread_id=thread_id, llm=True):
+        return _converse_with_tools(app, request, thread_id)
 
 
 async def _chat_events(app: FastAPI, request: ChatRequest, thread_id: str) -> AsyncIterator[ServerSentEvent]:
@@ -584,6 +620,10 @@ async def _chat_events(app: FastAPI, request: ChatRequest, thread_id: str) -> As
             # 待确认挂号单（模型这一轮提议了才有）：前端渲染成"确认挂号"卡片，
             # 确认按钮打的是与 `/consult` 同一个端点（`/consult/booking/confirm`）。
             "pending_action": outcome.pending_action,
+            # 这一轮交给模型的**参考标准面板**（键名与 `/consult` 一致）：规则资产说了什么、
+            # 原话怎么被归一、服务端有哪些挂号事实。它是"依据"的留档，不是结论。
+            # 无密钥时是 None（那一轮没有判断者，也就没有依据可言）。
+            "reference": outcome.reference,
         },
     )
     yield _sse("done", {"thread_id": thread_id, "ok": True})
@@ -609,7 +649,7 @@ def _fallback_html(reason: str) -> str:
         "<li><code>GET /domains</code> 可用域</li>"
         "<li><code>GET /tools</code> 已注册工具</li>"
         "<li><code>POST /search</code> 混合检索</li>"
-        "<li><code>POST /ask</code> 检索 + 生成（无 LLM 密钥时降级返回检索结果）</li>"
+        "<li><code>POST /ask</code> 检索 + 生成（无 LLM 密钥时只回一句提示，不做兜底）</li>"
         "<li><code>POST /chat</code> clinic 问诊 / 挂号（SSE 流）</li>"
         "</ul>"
         "</body></html>"
@@ -806,20 +846,32 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     def ask(request: Request, body: AskRequest) -> AskResponse:
         """检索 + 生成（LiteLLM）。
 
-        没有 LLM 密钥**不是 500**：检索结果与引用照常返回，`degraded` 里写明原因。
-        这条路径让没有密钥的环境（离线机器）也能完整走通整条链路。
+        **没有大模型密钥时不检索、不兜底**：只回 `NO_LLM_MESSAGE`，`citations=[]`、
+        `n_hits=0`。没有判断者就没有结论，把检索结果挂在这句话旁边只会被读成
+        "没答案但有依据"的半个结论（见 `kubedocs/llm_status.py`）。检索本身走 `/search`
+        ——它不需要大模型。
+
+        "配了密钥但这次调用失败"是另一件事：那时回答是 `LLM_FAILED_MESSAGE`，
+        具体原因（异常类型 / 预算超限）写在 `degraded` 里，见 `_ask_response`。
         """
         _require_domain(body.domain)
         runtime = _runtime(request, body.domain)
+        if not has_api_key(runtime.settings.llm_model):
+            return AskResponse(
+                answer=NO_LLM_MESSAGE,
+                citations=[],
+                n_hits=0,
+                degraded="未连接大模型：本端点不做检索兜底（检索请用 /search），请连接大模型后重试",
+            )
         answerer = runtime.answerer()
         if answerer is None:
             return AskResponse(
                 answer="",
                 citations=[],
                 n_hits=0,
-                degraded=f"索引不可用，仅返回检索结果：{runtime.index_error}",
+                degraded=f"索引不可用，无法检索：{runtime.index_error}",
             )
-        return _ask_response(answerer.answer(body.q, top_k=body.top_k), runtime)
+        return _ask_response(answerer.answer(body.q, top_k=body.top_k))
 
     # ---------------------------------------------------------------- 对话（SSE）
     @app.post("/chat")

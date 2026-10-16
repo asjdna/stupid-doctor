@@ -305,6 +305,11 @@ class _Turn:
         self.red_line_positive = red_line
         self.tool_calls: list[dict[str, Any]] = []
         self.intake = IntakeState()
+        # 契约新增的两个字段：面板（给它看了什么）与违规（它哪里越界）。
+        # 替身必须跟上契约，否则 `to_payload` 会在访问它们时 AttributeError——
+        # 那会把"契约变了没同步"伪装成"接口挂了"。
+        self.reference: dict[str, Any] | None = None
+        self.contract_violations: list[dict[str, str]] = []
 
 
 @pytest.mark.parametrize("urgency", ["routine", "urgent"])
