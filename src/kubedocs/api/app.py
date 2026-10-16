@@ -577,7 +577,38 @@ def _converse_with_tools(app: FastAPI, request: ChatRequest, thread_id: str) -> 
         request.patient_id,
         [{"role": "user", "content": request.message}, {"role": "assistant", "content": turn.text}],
     )
-    return _ChatOutcome.from_clinic_turn(turn)
+    outcome = _ChatOutcome.from_clinic_turn(turn)
+    _audit_chat_safety(app, outcome, trace_id=thread_id)
+    return outcome
+
+
+def _audit_chat_safety(app: FastAPI, outcome: _ChatOutcome, *, trace_id: str) -> None:
+    """散文路径触发的安全不变量也写进同一份审计日志（治理要求：两条入口一个口径）。
+
+    只登记、不改写：`/chat` 的拦截由 `verify_prose` 完成（见 `clinical/verify.py`），
+    这里把结果落进 `safety_audit.jsonl`。**不记患者原话**，`trace_id` 用 `thread_id`
+    （散文路径没有就诊记录主键，会话 id 是这里能与日志对齐的那个读数）。
+    """
+    from kubedocs.clinical.safety import SafetyAudit, SafetyOutcome, append_audit
+
+    fired = list((outcome.safety or {}).get("fired") or [])
+    if not fired:
+        return
+    records = [
+        SafetyAudit(
+            invariant=str(row.get("invariant", "")),
+            action=str(row.get("action", "record_only")),  # type: ignore[arg-type]
+            detail=str(row.get("detail", "")),
+            trace_id=trace_id,
+            domain="chat",
+        )
+        for row in fired
+    ]
+    append_audit(
+        app.state.settings.index_root,
+        SafetyOutcome(message=outcome.text, fired=records),
+        domain="chat",
+    )
 
 
 def _run_turn(app: FastAPI, request: ChatRequest, thread_id: str) -> _ChatOutcome:

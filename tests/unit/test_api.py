@@ -494,6 +494,42 @@ class TestChat:
         message = _event(_sse_events(resp.text), "message")
         assert message["text"] == compliant, "没有违规却被改写了"
         assert message["contract_violations"] == []
+        assert message["safety"]["fired"] == []
+
+    def test_safety_audit_is_written_when_an_invariant_fires(
+        self, api_settings: Settings, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """`/chat` 触发的不变量也进同一份审计日志（治理要求：两条入口一个口径）。
+
+        审计是"哪条底线在什么情况下被触发过"的**唯一**长期记录，只写在响应里等于没人看得见。
+        """
+        from kubedocs.clinical.safety import audit_path, read_audit
+
+        monkeypatch.setattr("kubedocs.api.app.has_api_key", lambda _model: True)
+        monkeypatch.setattr(ClinicReactRuntime, "has_llm", lambda self: True)
+        monkeypatch.setattr("kubedocs.agent.clinic_react._triage_links", lambda: {"咳嗽": ("呼吸内科",)})
+
+        class _Hallucinating:
+            def __init__(self, _settings: Any) -> None:
+                pass
+
+            def choose(self, messages: list[dict[str, Any]], tools: list[dict[str, Any]]) -> dict[str, Any]:
+                return {"content": "已经为您挂上呼吸内科的号了。", "tool_calls": []}
+
+        monkeypatch.setattr("kubedocs.agent.llm_tool_caller.LiteLLMToolCaller", _Hallucinating)
+        with TestClient(create_app(api_settings)) as client:
+            resp = client.post("/chat", json={"message": "帮我挂号", "thread_id": "t-audit"})
+
+        message = _event(_sse_events(resp.text), "message")
+        assert "no_fabricated_booking_action" in message["safety"]["ids"]
+
+        rows = read_audit(api_settings.index_root)
+        assert rows, "触发了不变量却没有写审计"
+        assert rows[0]["invariant"] == "no_fabricated_booking_action"
+        assert rows[0]["domain"] == "chat"
+        assert rows[0]["trace_id"] == "t-audit"
+        raw = audit_path(api_settings.index_root).read_text(encoding="utf-8")
+        assert "挂上" not in raw, "审计里不许出现患者原话"
 
     def test_thread_id_is_respected_and_conversation_continues(self, client: TestClient) -> None:
         """带同一个 thread_id 再来一次 = 续聊：会话属于调用方，服务端按 id 记账。"""
