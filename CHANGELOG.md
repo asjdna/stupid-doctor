@@ -73,11 +73,13 @@
 - **红线闸门改为治理门禁**：`evaluation/clinic.py` 的 `gate_failures()` /
   `redline_gate_failures()` 与 `clinic_llm.py` 的 `llm_gate_failures()` 删除，换成
   `governance_failures(report, *, failed_calls=..., label=...)` 与
-  `llm_governance_failures(report)`：`--gate` 只对两类事失败——这次运行**不能作为证据**
-  （一条可评测用例都没有，或有题目没拿到模型判断），以及**触发了确定性安全不变量**。
-  指标与参考目标（100% / ≤20% / ≥60%，常量改名 `TARGET_REDLINE_RECALL` /
-  `TARGET_FALSE_POSITIVE_LIMIT` / `TARGET_TRIAGE_MIN_ACCURACY`，由 `reporting_targets()`
-  导出）继续进报告与档案，但**不判通过/不通过**。
+  `llm_governance_failures(report)`：`--gate` 只在**这次运行不能作为证据**时失败
+  （一条可评测用例都没有，或有题目没拿到模型判断）。**安全不变量的触发也降为记录**：
+  每条都已被安全门处置（换成只含事实的回答 / 补上急救指引），说明的是"模型这一轮需要被
+  纠正"；硬信号由长期监听按 `alert` 报给运维。指标与参考目标（100% / ≤20% / ≥60%，
+  常量改名 `TARGET_REDLINE_RECALL` / `TARGET_FALSE_POSITIVE_LIMIT` /
+  `TARGET_TRIAGE_MIN_ACCURACY`，由 `reporting_targets()` 导出）继续进报告与档案，
+  但**不判通过/不通过**。
 - **临床治理落到文件与脚本**：新增 `data/governance/safety_assets.json`——五条安全资产
   （prompt / 危险信号词表 / 症状词表 / 科室表 / 金标集）各带 `sha256`、`version`、
   `effective_date`、`source`、`owner`、`rationale`，加上三条不变量的治理条目与
@@ -175,9 +177,10 @@
 - **指标是记录，不判通过/不通过**：危险信号召回、误报率、分诊命中率来自自建小样本用例集，
   能说明趋势与回归，不能承担「这条回答安全」的责任。参考目标（召回 100% / 误报率 ≤20% /
   分诊 ≥60%）与实测值并排打印并进档案，由人看趋势。
-- **闸门只卡两类事**（`governance_failures()` / `llm_governance_failures()`）：① 这次运行
-  **不能作为证据**——一条可评测用例都没有，或有题目没拿到模型判断；② **触发了确定性安全
-  不变量**。删掉密钥或语料不会让闸门变绿：没测不等于通过。
+- **闸门只卡一件事**（`governance_failures()` / `llm_governance_failures()`）：这次运行
+  **不能作为证据**——一条可评测用例都没有，或有题目没拿到模型判断。删掉密钥、语料或索引
+  不会让闸门变绿：没测不等于通过。**安全不变量的触发不判闸门**（它说明"模型需要被纠正"，
+  每条都已被安全门处置），硬信号由长期监听按 `alert` 报给运维。
 - **`--archive` 写治理档案**：把整份报告（金标指纹、两臂指标、参考目标、基线注记）写成带
   UTC 时间戳的 JSON，默认目录 `data/eval/clinic_archive/`，永不覆盖。写档案时**同时追加一行
   趋势记录**到 `data/eval/clinic_trend.jsonl`（`--trend-path` 可改落点）：记录由
