@@ -240,7 +240,9 @@ def test_file_digest_changes_with_content(tmp_path):
 def test_iter_corpus_files_is_sorted_and_limited(tmp_path):
     for name in ("b.md", "a.md", "c.md"):
         (tmp_path / name).write_text("x", encoding="utf-8")
-    (tmp_path / "skip.txt").write_text("x", encoding="utf-8")
+    # txt 现在是受支持格式（parse.py 的注册表），不再被跳过；不受支持的 `.bin` 才是
+    (tmp_path / "d.txt").write_text("x", encoding="utf-8")
+    (tmp_path / "skip.bin").write_text("x", encoding="utf-8")
     files = iter_corpus_files(tmp_path)
-    assert [f.name for f in files] == ["a.md", "b.md", "c.md"]
+    assert [f.name for f in files] == ["a.md", "b.md", "c.md", "d.txt"]
     assert [f.name for f in iter_corpus_files(tmp_path, 2)] == ["a.md", "b.md"]

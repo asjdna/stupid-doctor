@@ -20,6 +20,17 @@ K8s 文档是 Hugo markdown，直接按 1000 字符切会踩三个坑（都会�
 - `chunk_id = "<相对路径>::<序号>"` —— 稳定、可预期，供 upsert 定位；
 - `content_hash` —— 文本的指纹，供摄取管线判断"是否真的变了"。
 两者分开，才能做到「幂等重入 + 增量更新」，而不是每次全量重写。
+
+## 多格式（PDF / Office / HTML）走的是同一个切块器
+
+`parse.py` 负责把任意格式变成**带位置的块**，本模块负责切。两条切块路径：
+
+- `chunk_document`：标题型格式（md/txt/html/docx）—— 正文里的 `#` 标题行决定面包屑；
+- `chunk_blocks`：容器型格式（PDF 页 / 表格块 / 幻灯片）—— 块自带 `location`
+  （`p.7`、`Sheet1!A1:C20`、`slide 3`），位置作为面包屑首段进入引用。
+
+两者共用 `_split_long_text`（代码块不切断、重叠对齐安全边界）与 `_assemble`
+（编号、上下文头、内容指纹），不存在"另一套切块规则"。
 """
 
 from __future__ import annotations
@@ -27,8 +38,9 @@ from __future__ import annotations
 import hashlib
 import html
 import re
-from collections.abc import Iterator
+from collections.abc import Iterable, Iterator
 from dataclasses import dataclass, field
+from typing import Protocol
 
 # Hugo shortcode：{{< ... >}} / {{% ... %}}，含自闭合与块级
 _SHORTCODE_RE = re.compile(r"\{\{[<%][^}]*?[>%]\}\}", re.DOTALL)
@@ -139,6 +151,11 @@ class Chunk:
     title: str = ""  # 文档标题（front matter > 首个 h1 > 文件名）
     source_url: str = ""  # 可点击的官方文档地址
     content_hash: str = ""
+    # 物理位置：`p.7` / `Sheet1!A1:C20` / `slide 3`；标题型格式（md/html/docx）是标题路径。
+    # 存储层的字段是既有的 `breadcrumb`（`ChunkInput`/`ChunkHit` 没有位置字段），
+    # 所以容器型格式的位置已经作为面包屑首段拼好，检索结果里的引用直接可读：
+    # `[手册.pdf › p.7]`、`[台账.xlsx › Sheet1!A1:C20]`。
+    location: str = ""
 
 
 def parse_front_matter(text: str) -> tuple[dict, str]:
@@ -288,29 +305,104 @@ def _split_long_text(text: str, max_chars: int, overlap: int) -> list[str]:
     return [b for b in blocks if b]
 
 
+# 可摄入的文档后缀。**单一真相源**：`parse.py` 的解析器注册表必须恰好覆盖它
+# （tests/unit/test_parse.py 有一条断言钉住这个不变式），`doc_id_from_path` 与
+# `source_url_for` 也从这里派生 id 与 URL。
+# 为什么定义在本模块而不是 `parse.py`：`parse -> chunker` 是单向依赖
+# （parse 复用本模块的 `clean_body` / `strip_html` / `_split_long_text`），
+# 反向 import 会成环；而 doc_id 与 URL 的映射本来就是这个模块的职责。
+DOC_SUFFIXES: tuple[str, ...] = (
+    ".md",
+    ".txt",
+    ".csv",
+    ".html",
+    ".htm",
+    ".pdf",
+    ".docx",
+    ".xlsx",
+    ".pptx",
+)
+
+# 页面型后缀：Hugo 约定 URL 指向"目录"（`concepts/foo.md` -> `/concepts/foo/`）。
+# 其余（pdf/docx/xlsx/pptx/txt/csv）是**文件**，URL 必须保留文件名才点得开。
+_PAGE_SUFFIXES: tuple[str, ...] = (".md", ".html", ".htm")
+
+
 def doc_id_from_path(rel_path: str) -> str:
-    """相对路径 -> 稳定的文档 id（去扩展名、统一分隔符）。"""
+    """相对路径 -> 稳定的文档 id（去掉受支持的扩展名、统一分隔符）。"""
     p = rel_path.replace("\\", "/")
-    return p[:-3] if p.endswith(".md") else p
+    lower = p.lower()
+    for suffix in DOC_SUFFIXES:
+        if lower.endswith(suffix):
+            return p[: -len(suffix)]
+    return p
 
 
 def source_url_for(rel_path: str, url_prefix: str) -> str:
-    """相对路径 -> 官方文档 URL。
+    """相对路径 -> 可点击的地址。
 
     Hugo 约定：`concepts/foo/_index.md` 与 `concepts/foo.md` 都对应 `concepts/foo/`。
     引用必须能点开，否则"带引用"就是空话。
+
+    非页面型（PDF/Office/CSV/TXT）是**文件**：URL 保留文件名指向文件本身 ——
+    给 `手册.pdf` 编一个带尾斜杠的"目录"地址是打不开的。
     """
     p = rel_path.replace("\\", "/")
-    if p.endswith(".md"):
-        p = p[:-3]
+    base = url_prefix.rstrip("/")
+    lower = p.lower()
+    if not lower.endswith(_PAGE_SUFFIXES):
+        return f"{base}/{p.lstrip('/')}"
+    for suffix in _PAGE_SUFFIXES:
+        if lower.endswith(suffix):
+            p = p[: -len(suffix)]
+            break
     if p == "_index":
         p = ""
     elif p.endswith("/_index"):
         p = p[: -len("/_index")]
-    base = url_prefix.rstrip("/")
     p = p.strip("/")
     # 注意：`_index.md` 在根目录时 p 为空，不能再拼一个 "/" 出来（否则 docs//）
     return f"{base}/{p}/" if p else f"{base}/"
+
+
+@dataclass
+class _Piece:
+    """切块中间态：一段文字 + 它该带的位置与面包屑。
+
+    `chunk_document` 与 `chunk_blocks` 都收敛到这个中间态，再由 `_assemble` 统一
+    生成 `Chunk`（编号、上下文头、内容指纹）——两条路径共用同一套收尾规则。
+    """
+
+    location: str
+    crumb: list[str]
+    text: str
+
+
+def _assemble(pieces: list[_Piece], *, doc_id: str, title: str, url: str, add_context: bool) -> list[Chunk]:
+    """中间态 -> `Chunk`。空文本不产出块；`index`/`chunk_id` 按中间态序号给。"""
+    out: list[Chunk] = []
+    for i, piece in enumerate(pieces):
+        body_text = piece.text.strip()
+        if not body_text:
+            continue
+        breadcrumb = piece.crumb or [title]
+        # 上下文行：标题已在面包屑里就不重复它
+        ctx_parts = breadcrumb if breadcrumb[0] == title else [title, *breadcrumb]
+        ctx = " › ".join(dict.fromkeys(p for p in ctx_parts if p))
+        final_text = f"[{ctx}]\n\n{body_text}" if add_context and ctx else body_text
+        out.append(
+            Chunk(
+                chunk_id=f"{doc_id}::{i:04d}",
+                index=i,
+                text=final_text,
+                breadcrumb=breadcrumb,
+                title=title,
+                source_url=url,
+                content_hash=hashlib.blake2b(final_text.encode("utf-8"), digest_size=8).hexdigest(),
+                location=piece.location,
+            )
+        )
+    return out
 
 
 def chunk_document(
@@ -353,39 +445,86 @@ def chunk_document(
     url = source_url_for(rel_path, url_prefix)
 
     # 先按标题切段；无标题的长文档会得到一段超长文本，交给 _split_long_text
-    raw: list[tuple[list[str], str]] = []
+    raw: list[_Piece] = []
     for crumb, sec in split_sections(body):
         for piece in _split_long_text(sec, max_chars, overlap):
-            raw.append((crumb, piece))
+            raw.append(_Piece(location=" › ".join(crumb), crumb=list(crumb), text=piece))
 
-    # 合并过短的碎片到前一块（避免"只有一句标题"的块污染检索）
-    merged: list[tuple[list[str], str]] = []
-    for crumb, piece in raw:
-        if merged and len(piece) < min_chars:
-            prev_crumb, prev_text = merged[-1]
-            merged[-1] = (prev_crumb, prev_text + "\n\n" + piece)
-        else:
-            merged.append((crumb, piece))
-
-    out: list[Chunk] = []
-    for i, (crumb, piece) in enumerate(merged):
-        body_text = piece.strip()
-        if not body_text:
-            continue
-        breadcrumb = crumb or [title]
-        # 上下文行：标题已在面包屑里就不重复它
-        ctx_parts = breadcrumb if breadcrumb and breadcrumb[0] == title else [title, *breadcrumb]
-        ctx = " › ".join(dict.fromkeys(p for p in ctx_parts if p))
-        final_text = f"[{ctx}]\n\n{body_text}" if add_context and ctx else body_text
-        out.append(
-            Chunk(
-                chunk_id=f"{doc_id}::{i:04d}",
-                index=i,
-                text=final_text,
-                breadcrumb=breadcrumb,
-                title=title,
-                source_url=url,
-                content_hash=hashlib.blake2b(final_text.encode("utf-8"), digest_size=8).hexdigest(),
+    # 合并过短的碎片到前一块（避免"只有一句标题"的块污染检索）。
+    # 这里**不按位置过滤**：md 语料既有索引的块边界就是这样（碎片的标题本来就让位给
+    # 前一块），改成按位置过滤等于全量重切、引用面全变。容器型格式走 `chunk_blocks`，
+    # 那里必须按位置过滤 —— 否则第 8 页的文字会被挂到第 7 页的引用下。
+    merged: list[_Piece] = []
+    for piece in raw:
+        if merged and len(piece.text) < min_chars:
+            prev = merged[-1]
+            merged[-1] = _Piece(
+                location=prev.location, crumb=prev.crumb, text=prev.text + "\n\n" + piece.text
             )
-        )
-    return out
+        else:
+            merged.append(piece)
+
+    return _assemble(merged, doc_id=doc_id, title=title, url=url, add_context=add_context)
+
+
+class PositionedBlock(Protocol):
+    """`chunk_blocks` 需要的块形状（`parse.ParsedBlock` 结构上满足它）。
+
+    用 Protocol 而不 import `parse` 的 dataclass：`parse -> chunker` 是单向依赖，
+    反向 import 会成环。
+    """
+
+    text: str
+    location: str
+    heading_path: list[str]
+
+
+def chunk_blocks(
+    rel_path: str,
+    blocks: Iterable[PositionedBlock],
+    *,
+    title: str = "",
+    max_chars: int = 1200,
+    overlap: int = 150,
+    min_chars: int = 80,
+    url_prefix: str = "https://kubernetes.io/docs/",
+    add_context: bool = True,
+) -> list[Chunk]:
+    """按"带位置的块"切块：PDF 页 / 表格块 / 幻灯片。
+
+    与 `chunk_document` 的差别只有两处，且都是位置语义要求的：
+
+    1. **块自带位置**：`location`（`p.7` / `Sheet1!A1:C20` / `slide 3`）作为面包屑
+       首段进入引用，于是引用是 `[手册.pdf › p.7]` 而不是只说"在这篇文档里"；
+    2. **不跨位置合并碎片**：超短块只在**同一位置内**合并。跨位置合并会把下一页/
+       下一张幻灯片的文字挂到上一页的引用下，"引用可追溯"就成了假话。
+
+    超长块仍然交给 `_split_long_text`（代码块不切断、重叠对齐安全边界），
+    切出来的每一片都继承所在块的位置 —— 位置从块到块片只允许收窄（同一页内），
+    不允许跨页漂移。
+    """
+    doc_id = doc_id_from_path(rel_path)
+    url = source_url_for(rel_path, url_prefix)
+    doc_title = title or doc_id.rsplit("/", 1)[-1].replace("-", " ").title()
+
+    raw: list[_Piece] = []
+    for block in blocks:
+        text = clean_body(block.text)
+        if not text.strip():
+            continue
+        location = block.location or " › ".join(block.heading_path)
+        crumb = [location, *block.heading_path] if location else list(block.heading_path)
+        for piece in _split_long_text(text, max_chars, overlap):
+            raw.append(_Piece(location=location, crumb=crumb, text=piece))
+
+    merged: list[_Piece] = []
+    for piece in raw:
+        if merged and len(piece.text) < min_chars and merged[-1].location == piece.location:
+            prev = merged[-1]
+            merged[-1] = _Piece(
+                location=prev.location, crumb=prev.crumb, text=prev.text + "\n\n" + piece.text
+            )
+        else:
+            merged.append(piece)
+
+    return _assemble(merged, doc_id=doc_id, title=doc_title, url=url, add_context=add_context)

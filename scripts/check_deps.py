@@ -37,6 +37,11 @@ ALIAS = {
     "dotenv": "python-dotenv",
     "yaml": "pyyaml",
     "PIL": "pillow",
+    # 多格式摄入（parse.py）用的三个解析库，**import 名与分发包名都不同**：
+    # 缺了这三条，`beautifulsoup4` / `python-docx` / `python-pptx` 已声明也会被判成"没声明"。
+    "bs4": "beautifulsoup4",
+    "docx": "python-docx",
+    "pptx": "python-pptx",
 }
 """import 名 ≠ 分发包名时的映射。只写确定知道的：猜错会让检查假绿/假红。"""
 

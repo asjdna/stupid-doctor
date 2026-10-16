@@ -60,6 +60,16 @@ dependencies = [
     "jieba>=0.42",
     "numpy>=1.26",
     "python-dotenv>=1.0",
+    # 多格式解析（`parse.py`）：把 PDF / Office / HTML 也变成可检索的块，而不只认 `.md`。
+    # 同样全部显式声明——这些解析库很容易以传递依赖的形式被装上（本机 venv 就是这样），
+    # 而容器里 `pip install .` 之后会缺一个包、坏掉一种格式，且报错位置离原因很远。
+    # 在 `parse.py` 里它们都是**函数内延迟 import**：缺一个库只坏这一种格式，
+    # 不会让 `import kubedocs.ingest` 整体失败、连检索服务都起不来。
+    "pypdf>=4.2",                # PDF 文本层
+    "python-docx>=1.1",          # .docx
+    "openpyxl>=3.1",             # .xlsx
+    "python-pptx>=0.6.23",       # .pptx
+    "beautifulsoup4>=4.12",      # .html
 ]
 
 [project.optional-dependencies]

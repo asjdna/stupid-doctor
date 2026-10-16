@@ -1,4 +1,4 @@
-"""摄取流水线：语料目录 -> 切块 -> 嵌入 -> 写入索引。
+"""摄取流水线：语料目录 -> 解析 -> 切块 -> 嵌入 -> 写入索引。
 
 增量摄取不是为了快，而是正确性要求：全量重建意味着"任何一次摄取都必须从头成功，
 中途失败等于没有索引"，而语料是持续变更的（K8s 文档每周都在改）。所以这里做三个
@@ -11,6 +11,19 @@
 
 写入按批进行：每批 N 个文件就 `upsert + finalize` 一次，于是内存有界、进度可见，
 且中途失败时**已完成的部分是有效的**，下次接着跑即可。
+
+## 解析层（多格式）
+
+"读文件"这一步交给 `parse.py`（PDF / Office / HTML / CSV / TXT / MD 各有解析器），
+本模块只消费 `ParsedDoc`。三条与现场演示直接相关的约束在这里落地：
+
+- **编码不静默丢字**：文本类格式的编码探测结果计进报告（`utf-8` / `gb18030` …）；
+- **扫描件必点名**：无文本层的 PDF 计 `files_no_text` 并在 notes 里写
+  "该文件无文本层（疑似扫描件），已跳过"，**绝不建空块**（空块 = 搜不到但查不出原因）；
+- **单文件失败不影响整批**：解析异常计 `files_failed` + 原因进 notes，本批继续。
+  失败的文件**不登记**（`continue`，不写 DocInput）：它可能只是暂时读不了
+  （文件被占用、网络盘掉线），登记了就会因为"哈希没变"而永远不再重试；
+  而扫描件/空文档是文件的固有属性，登记它们避免每次白跑。
 """
 
 from __future__ import annotations
@@ -23,10 +36,17 @@ from pathlib import Path
 
 import numpy as np
 
-from kubedocs.chunker import Chunk, chunk_document, doc_id_from_path
+from kubedocs.chunker import Chunk, chunk_blocks, chunk_document, doc_id_from_path
 from kubedocs.config import Settings
 from kubedocs.embed import BgeEmbedder, Embedder, embed_texts
+from kubedocs.parse import MAX_FILE_BYTES, NO_TEXT_LAYER_MSG, ParsedDoc, discover, discover_report, parse
 from kubedocs.store.base import ChunkInput, DocInput, Store, Vector
+
+# 报告里逐条列出的细节上限：语料里坏掉 5000 个文件时，报告不该变成 5000 行日志。
+# 计数永远是准的（summary 里），只是不逐条列。
+_MAX_DETAIL_NOTES = 50
+
+_MAX_FILE_MB = MAX_FILE_BYTES / (1024 * 1024)
 
 
 def file_digest(path: Path) -> str:
@@ -49,6 +69,9 @@ class IngestReport:
     files_unchanged: int = 0
     files_removed: int = 0
     files_empty: int = 0
+    files_no_text: int = 0  # 抽不出文本（扫描件 PDF / 空内容）—— 必须在报告里点名
+    files_failed: int = 0  # 解析失败（文件 + 原因），本批继续
+    files_oversize: int = 0  # 超过大小上限，发现阶段就跳过
     chunks_written: int = 0
     chunks_removed: int = 0
     chunks_embedded: int = 0
@@ -57,11 +80,19 @@ class IngestReport:
     batches: int = 0
     elapsed_s: float = 0.0
     notes: list[str] = field(default_factory=list)
+    notes_dropped: int = 0  # 超过 `_MAX_DETAIL_NOTES` 后只计数，不逐条列
 
     @property
     def embed_savings_pct(self) -> float:
         total = self.chunks_embedded + self.chunks_reused
         return 100.0 * self.chunks_reused / total if total else 0.0
+
+    def note(self, text: str) -> None:
+        """记一条人可读细节（文件级原因）。超上限只计数。"""
+        if len(self.notes) < _MAX_DETAIL_NOTES:
+            self.notes.append(text)
+        else:
+            self.notes_dropped += 1
 
     def summary(self) -> str:
         return (
@@ -70,13 +101,20 @@ class IngestReport:
             f"；写入 {self.chunks_written} 块，删除 {self.chunks_removed} 块；"
             f"编码 {self.chunks_embedded} 块，复用 {self.chunks_reused} 块"
             f"（省 {self.embed_savings_pct:.1f}%）；超长被截断 {self.n_over_length} 块；"
-            f"耗时 {self.elapsed_s:.1f}s"
+            f"无文本层跳过 {self.files_no_text} 个，超大跳过 {self.files_oversize} 个，"
+            f"解析失败 {self.files_failed} 个；耗时 {self.elapsed_s:.1f}s"
         )
 
 
 def iter_corpus_files(corpus_dir: Path, limit: int | None = None) -> list[Path]:
-    """列出语料里的 markdown，按相对路径排序（排序保证多机结果一致）。"""
-    files = sorted(p for p in corpus_dir.rglob("*.md") if p.is_file())
+    """列出语料里**受支持**的文件，按相对路径排序（排序保证多机结果一致）。
+
+    受支持的后缀是 `parse.py` 的解析器注册表（PDF / Office / HTML / CSV / TXT / MD），
+    不再写死 `*.md`；隐藏目录与超大文件由 `parse.discover` 跳过。
+    `ingest()` 走的是 `parse.discover_report`（同一个发现逻辑），因为它还要拿到
+    "被跳过的超大文件"清单写进报告。
+    """
+    files = discover(corpus_dir)
     if limit is not None:
         files = files[:limit]
     return files
@@ -86,6 +124,62 @@ def _rel_posix(path: Path, root: Path) -> str:
     return path.relative_to(root).as_posix()
 
 
+def _parse_file(path: Path) -> ParsedDoc:
+    """解析一个文件。`parse()` 自己已经不抛异常，这里再兜一层是防止"兜底逻辑本身出错"。"""
+    try:
+        return parse(path)
+    except Exception as exc:  # 单文件失败不许影响整批，原因原样上报
+        return ParsedDoc(error=f"{type(exc).__name__}: {exc}")
+
+
+def _chunks_for(rel: str, doc: ParsedDoc, settings: Settings) -> list[Chunk]:
+    """解析结果 -> 块。分派规则只有一条：**块自带位置就走位置路径**。
+
+    标题型格式（md/txt/html/docx）解析出来是一个"整篇正文"块（`location` 为空），
+    标题层级在正文的 `#` 行里，交给既有的 `chunk_document` 派生面包屑 —— 这样
+    md 的块边界与 content_hash 与既有索引**逐字节一致**（增量摄取与评测基线都靠它），
+    html/docx 也顺带复用同一套切块规则，不另写一套。
+
+    容器型格式（PDF 页 / 表格块 / 幻灯片）的块自带 `p.7` / `Sheet1!A1:C20` / `slide 3`，
+    走 `chunk_blocks`，位置作为面包屑首段进入引用。
+    """
+    if doc.error or not doc.blocks:
+        return []
+    if all(block.location for block in doc.blocks):
+        return chunk_blocks(
+            rel,
+            doc.blocks,
+            title=doc.title,
+            max_chars=settings.chunk_max_chars,
+            overlap=settings.chunk_overlap_chars,
+            min_chars=settings.chunk_min_chars,
+            url_prefix=settings.docs_url_prefix,
+        )
+    text = "\n\n".join(block.text for block in doc.blocks)
+    return chunk_document(
+        rel,
+        text,
+        max_chars=settings.chunk_max_chars,
+        overlap=settings.chunk_overlap_chars,
+        min_chars=settings.chunk_min_chars,
+        url_prefix=settings.docs_url_prefix,
+    )
+
+
+def _citation_breadcrumb(chunk: Chunk) -> str:
+    """块的引用面包屑：把物理位置并进去。
+
+    为什么不改存储字段：`ChunkInput.breadcrumb` 是既有的引用通道
+    （-> `ChunkHit.citation`），而 `ChunkInput`/`ChunkHit` 都没有位置字段，加字段要动
+    三种 Store 实现与建表语句。容器型格式的位置已经拼在面包屑首段（见 `chunk_blocks`），
+    这里只兜防"有位置但没进面包屑"的情况，md 等标题型格式因此**一字不变**。
+    """
+    breadcrumb = " › ".join(chunk.breadcrumb)
+    if chunk.location and not breadcrumb.startswith(chunk.location):
+        return f"{chunk.location} › {breadcrumb}" if breadcrumb else chunk.location
+    return breadcrumb
+
+
 def _chunks_to_inputs(chunks: Iterable[Chunk], doc_id: str) -> list[ChunkInput]:
     return [
         ChunkInput(
@@ -93,7 +187,7 @@ def _chunks_to_inputs(chunks: Iterable[Chunk], doc_id: str) -> list[ChunkInput]:
             doc_id=doc_id,
             ordinal=c.index,
             title=c.title,
-            breadcrumb=" › ".join(c.breadcrumb),
+            breadcrumb=_citation_breadcrumb(c),
             source_url=c.source_url,
             body=c.text,
             content_hash=c.content_hash,
@@ -101,6 +195,27 @@ def _chunks_to_inputs(chunks: Iterable[Chunk], doc_id: str) -> list[ChunkInput]:
         )
         for c in chunks
     ]
+
+
+def _record_outcome(
+    report: IngestReport,
+    rel: str,
+    doc: ParsedDoc,
+    chunks: list[Chunk],
+    encodings: dict[str, int],
+) -> None:
+    """把"这个文件被怎么处理了"写进报告：无文本层 / 空内容 / 编码 / 逐条警告。"""
+    if not chunks:
+        if doc.scanned:
+            report.files_no_text += 1
+            report.note(f"{NO_TEXT_LAYER_MSG}：{rel}")
+        else:
+            report.files_empty += 1
+            report.note(f"{doc.skip_reason or '解析后没有可索引的文本，已跳过'}：{rel}")
+    for warning in doc.warnings:
+        report.note(f"{warning}：{rel}")
+    if doc.encoding:
+        encodings[doc.encoding] = encodings.get(doc.encoding, 0) + 1
 
 
 def collect_plan(
@@ -161,7 +276,13 @@ def ingest(
     if not root.exists():
         raise FileNotFoundError(f"语料目录不存在：{root}（先跑 scripts/fetch_corpus.py）")
 
-    files = iter_corpus_files(root, limit_files)
+    # 只走一次目录树：`discover_report` 同时带回"被跳过的超大文件"，那些也必须在报告里
+    # 点名（否则"我明明放进去了"无从解释）。
+    discovery = discover_report(root)
+    report.files_oversize = len(discovery.oversize)
+    for rel, size in discovery.oversize:
+        report.note(f"超过 {_MAX_FILE_MB:.0f} MB 上限，已跳过：{rel}（{size / 1048576:.1f} MB）")
+    files = discovery.files if limit_files is None else discovery.files[:limit_files]
     report.files_scanned = len(files)
     if limit_files is not None:
         report.notes.append(
@@ -177,6 +298,7 @@ def ingest(
     if removed:
         report.chunks_removed += store.delete_docs(set(removed))
 
+    encodings: dict[str, int] = {}
     for start in range(0, len(todo), batch_files):
         batch = todo[start : start + batch_files]
         docs: list[DocInput] = []
@@ -184,22 +306,21 @@ def ingest(
         for path, digest in batch:
             rel = _rel_posix(path, root)
             doc_id = doc_id_from_path(rel)
-            chunks = chunk_document(
-                rel,
-                path.read_text(encoding="utf-8", errors="replace"),
-                max_chars=settings.chunk_max_chars,
-                overlap=settings.chunk_overlap_chars,
-                min_chars=settings.chunk_min_chars,
-                url_prefix=settings.docs_url_prefix,
-            )
-            title = chunks[0].title if chunks else doc_id.rsplit("/", 1)[-1]
+            doc = _parse_file(path)
+            if doc.error:
+                # 不登记（不写 DocInput）：坏文件可能只是暂时读不了（被占用/网络盘掉线），
+                # 登记了就会因"哈希没变"永远不再重试。原因逐条进报告。
+                report.files_failed += 1
+                report.note(f"解析失败：{rel} —— {doc.error}")
+                continue
+            chunks = _chunks_for(rel, doc, settings)
+            title = chunks[0].title if chunks else (doc.title or doc_id.rsplit("/", 1)[-1])
             url = chunks[0].source_url if chunks else ""
             docs.append(
                 DocInput(doc_id=doc_id, rel_path=rel, title=title, source_url=url, content_hash=digest)
             )
-            if not chunks:
-                report.files_empty += 1
             chunk_inputs.extend(_chunks_to_inputs(chunks, doc_id))
+            _record_outcome(report, rel, doc, chunks, encodings)
 
         vectors = _vectors_for(store, embedder, chunk_inputs, report, log)
         store.upsert_docs(docs, chunk_inputs, vectors)
@@ -210,6 +331,15 @@ def ingest(
             f"  批 {report.batches}: 文件 {len(docs)}，块 {len(chunk_inputs)}，"
             f"累计编码 {report.chunks_embedded}"
         )
+
+    if encodings:
+        detail = "、".join(f"{name}×{count}" for name, count in sorted(encodings.items()))
+        report.notes.append(
+            f"本次解析文件的文本编码：{detail} —— 按 utf-8-sig/utf-8 -> gb18030 顺序严格探测，"
+            f"两种都失败时用替换字符更少的那个并统计 U+FFFD，**从不使用 errors=ignore 静默丢字**"
+        )
+    if report.notes_dropped:
+        report.notes.append(f"另有 {report.notes_dropped} 条同类细节未逐条列出（上面的计数是准的）")
 
     if removed and report.batches == 0:
         # **纯删除的一轮**：上面的循环体一次都没进，`finalize()` 也就没被调用过。
