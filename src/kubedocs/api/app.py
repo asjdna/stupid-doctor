@@ -82,6 +82,7 @@ from kubedocs.api.threads import ThreadOwnershipError, ThreadStore
 from kubedocs.config import Settings, get_settings, repo_root
 from kubedocs.domains import load_all
 from kubedocs.domains.base import DomainRegistry
+from kubedocs.domains.clinic.pending import PendingBookings
 from kubedocs.embed import Embedder, build_embedder
 from kubedocs.generate import Answer, Answerer, build_answerer, has_api_key
 from kubedocs.observability import (
@@ -419,6 +420,9 @@ class _ChatOutcome:
         self.status = str(state.get("status", ""))
         # 图路径不走工具循环，没有"算不出价"这个概念（它的 LLM 调用在别处记账）
         self.unpriced_calls = 0
+        # 图路径没有 `propose_booking`（它的挂号是确定性节点直接取号），所以没有待确认单。
+        # 字段仍然给出来，让前端只有一条渲染分支。
+        self.pending_action = None
 
     @classmethod
     def from_clinic_turn(cls, turn: Any) -> _ChatOutcome:
@@ -443,7 +447,25 @@ class _ChatOutcome:
         self.status = "emergency" if turn.emergency else "done"
         # "算不出价"的调用次数透传到 SSE：让未知成本在**响应里**也看得见
         self.unpriced_calls = int(getattr(turn, "unpriced_calls", 0) or 0)
+        # 待确认挂号单（如果模型这一轮提议了）：前端据此渲染"确认挂号"卡片。
+        # 与 `/consult` 是同一个形状、同一个 `proposal_id`，所以确认按钮走的是同一个端点。
+        self.pending_action = getattr(turn, "pending_action", None)
         return self
+
+
+def _shared_booking(app: FastAPI) -> Any:
+    """**全应用唯一**的号源服务（`BookingService`），惰性构造一次并缓存。
+
+    `/chat` 与 `/consult` 必须拿到同一个对象：各建一份会得到两个连接池、两份号源视图，
+    于是"刚在问诊页占的号在对话页查不到"。缓存放在 `app.state` 上而不是模块级，
+    是为了让每个 app（含测试里创建的多个）各自独立。
+    """
+    with app.state.clinic_booking_lock:
+        if app.state.clinic_booking is None:
+            from kubedocs.domains.clinic.assembly import build_booking_service
+
+            app.state.clinic_booking = build_booking_service(app.state.settings)
+        return app.state.clinic_booking
 
 
 def _get_clinic_react(app: FastAPI) -> Any:
@@ -451,16 +473,21 @@ def _get_clinic_react(app: FastAPI) -> Any:
 
     与 `_get_clinic_agent` 并存：**有 LLM 密钥时优先走这条**（控制流由模型决定），
     没有密钥时回退到确定性图（红线与挂号仍可用，只是不会主动追问）。
+
+    号源与待确认单**取自 app 级共享状态**，与 `/consult` 是同一份——挂号的提议与确认
+    因此可以跨页面进行。
     """
     rt = getattr(app.state, "clinic_react", None)
     if rt is not None:
         return rt
     from kubedocs.agent.clinic_react import ClinicReactRuntime
-    from kubedocs.domains.clinic.booking import BookingService
-    from kubedocs.domains.clinic.mock import MockAppointmentProvider
 
     settings = app.state.settings
-    rt = ClinicReactRuntime(settings, BookingService(MockAppointmentProvider()))
+    rt = ClinicReactRuntime(
+        settings,
+        _shared_booking(app),
+        pending=app.state.clinic_pending,
+    )
     app.state.clinic_react = rt
     return rt
 
@@ -550,6 +577,9 @@ async def _chat_events(app: FastAPI, request: ChatRequest, thread_id: str) -> As
             "resumed": outcome.resuming,
             # 0 是常态；>0 表示有调用的价算不出来（已按保守上限记账，**不是免费**）
             "unpriced_llm_calls": outcome.unpriced_calls,
+            # 待确认挂号单（模型这一轮提议了才有）：前端渲染成"确认挂号"卡片，
+            # 确认按钮打的是与 `/consult` 同一个端点（`/consult/booking/confirm`）。
+            "pending_action": outcome.pending_action,
         },
     )
     yield _sse("done", {"thread_id": thread_id, "ok": True})
@@ -603,6 +633,9 @@ def _register_tools() -> None:
     from kubedocs.domains.clinic.booking import BookingService
     from kubedocs.domains.clinic.mock import MockAppointmentProvider
 
+    # 启动时只装配**不需要外部资源**的那一份（进程内号源、没有 `pending` 所以没有
+    # `propose_booking`）。`/consult` 与 `/chat` 拿到真号源后会用同一批名字重新注册
+    # （`register_domain_tools` 先清后注册，是幂等的）。
     register_domain_tools("clinic", service=BookingService(MockAppointmentProvider()))
 
 
@@ -665,6 +698,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     # 那个函数只在有 LLM 密钥、且真的走到工具循环时才被调用，而属主校验必须在端点里、
     # 对两条路径都生效，所以它必须是 create_app 的常驻状态。
     app.state.clinic_threads = ThreadStore()
+    # 号源服务与待确认挂号单是 `/chat` 与 `/consult` **共用**的：在问诊页提议一张单、
+    # 在对话页看到它、再点确认——两边必须是同一份状态。所以它们挂在 app 上，
+    # 由下面的 `_shared_booking` / `clinic_pending` 共享，而不是各路由各建一份。
+    app.state.clinic_pending = PendingBookings()
+    app.state.clinic_booking = None
+    app.state.clinic_booking_lock = threading.Lock()
+    app.state.consult_runtime = None
     current = _DomainRuntime(cfg)
     app.state.runtimes = {cfg.domain: current}
     app.state.store = current.store  # 约定：当前域的 store 挂在 app.state.store
@@ -676,6 +716,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         build_consult_router(
             runtime_provider=lambda req: _runtime_for_app(req.app, "clinic"),
             page_path=app.state.consult_html,
+            pending=app.state.clinic_pending,
+            booking_provider=lambda: _shared_booking(app),
         )
     )
 

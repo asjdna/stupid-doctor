@@ -407,6 +407,107 @@ def cmd_serve(args: argparse.Namespace) -> int:
     return EXIT_OK
 
 
+# --------------------------------------------------------------------------- 排班
+def _schedule_provider(args: argparse.Namespace) -> object:
+    """构造 Postgres 号源（排班管理只对它有意义）。
+
+    **不用 `build_booking_service`**：那个函数在数据库不可达时会降级成进程内号源，
+    而"把排班写进一个重启就没的字典"是最糟的结果——运维会以为改完了。
+    这里连不上就**响亮失败**，退出码走 `EXIT_PRECONDITION`。
+    """
+    from kubedocs.domains.clinic.pg_provider import from_settings as pg_from_settings
+
+    settings = make_settings(args)
+    return pg_from_settings(settings)
+
+
+def cmd_schedule(args: argparse.Namespace) -> int:
+    """排班与号量管理：生成 / 查看 / 停诊 / 开诊 / 改号量。
+
+    默认规则是"每科室每天上午下午各 10 个号、今天起 7 天"，由 `generate` 幂等地补齐
+    （**绝不覆盖已有余量**，所以重复跑不会把别人挂掉的号重置回满额）。窗口会随时间向前滚动，
+    `serve` 启动时也会自动补一次；这条命令是给运维手工调整与核对用的。
+    """
+    try:
+        provider = _schedule_provider(args)
+    except Exception as e:  # noqa: BLE001 - 连不上号源库是可预期的运维状态
+        print(f"号源库不可用：{type(e).__name__}: {e}", file=sys.stderr)
+        print("检查 KUBEDOCS_DATABASE_URL 与数据库可达性。", file=sys.stderr)
+        return EXIT_PRECONDITION
+    with provider:  # type: ignore[attr-defined]
+        action = args.action
+        if action == "generate":
+            added = provider.generate_schedules(  # type: ignore[attr-defined]
+                days=args.days, per_period=args.per_period, start=args.start
+            )
+            print(
+                f"排班已就绪：本次新增 {added} 个时段"
+                f"（{args.start or '今天'} 起 {args.days} 天 × 上午/下午，每时段 {args.per_period} 个号）"
+            )
+            return EXIT_OK
+        if action == "show":
+            return _schedule_show(provider, args)  # type: ignore[arg-type]
+        if action in ("close", "open"):
+            closed = action == "close"
+            provider.close_slot(  # type: ignore[attr-defined]
+                args.department, args.date, args.period, closed=closed
+            )
+            print(f"{args.department} {args.date} {args.period} 已{'停诊' if closed else '开诊'}")
+            return EXIT_OK
+        if action == "capacity":
+            out = provider.adjust_capacity(  # type: ignore[attr-defined]
+                args.department, args.date, args.period, args.capacity
+            )
+            print(
+                f"{args.department} {args.date} {args.period}：号量 {out['capacity']}、"
+                f"余量 {out['remaining']}、已挂出 {out['booked']}"
+            )
+            return EXIT_OK
+    print(f"未知动作 {args.action!r}", file=sys.stderr)
+    return EXIT_USER
+
+
+def _schedule_show(provider: object, args: argparse.Namespace) -> int:
+    """打印放号窗口（科室 × 日期 × 时段）：号量 / 余量 / 是否停诊。"""
+    from kubedocs.domains.clinic.provider import BookingError
+
+    departments = provider.list_departments()  # type: ignore[attr-defined]
+    if args.department:
+        departments = [d for d in departments if str(d["name"]) == args.department]
+        if not departments:
+            print(f"没有名为 {args.department!r} 的科室", file=sys.stderr)
+            return EXIT_USER
+    if args.json:
+        payload = []
+        for dep in departments:
+            for day in provider.availability_window(dep["name"], args.days):  # type: ignore[attr-defined]
+                for slot in day["slots"]:
+                    payload.append({"department": dep["name"], "date": day["date"], **slot})
+        print(json.dumps(payload, ensure_ascii=False, indent=2))
+        return EXIT_OK
+    total = 0
+    for dep in departments:
+        name = str(dep["name"])
+        try:
+            window = provider.availability_window(name, args.days)  # type: ignore[attr-defined]
+        except BookingError as e:
+            print(f"{name}：{e}", file=sys.stderr)
+            continue
+        if not window:
+            print(f"{name}：窗口内没有排班（先跑 `kubedocs schedule generate`）")
+            continue
+        print(f"{name}（挂号费 {dep.get('fee', 0)} 元）")
+        for day in window:
+            cells = "  ".join(
+                f"{s['time']} {s['remaining']}/{s['capacity']}" + ("（停诊）" if s["closed"] else "")
+                for s in day["slots"]
+            )
+            total += sum(int(s["remaining"]) for s in day["slots"])
+            print(f"  {day['date']}  {cells}")
+    print(f"窗口内可约余量合计：{total}")
+    return EXIT_OK
+
+
 # --------------------------------------------------------------------------- mcp
 def cmd_mcp(args: argparse.Namespace) -> int:
     """把工具经 MCP 协议（stdio）暴露给外部客户端，阻塞到客户端断开。
@@ -428,6 +529,7 @@ def cmd_mcp(args: argparse.Namespace) -> int:
         domain=args.domain or "",
         allow_side_effects=args.allow_side_effects,
         no_warmup=bool(getattr(args, "no_warmup", False)),
+        patient_id=str(getattr(args, "patient_id", "") or ""),
     )
 
 
@@ -520,7 +622,7 @@ def build_parser() -> argparse.ArgumentParser:
             "\n"
             "两个域都支持：\n"
             "  --domain k8s_docs   检索 k8s 文档：search_docs + check_citations\n"
-            "  --domain clinic     号源三件套 + search_docs + check_citations\n"
+            "  --domain clinic     科室 / 号源 / 放号窗口 / 我的挂号 + search_docs + check_citations\n"
             "\n"
             "副作用工具（取号）默认**不暴露**；开 --allow-side-effects 后仍必须传 confirm=true。\n"
             "启动后台预热检索器：握手不受影响，但第一次 search_docs 不必现付模型加载\n"
@@ -539,7 +641,39 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="不在启动后预热检索器（第一次 search_docs 会现付导入与模型加载）",
     )
+    pm.add_argument(
+        "--patient-id",
+        default="",
+        help="这个 MCP 会话代表哪位就诊人（影响「我的挂号」与取号记账；默认 anon）",
+    )
     pm.set_defaults(func=cmd_mcp)
+
+    psch = sub.add_parser(
+        "schedule",
+        help="号源排班的生成 / 查看 / 停诊 / 改号量（只对 Postgres 号源有意义）",
+        description=(
+            "排班与号量管理。默认规则：每科室每天上午/下午各 10 个号、今天起 7 天。\n"
+            "`generate` 是**幂等**的（已有排班一律不动，绝不覆盖剩余号量），重复跑只会补缺口，\n"
+            "所以放号窗口会随时间自动向前滚动（`serve` 启动时也会补一次）。\n"
+            "号源只到科室，没有医生维度。"
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        parents=[common],
+    )
+    psch.add_argument(
+        "action",
+        choices=["generate", "show", "close", "open", "capacity"],
+        help="generate=补排班（幂等）；show=看窗口；close/open=停诊/开诊；capacity=改号量",
+    )
+    psch.add_argument("--days", type=int, default=7, help="放号窗口天数（默认 7）")
+    psch.add_argument("--per-period", type=int, default=10, dest="per_period", help="每时段号量（默认 10）")
+    psch.add_argument("--start", default="", help="窗口起始日 YYYY-MM-DD（默认今天）")
+    psch.add_argument("--department", default="", help="科室名（show 可留空=全部；其余动作必填）")
+    psch.add_argument("--date", default="", help="YYYY-MM-DD（默认今天）")
+    psch.add_argument("--period", default="", help="上午 / 下午")
+    psch.add_argument("--capacity", type=int, default=-1, help="新号量（capacity 动作用）")
+    psch.add_argument("--json", action="store_true", help="show 时输出 JSON")
+    psch.set_defaults(func=cmd_schedule)
 
     pt = sub.add_parser("stats", help="索引体检", parents=[common])
     pt.add_argument("--verify", action="store_true", help="顺便做 FTS 一致性自检")

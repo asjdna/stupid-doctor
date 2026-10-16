@@ -30,11 +30,22 @@ def unregister_domain(domain: str) -> int:
     return len(names)
 
 
-def register_domain_tools(domain: str, *, service: Any = None, retriever: Any = None) -> list[ToolSpec]:
+def register_domain_tools(
+    domain: str,
+    *,
+    service: Any = None,
+    retriever: Any = None,
+    pending: Any = None,
+) -> list[ToolSpec]:
     """装配并注册某个域的工具，返回注册结果。**幂等**。
 
-    - `clinic`：号源三件套（列科室 / 查号源 / 取号）+ 检索与引用核对；`service` 必填
+    - `clinic`：科室/号源/放号窗口/我的挂号 + **待确认挂号单**（`propose_booking`）
+      + 检索与引用核对；`service` 必填
     - `k8s_docs`：检索与引用核对（`retriever` 为 `None` 时只有引用核对）
+
+    `pending` 是待确认挂号单的存储（`domains.clinic.pending.PendingBookings`）。传了才会
+    注册 `propose_booking`——没有它那张单子无处安放，注册一个必然失败的提议工具只会让
+    模型反复重试。
 
     只做注册、不做 IO：号源库与检索器由调用方构造后传入，便于测试替身，
     也避免"导入即打开数据库"这种隐蔽副作用。
@@ -51,7 +62,7 @@ def register_domain_tools(domain: str, *, service: Any = None, retriever: Any = 
             raise ValueError("装配 clinic 域工具需要传入 BookingService")
         from kubedocs.domains.clinic.tools import clinic_tools
 
-        tools.extend(clinic_tools(service))
+        tools.extend(clinic_tools(service, pending))
     if retriever is not None:
         tools.append(make_search_tool(retriever, domain=domain))
     # 引用核对是跨域通用工具，但注册时按当前域归属，

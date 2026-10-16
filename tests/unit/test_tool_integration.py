@@ -125,10 +125,17 @@ class TestToolsAndLoopTogether:
                 {"content": "已挂号", "tool_calls": []},
             ]
         )
-        turn = run_tool_loop("帮我挂号", tools=_tools(), llm=caller, confirm=lambda call: True)
+        turn = run_tool_loop(
+            "帮我挂号",
+            tools=_tools(),
+            llm=caller,
+            confirm=lambda call: True,
+            context={"patient_id": "p1"},
+        )
         assert turn.tool_calls[0].error == ""
         assert (turn.tool_calls[0].result or {}).get("ticket_no")
-        assert wired.my_appointments("anon")
+        # 号记在 `context` 声明的就诊人名下（"这是谁"由调用方给，模型伪造不了）
+        assert wired.my_appointments("p1")
 
     def test_unknown_tool_name_is_fed_back_not_raised(self, wired):
         caller = ScriptedCaller(
@@ -157,7 +164,13 @@ class TestToolsAndLoopTogether:
                 {"content": "没有这个科室", "tool_calls": []},
             ]
         )
-        turn = run_tool_loop("挂火星科", tools=_tools(), llm=caller, confirm=lambda c: True)
+        turn = run_tool_loop(
+            "挂火星科",
+            tools=_tools(),
+            llm=caller,
+            confirm=lambda c: True,
+            context={"patient_id": "p1"},
+        )
         assert turn.tool_calls[0].error
         assert "火星科" in turn.tool_calls[0].error
 

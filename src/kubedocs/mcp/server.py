@@ -211,11 +211,11 @@ def _wire_tools(domain: str, *, settings: Settings) -> _LazyRetriever:
 
     retriever = _LazyRetriever(settings, _assemble_retriever)
     if domain == "clinic":
-        from kubedocs.domains.clinic.booking import BookingService
-        from kubedocs.domains.clinic.mock import MockAppointmentProvider
+        from kubedocs.domains.clinic.assembly import build_booking_service
 
-        # 号源用进程内替身：与 HTTP `/chat` 走的是同一个 provider（见 `api/app.py`）。
-        service = BookingService(MockAppointmentProvider())
+        # 与 HTTP 三条路径（`/consult`、`/chat`）走**同一个构造点**：Postgres 号源优先，
+        # 连不上才降级进程内。各写一份的话，MCP 里查到的号源与网页面上的会是两套数据。
+        service = build_booking_service(settings)
         register_domain_tools(domain, service=service, retriever=retriever)
     else:
         # k8s_docs（以及未来任何只做检索的域）：检索 + 引用核对。
@@ -270,6 +270,7 @@ def build_server(
     allow_side_effects: bool = False,
     settings: Settings | None = None,
     warmup: bool = False,
+    patient_id: str = "anon",
 ) -> Any:
     """造一个 MCP server：按 `domain` 装配工具，并挂好 `list_tools` / `call_tool`。
 
@@ -278,6 +279,11 @@ def build_server(
     **本函数不打开索引、不加载嵌入模型**（检索器惰性，见 `_LazyRetriever`）。
     `warmup=True` 时在启动后另起线程预热检索器（见 `_start_warmup`）；默认关，
     这样单测与"只列工具"的客户端不会为一个模型付代价。
+
+    `patient_id` 是**这个 MCP 会话代表谁**（`--patient-id`，默认 `anon`）。经 `context=`
+    注入到工具执行体，**不进工具 schema**——客户端改不了它，模型也伪造不了。
+    它只影响按人查询的工具（`my_appointments`）与取号记账：MCP 是本地/内网运维通道，
+    没有"登录用户"这个概念，所以身份必须由启动方在命令行上声明。
     """
     from mcp.server import Server
     from mcp.types import CallToolResult, TextContent, Tool
@@ -359,7 +365,9 @@ def build_server(
             # TypeError"——那才是真正"无谓占用空间"的形态。
             from kubedocs.agent.tool_loop import _invoke
 
-            result = _invoke(spec, validated)
+            # `context` 是**启动方**声明的身份（`--patient-id`），不是客户端传参：
+            # `my_appointments` 与取号记账都靠它，而模型/客户端无法改写。
+            result = _invoke(spec, validated, {"patient_id": patient_id})
         except Exception as e:  # noqa: BLE001 - 工具执行失败要结构化返回，不许把栈抛给客户端
             # 索引不可用、检索失败、号源已满都走这里：`isError=True` + 一句人话。
             logger.warning("MCP 工具 %s 执行失败：%s: %s", name, type(e).__name__, e)
@@ -432,6 +440,11 @@ def _build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="不在启动后预热检索器（第一次 search_docs 会现付导入与模型加载，通常 1 分钟以上）",
     )
+    parser.add_argument(
+        "--patient-id",
+        default="anon",
+        help="这个 MCP 会话代表哪位就诊人（影响「我的挂号」与取号记账；默认 anon）",
+    )
     _add_globals(parser, None)
     return parser
 
@@ -443,6 +456,7 @@ def main(
     domain: str = "",
     allow_side_effects: bool = False,
     no_warmup: bool = False,
+    patient_id: str = "",
 ) -> int:
     """MCP server 入口：解析参数 → 配日志 → 起 stdio 服务（阻塞到客户端断开）。
 
@@ -460,6 +474,7 @@ def main(
     args = _build_parser().parse_args(argv)
     target = domain or args.domain or ""
     allow = bool(allow_side_effects or args.allow_side_effects)
+    who = patient_id or args.patient_id or "anon"
 
     from kubedocs.config import load_env_file
     from kubedocs.observability import configure_logging
@@ -478,10 +493,12 @@ def main(
         allow_side_effects=allow,
         settings=settings,
         warmup=not (args.no_warmup or no_warmup),
+        patient_id=who,
     )
     logger.info(
-        "MCP server 启动（域 %s，副作用工具 %s；传输 stdio）",
+        "MCP server 启动（域 %s，就诊人 %s，副作用工具 %s；传输 stdio）",
         settings.domain,
+        who,
         "开启" if allow else "未暴露",
     )
     asyncio.run(_serve(server))

@@ -49,6 +49,7 @@ from __future__ import annotations
 import json
 import logging
 import re
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any, Protocol
@@ -66,6 +67,9 @@ DEFAULT_ENCOUNTER_LIMIT = 20
 
 DEFAULT_SCHEMA = "clinical"
 """就诊记录所在的 schema。与索引 schema（域名）分开：一个是原始数据，一个是派生物。"""
+
+DEFAULT_BOOKING_LIMIT = 20
+"""`list_bookings` 的默认条数（与就诊记录同理，读路径是给人看的）。"""
 
 _IDENT_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
@@ -107,10 +111,30 @@ _DDL_STATEMENTS = (
     "  text text NOT NULL DEFAULT '',"
     "  institution text NOT NULL DEFAULT '',"
     "  created_at text NOT NULL DEFAULT '')",
+    # 挂号与就诊的**单向**关联：就诊记录知道"这一轮挂出了哪张号"，号源那边完全不知道
+    # 就诊记录的存在。所以这张表是**投影**，不是号源的第二份真相——权威状态在
+    # `booking.appointments`，这里只留一份给问诊界面读的快照。
+    #
+    # 不存 `patient_id`：它由 `encounter_id → encounters.patient_id` 唯一确定，
+    # 存两份迟早会在某一处被改而另一处没改。也不加指向 `encounters` 的外键——
+    # 与 `messages` 同理，挂号可能先于就诊行落库（见 `save_encounter` 的顺序说明），
+    # 加外键会把正常路径变成"先有鸡还是先有蛋"。
+    "CREATE TABLE IF NOT EXISTS {bookings} ("
+    "  ticket_no text PRIMARY KEY,"
+    "  encounter_id text NOT NULL DEFAULT '',"
+    "  department text NOT NULL DEFAULT '',"
+    "  booked_date text NOT NULL DEFAULT '',"
+    "  time_slot text NOT NULL DEFAULT '',"
+    "  fee integer NOT NULL DEFAULT 0,"
+    "  status text NOT NULL DEFAULT '',"
+    "  created_at text NOT NULL DEFAULT '',"
+    "  updated_at text NOT NULL DEFAULT '')",
     # 读路径就是"某患者最近若干次就诊"：按 (patient_id, created_at) 建索引才不必全表扫。
     "CREATE INDEX IF NOT EXISTS idx_encounters_patient ON {encounters} (patient_id, created_at)",
     # 消息按就诊取回，且要保持写入顺序（bigserial id 就是顺序）。
     "CREATE INDEX IF NOT EXISTS idx_messages_encounter ON {messages} (encounter_id, id)",
+    # 挂号按就诊回看（"这次问诊挂出了哪张号"），新到旧。
+    "CREATE INDEX IF NOT EXISTS idx_bookings_encounter ON {bookings} (encounter_id, created_at)",
 )
 
 
@@ -205,6 +229,38 @@ class EncounterRecord:
     created_at: str = ""
 
 
+def _booking_row(row: tuple[Any, ...]) -> BookingLink:
+    """库行 → `BookingLink`（列序与 `list_bookings` 的 SELECT 一一对应）。"""
+    return BookingLink(
+        ticket_no=str(row[0]),
+        encounter_id=str(row[1]),
+        department=str(row[2]),
+        date=str(row[3]),
+        time_slot=str(row[4]),
+        fee=int(row[5]),
+        status=str(row[6]),
+        created_at=str(row[7]),
+    )
+
+
+@dataclass
+class BookingLink:
+    """ "这次就诊挂出了哪张号"的关联行（**单向**：就诊 → 号，号源那边不知情）。
+
+    它是号源状态的**投影**，不是权威：权威在 `booking.appointments`。这里的 `status`
+    只在"从问诊界面退号"时同步更新，用来让回看路径不必跨 schema 联表。
+    """
+
+    ticket_no: str
+    encounter_id: str = ""
+    department: str = ""
+    date: str = ""
+    time_slot: str = ""
+    fee: int = 0
+    status: str = ""
+    created_at: str = ""
+
+
 class ClinicalStore(Protocol):
     """产品层需要的持久化能力。实现是 `PgPersistence`（默认）或 `NoopPersistence`。"""
 
@@ -220,6 +276,26 @@ class ClinicalStore(Protocol):
         self, patient_id: str, *, institution: str = "", limit: int = DEFAULT_ENCOUNTER_LIMIT
     ) -> list[EncounterRecord]:
         """读回某患者最近若干次就诊（新 → 旧），用于"记录真的存住了"的验证与回看。"""
+        ...
+
+    def add_booking(self, record: BookingLink) -> None:
+        """记下"这次就诊挂出了哪张号"（单向关联）。"""
+        ...
+
+    def set_booking_status(self, ticket_no: str, status: str) -> None:
+        """更新挂号关联里的状态（退号时同步）。"""
+        ...
+
+    def list_bookings(
+        self, *, encounter_id: str = "", limit: int = DEFAULT_BOOKING_LIMIT
+    ) -> list[BookingLink]:
+        """回看某次就诊挂出的号（新 → 旧）。"""
+        ...
+
+    def list_bookings_many(
+        self, encounter_ids: Sequence[str], *, limit: int = DEFAULT_BOOKING_LIMIT
+    ) -> dict[str, list[BookingLink]]:
+        """批量回看（避免读路径 N+1）。"""
         ...
 
 
@@ -243,7 +319,9 @@ class PgPersistence:
     ) -> None:
         self.dsn = dsn
         self.schema = schema
-        self._tbl = {name: sql.Identifier(schema, name) for name in ("patients", "encounters", "messages")}
+        self._tbl = {
+            name: sql.Identifier(schema, name) for name in ("patients", "encounters", "messages", "bookings")
+        }
         try:
             from psycopg_pool import ConnectionPool
         except ImportError as e:  # pragma: no cover - 取决于环境
@@ -301,16 +379,17 @@ class PgPersistence:
         return f"{self.schema}@{redact_dsn(self.dsn)}"
 
     def counts(self) -> dict[str, int]:
-        """三张表的行数。给 `/consult/status` 用：运维要能看见它**真的在写**。
+        """各表的行数。给 `/consult/status` 用：运维要能看见它**真的在写**。
 
         不属于 `ClinicalStore` 协议：计数是运维读数，不是产品能力。
         """
-        # 三条语句写死而不是循环拼表名：动态 SQL 的注入面为 0，也不与静态检查较劲。
+        # 每条语句写死而不是循环拼表名：动态 SQL 的注入面为 0，也不与静态检查较劲。
         with self._pool.connection() as conn:
             return {
                 "patients": int(conn.execute(self._q("SELECT COUNT(*) FROM {patients}")).fetchone()[0]),
                 "encounters": int(conn.execute(self._q("SELECT COUNT(*) FROM {encounters}")).fetchone()[0]),
                 "messages": int(conn.execute(self._q("SELECT COUNT(*) FROM {messages}")).fetchone()[0]),
+                "bookings": int(conn.execute(self._q("SELECT COUNT(*) FROM {bookings}")).fetchone()[0]),
             }
 
     def close(self) -> None:
@@ -511,6 +590,87 @@ class PgPersistence:
             for r in rows
         ]
 
+    # ---------------------------------------------------------------- 挂号关联
+    def add_booking(self, record: BookingLink) -> None:
+        """记下"这次就诊挂出了哪张号"。
+
+        `ON CONFLICT (ticket_no) DO NOTHING`：确认挂号那条路径可能被重试（网络抖动、
+        用户刷新后重放），同一张号不该在关联表里出现两行。**不 `DO UPDATE`**——号源那边
+        已经判过一次，这里再覆盖只会把"哪次就诊挂的号"改掉，属于篡改历史。
+        """
+        now = _now()
+        with self._pool.connection() as conn:
+            conn.execute(
+                self._q(
+                    "INSERT INTO {bookings} "
+                    "(ticket_no, encounter_id, department, booked_date, time_slot, fee, status,"
+                    " created_at, updated_at) "
+                    "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s) "
+                    "ON CONFLICT (ticket_no) DO NOTHING"
+                ),
+                (
+                    record.ticket_no,
+                    record.encounter_id,
+                    record.department,
+                    record.date,
+                    record.time_slot,
+                    int(record.fee),
+                    record.status,
+                    record.created_at or now,
+                    now,
+                ),
+            )
+
+    def set_booking_status(self, ticket_no: str, status: str) -> None:
+        """同步挂号关联里的状态（退号时调）。凭据号不存在就静默通过——
+        退号的权威判定在号源层，这里只是把快照跟上，不该因为投影缺行而报错。"""
+        with self._pool.connection() as conn:
+            conn.execute(
+                self._q("UPDATE {bookings} SET status = %s, updated_at = %s WHERE ticket_no = %s"),
+                (str(status), _now(), str(ticket_no)),
+            )
+
+    def list_bookings(
+        self, *, encounter_id: str = "", limit: int = DEFAULT_BOOKING_LIMIT
+    ) -> list[BookingLink]:
+        """某次就诊挂出的号（新 → 旧）。`encounter_id` 为空返回空列表——**不返回全部**：
+        那等于把所有人的挂号记录倒出来，而这个方法的每个调用点都只关心一次就诊。"""
+        if not encounter_id:
+            return []
+        return self.list_bookings_many([encounter_id], limit=limit).get(str(encounter_id), [])
+
+    def list_bookings_many(
+        self, encounter_ids: Sequence[str], *, limit: int = DEFAULT_BOOKING_LIMIT
+    ) -> dict[str, list[BookingLink]]:
+        """一次取回**多次就诊**各自的挂号关联，按 `encounter_id` 分组。
+
+        存在的理由就是那条读路径的形状：`GET /consult/encounters` 一次返回 N 次就诊，
+        每条都单查一次就是标准的 N+1。这里一句 `= ANY(%s)` 取完再在内存里分组。
+
+        `limit` 是**每次就诊**的上界（不是总数）：调用方要的是"每次就诊挂出的号"，
+        让某一次就诊把自己那 20 条占满而把别的挤掉，是错的分页语义。
+        """
+        ids = [str(i) for i in encounter_ids if str(i)]
+        grouped: dict[str, list[BookingLink]] = {i: [] for i in ids}
+        if not ids:
+            return grouped
+        with self._pool.connection() as conn:
+            rows = conn.execute(
+                self._q(
+                    "SELECT ticket_no, encounter_id, department, booked_date, time_slot, fee,"
+                    " status, created_at FROM {bookings} WHERE encounter_id = ANY(%s) "
+                    "ORDER BY created_at DESC, ticket_no"
+                ),
+                (ids,),
+            ).fetchall()
+        cap = max(1, int(limit))
+        for row in rows:
+            link = _booking_row(row)
+            bucket = grouped.get(link.encounter_id)
+            if bucket is not None and len(bucket) < cap:
+                bucket.append(link)
+        return grouped
+
     # ---------------------------------------------------------------- 内部
     def _has_messages(self, conn: Any, encounter_id: str) -> bool:
         """这次就诊有没有消息了。**必须在 `save_encounter` 的事务里调**（理由见该方法）。
@@ -554,7 +714,25 @@ class NoopPersistence:
 
     def counts(self) -> dict[str, int]:
         """没有落库就没有行数（`/consult/status` 因此能如实显示全 0）。"""
-        return {"patients": 0, "encounters": 0, "messages": 0}
+        return {"patients": 0, "encounters": 0, "messages": 0, "bookings": 0}
+
+    def add_booking(self, record: BookingLink) -> None:
+        del record
+
+    def set_booking_status(self, ticket_no: str, status: str) -> None:
+        del ticket_no, status
+
+    def list_bookings(
+        self, *, encounter_id: str = "", limit: int = DEFAULT_BOOKING_LIMIT
+    ) -> list[BookingLink]:
+        del encounter_id, limit
+        return []
+
+    def list_bookings_many(
+        self, encounter_ids: Sequence[str], *, limit: int = DEFAULT_BOOKING_LIMIT
+    ) -> dict[str, list[BookingLink]]:
+        del limit
+        return {str(i): [] for i in encounter_ids}
 
     def close(self) -> None:
         """与 `PgPersistence` 同形（上层可以不区分地关掉它）。"""

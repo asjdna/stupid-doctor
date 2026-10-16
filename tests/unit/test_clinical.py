@@ -675,8 +675,12 @@ class _FakeToolLoop:
         question: str,
         intake: object,
         history: list[dict[str, Any]] | None = None,
+        context: dict[str, Any] | None = None,
     ) -> object:
-        del system, intake
+        # 管线会把 `patient_id` 经 `context=` 交给工具循环（挂号记账要靠它）。
+        # 这个替身不执行真工具，只把签名对齐——**不等齐就会 TypeError**，而管线会
+        # 捕获它并静默降级，测试于是从"验证编排"变成"验证降级路径"。
+        del system, intake, context
         self.calls += 1
         self.questions.append(question)
         self.histories.append(history)

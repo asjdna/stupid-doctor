@@ -48,8 +48,34 @@ class GetAvailabilityParams(BaseModel):
     date: str = Field(default="", description="YYYY-MM-DD，留空表示今天")
 
 
+class BookingWindowParams(BaseModel):
+    """查放号窗口（哪天还有号）。"""
+
+    department: str = Field(min_length=1, max_length=32, description="科室名")
+    days: int = Field(default=7, ge=1, le=30, description="从今天起往后看几天")
+
+
+class ProposeBookingParams(BaseModel):
+    """生成一张**待确认**的挂号单（不占号）。"""
+
+    department: str = Field(min_length=1, max_length=32, description="科室名")
+    date: str = Field(default="", description="YYYY-MM-DD，留空表示今天")
+    time_slot: str = Field(default="", description="上午 / 下午，留空自动选第一个有余号的")
+    patient_name: str = Field(default="", max_length=32, description="患者姓名，没问到时留空，**不要编**")
+
+
+class MyAppointmentsParams(BaseModel):
+    """查本人已有的挂号记录。"""
+
+    limit: int = Field(default=5, ge=1, le=20, description="最多返回几条")
+
+
 class BookParams(BaseModel):
-    """取号。"""
+    """取号。
+
+    **模型拿不到这个 schema**（`side_effect=True`，工具循环默认把它挡在外面）。它只服务于
+    明确知道自己在做什么的调用方：MCP 服务器加 `--allow-side-effects` 时的运维通道。
+    """
 
     department: str = Field(min_length=1, max_length=32, description="科室名")
     date: str = Field(default="", description="YYYY-MM-DD，留空表示今天")

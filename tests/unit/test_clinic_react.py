@@ -17,6 +17,7 @@ from kubedocs.agent.tools import ToolRegistry
 from kubedocs.config import Settings
 from kubedocs.domains.clinic.booking import BookingService
 from kubedocs.domains.clinic.mock import MockAppointmentProvider
+from kubedocs.domains.clinic.pending import PendingBookings
 
 
 @pytest.fixture
@@ -29,7 +30,9 @@ def runtime(tmp_path) -> ClinicReactRuntime:
         embedding_dim=32,
         llm_model="deepseek/deepseek-chat",
     )
-    rt = ClinicReactRuntime(settings, BookingService(MockAppointmentProvider()))
+    # `pending` 与生产一致（`app.state.clinic_pending`）：没有它就不会注册
+    # `propose_booking`，而"模型只能提议"这条策略正是靠那个工具成立的。
+    rt = ClinicReactRuntime(settings, BookingService(MockAppointmentProvider()), pending=PendingBookings())
     yield rt
     ToolRegistry.clear()
 
@@ -93,26 +96,30 @@ class TestNoLlmDegrades:
 
 
 class TestConfirmationPolicy:
-    def test_without_explicit_booking_request_the_side_effect_tool_is_refused(self, runtime, monkeypatch):
-        """用户只是描述症状 → 取号工具必须被拒（号源不能被悄悄占用）。"""
+    """`/chat` 与 `/consult` 同一套确认策略：**模型只能提议，写操作由患者点按钮触发**。
+
+    所以这条路径**永远不给** `confirm` 回调——包括用户原话里就写着"帮我挂号"的时候。
+    "这句话里有挂号两个字"不等于"患者同意了这一张具体单子（科室、日期、时段、费用）"，
+    而那才是确认要问的东西。
+    """
+
+    def test_no_confirm_callback_is_ever_handed_to_the_loop(self, runtime, monkeypatch):
         from kubedocs.agent.tool_loop import AgentTurn
 
-        captured: dict[str, Any] = {}
+        seen: list[Any] = []
 
         def fake_loop(question: str, **kw: Any) -> AgentTurn:
-            captured["confirm"] = kw.get("confirm")
+            seen.append(kw.get("confirm"))
             return AgentTurn(question=question, answer="（打桩）", steps=1, llm_calls=1)
 
         monkeypatch.setattr(ClinicReactRuntime, "has_llm", lambda self: True)
         monkeypatch.setattr("kubedocs.agent.clinic_react.run_tool_loop", fake_loop)
         runtime.turn("我最近咳嗽")
-        assert captured["confirm"] is None, "描述症状时不该给出确认回调"
-
         runtime.turn("帮我挂个号")
-        assert captured["confirm"] is not None, "明确要求挂号时应当给出确认"
+        assert seen == [None, None], "任何一轮都不该给出确认回调：确认来自患者点按钮，不来自这句话"
 
-    def test_confirmed_booking_actually_books(self, runtime):
-        """确认回调返回 True 时，工具循环里的取号应当真的执行。"""
+    def test_the_model_cannot_book_even_when_it_tries(self, runtime):
+        """模型硬调 `book_appointment` ⇒ 一律被拒，号源一个都不动。"""
         from kubedocs.agent.tool_loop import run_tool_loop
 
         class _Scripted:
@@ -131,17 +138,45 @@ class TestConfirmationPolicy:
                                     "department": "心内科",
                                     "date": "2026-01-01",
                                     "time_slot": "上午",
-                                    "patient_id": "anon",
                                 },
                             }
                         ],
                     }
-                return {"content": "已为您挂号", "tool_calls": []}
+                return {"content": "请确认后再取号", "tool_calls": []}
 
-        turn = run_tool_loop("帮我挂号", tools=runtime.tools, llm=_Scripted(), confirm=lambda _c: True)
+        turn = run_tool_loop("帮我挂号", tools=runtime.tools, llm=_Scripted())
+        assert turn.tool_calls[0].error, "没有确认回调时副作用工具必须被拒"
+        assert turn.tool_calls[0].result is None
+        assert runtime.service.my_appointments("anon") == [], "被拒的调用不该真的占号"
+
+    def test_proposing_a_booking_produces_a_pending_action(self, runtime):
+        """`propose_booking` 只读：产出一张待确认单，**不占号**。"""
+        from kubedocs.agent.tool_loop import run_tool_loop
+
+        class _Scripted:
+            def __init__(self) -> None:
+                self.n = 0
+
+            def choose(self, messages: list[dict[str, Any]], tools: list[dict[str, Any]]) -> dict[str, Any]:
+                self.n += 1
+                if self.n == 1:
+                    return {
+                        "content": "",
+                        "tool_calls": [
+                            {
+                                "name": "propose_booking",
+                                "arguments": {"department": "心内科", "time_slot": "上午"},
+                            }
+                        ],
+                    }
+                return {"content": "请确认这张单子", "tool_calls": []}
+
+        turn = run_tool_loop("帮我挂个号", tools=runtime.tools, llm=_Scripted(), context={"patient_id": "p9"})
         assert turn.tool_calls[0].error == ""
-        assert (turn.tool_calls[0].result or {}).get("ticket_no")
-        assert runtime.service.my_appointments("anon")
+        proposal = (turn.tool_calls[0].result or {}).get("proposal") or {}
+        assert proposal.get("proposal_id"), "提议必须留下一张可确认的单子"
+        assert proposal.get("department") == "心内科"
+        assert runtime.service.my_appointments("p9") == [], "提议**不占号**：取号要等患者点确认"
 
 
 class TestHistoryReachesTheModel:

@@ -7,9 +7,11 @@
 所以红线在**进入循环之前**用确定性规则判定（`RiskGuard`），命中即返回急诊引导，
 LLM 没有任何机会参与这个决定。
 
-挂号的确认策略：`book_appointment` 有副作用且不可撤销，而 HTTP 上无法中断等确认，因此
-只有**用户这一轮原文里明确要求挂号**（`wants_booking`）才算确认；否则工具循环拒绝执行，
-并把"需要用户确认"回灌给模型。`when_not` 里另有"未明确要求时不要调"的第二道防线。
+挂号的确认策略：**模型只能提议**（`propose_booking` 是只读的），真正取号/退号由患者
+在界面上点按钮，走 `/consult/booking/confirm` 与 `/consult/booking/cancel` 两个端点。
+所以这条路径**不给**工具循环任何 `confirm` 回调——`book_appointment` 标着 `side_effect`，
+没有回调就一律拒绝执行。这与 `/consult` 完全同一套流程：提议在服务端留下一次性单号，
+确认请求只回传那个单号，科室/日期/费用都取自服务端那张单子（模型与前端都改不动）。
 """
 
 from __future__ import annotations
@@ -22,7 +24,6 @@ from kubedocs.agent.bootstrap import register_domain_tools
 from kubedocs.agent.tool_loop import AgentTurn, run_tool_loop
 from kubedocs.agent.tools import ToolRegistry, ToolSpec
 from kubedocs.config import Settings
-from kubedocs.domains.clinic.pack import wants_booking
 from kubedocs.domains.clinic.redline import RiskGuard, emergency_advice, emergency_menu
 
 SYSTEM_TEMPLATE = """你是医院预问诊助手，帮助患者判断该挂哪个科、并协助挂号。
@@ -88,6 +89,12 @@ class ClinicTurn:
     透传到 HTTP 层，让"未知成本"在**响应里**也能看见，而不是只躺在账本文件里。
     """
     notes: list[str] | None = None
+    pending_action: dict[str, Any] | None = None
+    """这一轮模型提议的**待确认挂号单**（`propose_booking` 的产出）。
+
+    前端拿它渲染"确认挂号"卡片。它是工具的结构化结果，不是模型那段文字——
+    科室、日期、时段、挂号费都来自服务端写下的那张单子。
+    """
 
 
 class ClinicReactRuntime:
@@ -97,7 +104,13 @@ class ClinicReactRuntime:
     号源库存（那会变成"挂完号又有了"）。
     """
 
-    def __init__(self, settings: Settings, service: Any, retriever: Any | None = None) -> None:
+    def __init__(
+        self,
+        settings: Settings,
+        service: Any,
+        retriever: Any | None = None,
+        pending: Any | None = None,
+    ) -> None:
         self.settings = settings
         self.service = service
         self.retriever = retriever
@@ -113,8 +126,10 @@ class ClinicReactRuntime:
             settings.llm_daily_budget_usd,
             unpriced_usd=settings.llm_unpriced_call_usd,
         )
-        # 注册工具是"接线"动作：不做它，run_tool_loop 拿到的 tools 会是空的
-        register_domain_tools("clinic", service=service, retriever=retriever)
+        # 注册工具是"接线"动作：不做它，run_tool_loop 拿到的 tools 会是空的。
+        # `pending` 必须与 `/consult` 是**同一份**（`app.state.clinic_pending`），
+        # 否则在问诊页提议的单子在对话页确认不了。
+        register_domain_tools("clinic", service=service, retriever=retriever, pending=pending)
 
     @property
     def tools(self) -> list[Any]:
@@ -183,8 +198,10 @@ class ClinicReactRuntime:
 
         # history 只走 `run_tool_loop(history=...)` 这一条路：消息顺序（system → history
         # → 本轮 user）与角色校验都在循环里做，本模块不自己拼消息列表。
-        # 用户这一轮明确要求挂号 = 对他的取号确认；否则拒绝执行有副作用的工具
-        user_asked_to_book = wants_booking(message)
+        #
+        # **不传 `confirm`**：确认的主体是患者的一次点击，不是"这句话里有没有挂号两个字"。
+        # 没有回调 ⇒ 标了 `side_effect` 的 `book_appointment` 一律被拒，模型只能提议；
+        # 患者在卡片上点确认后才由 `/consult/booking/confirm` 真正取号。
         turn: AgentTurn = run_tool_loop(
             message,
             tools=self.tools,
@@ -193,7 +210,6 @@ class ClinicReactRuntime:
             max_steps=5,
             history=history,
             budget=self.budget,
-            confirm=(lambda _call: True) if user_asked_to_book else None,
             context={"patient_id": patient_id},
         )
         return ClinicTurn(
@@ -212,6 +228,7 @@ class ClinicReactRuntime:
             notes=list(turn.notes),
             cost_usd=turn.cost_usd,
             unpriced_calls=turn.unpriced_calls,
+            pending_action=_pending_action(turn),
         )
 
 
@@ -219,3 +236,19 @@ def emergency_text_for(message: str) -> str | None:
     """分离出来的红线判定，便于单测与复用。"""
     hit = RiskGuard().check(message)
     return emergency_advice(hit.word) if hit else None
+
+
+def _pending_action(turn: AgentTurn) -> dict[str, Any] | None:
+    """从这一轮的工具调用里挑出待确认挂号单（最后一张生效）。
+
+    形状与 `/consult` 的 `pending_action` **逐字段一致**：两条路径的确认按钮打的是同一个
+    端点、传的是同一个 `proposal_id`，前端只需要一条渲染分支。
+    """
+    found: dict[str, Any] | None = None
+    for call in turn.tool_calls:
+        if call.error or call.name != "propose_booking":
+            continue
+        result = call.result
+        if isinstance(result, dict) and isinstance(result.get("proposal"), dict):
+            found = dict(result["proposal"])
+    return found

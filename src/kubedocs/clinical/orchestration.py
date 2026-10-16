@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import json
 import logging
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import Any, Protocol
 
@@ -53,6 +54,15 @@ class ToolCallRecord:
     ok: bool
     summary: str
     """给排查看的简短结果，不是给模型的原文。"""
+
+    result: dict[str, Any] | None = None
+    """工具返回的**结构化**结果（失败时为 `None`）。
+
+    与 `summary` 的区别：`summary` 是给人扫一眼的字符串，`result` 是给代码用的原始契约。
+    HTTP 层要从里面拣出待确认挂号单（`propose_booking` 的 `proposal`）渲染成卡片，
+    靠字符串摘要做不到。工具返回非 dict 时这里存 `{"result": <原值>}`，与回灌给模型的
+    形状保持一致。
+    """
 
 
 @dataclass
@@ -124,8 +134,16 @@ class ClinicalToolLoop:
         self._max_evidence = max_evidence
 
     # ------------------------------------------------------------------ 执行
-    def _execute(self, name: str, arguments: str) -> tuple[dict[str, Any], ToolCallRecord]:
-        """执行一次工具调用。**把失败转成模型看得懂的一句话**，不让它打断对话。"""
+    def _execute(
+        self, name: str, arguments: str, context: Mapping[str, Any] | None = None
+    ) -> tuple[dict[str, Any], ToolCallRecord]:
+        """执行一次工具调用。**把失败转成模型看得懂的一句话**，不让它打断对话。
+
+        `context` 是**调用方**（不是模型）提供的环境参数，例如已认证的 `patient_id`。
+        它经 `agent.tool_loop._invoke` 注入，只落到签名里声明了该参数名的执行体上，
+        且不进工具 schema——模型没有机会伪造"我是谁"。
+        """
+        from kubedocs.agent.tool_loop import _invoke
         from kubedocs.agent.tools import ToolError, ToolRegistry
 
         try:
@@ -160,7 +178,11 @@ class ClinicalToolLoop:
         current = None
         try:
             with span("tool.call", tool=name) as current:
-                result = spec.handler(params)
+                # 用**形状无关**的分发器，不要写 `spec.handler(params)`：仓库里有两种执行体
+                # 形状（`rag_tools` 收 pydantic 模型，`clinic.tools` 收 `**kwargs`），
+                # 直接按一种形状调会把另一种全部打成 TypeError——而它表现为
+                # "工具内部错误"，看起来像业务失败，极难定位。
+                result = _invoke(spec, params, context)
                 span_attrs(current, ok=True)
         except ToolError as e:
             span_attrs(current, ok=False, error=type(e).__name__)
@@ -174,7 +196,7 @@ class ClinicalToolLoop:
 
         if not isinstance(result, dict):
             result = {"result": result}
-        return result, ToolCallRecord(name, arguments, True, _summarize(result))
+        return result, ToolCallRecord(name, arguments, True, _summarize(result), result)
 
     def _collect_evidence(self, bundle_items: list[EvidenceItem], result: dict[str, Any]) -> None:
         """把 `search_docs` 返回的命中累积成证据（编号 `K1`、`K2`…）。
@@ -210,6 +232,7 @@ class ClinicalToolLoop:
         intake: IntakeState,
         schemas: list[dict[str, Any]] | None = None,
         history: list[dict[str, Any]] | None = None,
+        context: Mapping[str, Any] | None = None,
     ) -> ToolLoopResult:
         """跑工具循环。
 
@@ -217,6 +240,10 @@ class ClinicalToolLoop:
         必须有它：产品要求"科室/用药作为回答之后的可选扩展项，等用户来问"——
         患者追问"那该挂哪个科"时，模型若看不到自己上一轮说过什么，
         就会把整个判断重跑一遍，**同一个病例可能问出另一个科室**。
+
+        `context` 是调用方提供的环境参数（`{"patient_id": ...}`）。只有签名里声明了
+        该参数名的工具执行体会收到它，模型既看不见也无法伪造——挂号记的是"谁在调用"，
+        而不是"模型说这是谁"。
         """
         tools = (
             schemas
@@ -260,7 +287,7 @@ class ClinicalToolLoop:
                 }
             )
             for i, call in enumerate(pending):
-                result, record = self._execute(call.name, call.arguments)
+                result, record = self._execute(call.name, call.arguments, context)
                 calls.append(record)
                 self._collect_evidence(items, result)
                 messages.append(

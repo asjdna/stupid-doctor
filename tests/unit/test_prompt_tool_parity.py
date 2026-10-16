@@ -84,12 +84,29 @@ class TestChatPathParity:
         assert registered == {
             "list_departments",
             "get_availability",
+            "booking_window",
+            "my_appointments",
             "book_appointment",
             "check_citations",
         }, "clinic 域的注册集合变了：确认是有意为之，再同步这条断言"
         assert promised_tools(rt.system_prompt) == registered, (
             "系统提示承诺的工具与注册表不一致——模型会去调一个它没有的工具"
         )
+
+    def test_proposal_tool_only_exists_when_a_pending_store_is_wired(self, settings):
+        """没有待确认单存储时**不注册** `propose_booking`：那张单子无处安放，
+        注册一个必然失败的提议工具只会让模型反复重试。"""
+        assert "propose_booking" not in {t.name for t in make_runtime(settings).tools}
+
+        from kubedocs.domains.clinic.pending import PendingBookings
+
+        rt = ClinicReactRuntime(
+            settings,
+            BookingService(MockAppointmentProvider()),
+            pending=PendingBookings(),
+        )
+        assert "propose_booking" in {t.name for t in rt.tools}
+        assert promised_tools(rt.system_prompt) == {t.name for t in rt.tools}
 
     def test_prompt_does_not_promise_the_unregistered_search_tool(self, settings):
         """`search_docs` 没注册，提示词就不许提它（含中文能力名的等价说法）。"""

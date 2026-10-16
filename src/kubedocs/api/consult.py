@@ -4,12 +4,26 @@
 
     检索后端 ← 复用 app 的 clinic 运行时（同一份 store / embedder，不重复加载模型）
     重点     ← `RetrievalTriage(department_map=load_department_map())` 科室补全表
-    **工具编排** ← `ClinicalToolLoop`：**模型自己决定调哪些工具取证**（检索 / 引用核对…）
+    工具编排 ← `ClinicalToolLoop`：**模型自己决定调哪些工具取证**（检索 / 科室 / 号源 / 挂号提议）
     主判     ← `ClinicalReasoner` + `LiteLLMAdapter` + `BudgetedClient`（**与 CLI/eval 共用同一本日预算账**）
     急诊     ← **模型按「病症 + 严重程度」判出的 `red_flags`**（`system.md` R1）
-    挂号     ← `default_registry(booking_backend=BookingService(MockAppointmentProvider()))`
+    号源     ← `PgAppointmentProvider`（`booking` schema）；连不上时降级为进程内 Mock
+    挂号     ← `PendingBookings`（待确认单）+ 本模块三个写端点（**模型没有写权限**）
     会话     ← 进程内 `IntakeState` + 对话上文（多轮采问的状态属于会话层，不属于流程）
-    就诊记录 ← `PgPersistence(settings.database_url)`（患者 / 就诊 / 消息，落 Postgres 的 `clinical` schema）
+    就诊记录 ← `PgPersistence(settings.database_url)`（患者/就诊/消息/挂号关联，落 `clinical` schema）
+
+## 挂号：模型提议，患者点确认，服务端执行
+
+写操作**只由服务端执行**，模型这一侧只能读：
+
+| 谁 | 能做什么 | 走哪条路 |
+|---|---|---|
+| 模型 | 列科室 / 查号源 / 看放号窗口 / 查本人已挂的号 / **提议**一张待确认单 | 工具循环（`propose_booking` 只读） |
+| 患者 | **点确认**才真的取号；点退号才真的退号 | `POST /consult/booking/confirm`、`POST /consult/booking/cancel` |
+| 前端 | 渲染服务端给的卡片，**不能**自己拼科室/日期/费用 | 响应里的 `pending_action` / `appointments` |
+
+确认请求只带 `proposal_id`——科室、日期、时段、挂号费都取自服务端那张单子。
+待确认单**一次性消费**（双击重放只会成功一次）、15 分钟过期、进程内存储（见 `pending.py`）。
 
 ## ⚠️ 急诊红线在本路径上**不是** `RiskGuard`（与图路径相反）
 
@@ -61,11 +75,13 @@ from kubedocs.clinical.contracts import ClinicalAssessment
 from kubedocs.clinical.intake import IntakeState
 from kubedocs.clinical.persistence import (
     DEFAULT_ENCOUNTER_LIMIT,
+    BookingLink,
     EncounterRecord,
     NoopPersistence,
     PgPersistence,
 )
 from kubedocs.clinical.pipeline import ClinicalPipeline, ClinicalTurn
+from kubedocs.domains.clinic.pending import PendingBookings
 from kubedocs.observability import current_trace_id, span, span_attrs
 
 logger = logging.getLogger(__name__)
@@ -126,6 +142,27 @@ class ResetRequest(BaseModel):
     session_id: str = Field(default="", max_length=128)
 
 
+class ConfirmBookingRequest(BaseModel):
+    """确认一张待确认的挂号单（**用户点了按钮**才发这个请求）。
+
+    只带 `proposal_id`，**不带科室/日期/时段/费用**：那些参数留在服务端那张单子上。
+    若让前端回传它们，界面就成了价格的真相源——改一个数字就能少付 5 块钱。
+    """
+
+    proposal_id: str = Field(min_length=1, max_length=64)
+    session_id: str = Field(default="", max_length=128)
+    patient_id: str = Field(default="anon", max_length=128)
+    patient_name: str = Field(default="", max_length=32)
+
+
+class CancelBookingRequest(BaseModel):
+    """退号。凭据号 + 就诊人——归属在号源层核对（只有本人能退自己的号）。"""
+
+    ticket_no: str = Field(min_length=1, max_length=32)
+    session_id: str = Field(default="", max_length=128)
+    patient_id: str = Field(default="anon", max_length=128)
+
+
 # ===========================================================================
 # 运行期：管线 + 会话
 # ===========================================================================
@@ -140,6 +177,10 @@ class _Session:
     重跑一遍判断，**同一个病例可能问出另一个科室**。`MAX_HISTORY_TURNS` 只是上界——
     不设上界等于每次调用都把整段对话重新计费。
     """
+
+    last_encounter_id: str = ""
+    """最近一轮落库的就诊记录主键。挂号关联要挂到**具体哪次就诊**上，而按钮是异步点的，
+    所以这个值必须由会话记住——不能指望确认请求里带着它。"""
 
     def remember(self, question: str, turn: Any) -> None:
         """把这一轮记进上文。
@@ -160,6 +201,14 @@ class _Session:
             del self.history[: len(self.history) - keep]
 
 
+def build_booking_service(settings: Any) -> Any:
+    """号源服务的构造点（实现见 `domains.clinic.assembly`）。**保留这个转发**是为了让
+    `/consult` 的调用点不必知道号源装配在哪个模块；真正的逻辑只有一份。"""
+    from kubedocs.domains.clinic.assembly import build_booking_service as _build
+
+    return _build(settings)
+
+
 class ConsultRuntime:
     """装配 `ClinicalPipeline` 并持有会话状态。**每个 app 一份**（闭包缓存）。
 
@@ -167,20 +216,58 @@ class ConsultRuntime:
       - `.settings`（clinic 域的 Settings，用于 LLM/预算配置）
       - `.retriever()`（可能返回 `None`——索引没建好时）
     故意不 import `api.app`：那会形成循环导入，也会让本模块无法单测。
+
+    `booking_provider` 与 `pending` 是**跨路由共享**的接缝：`/consult` 与 `/chat`
+    必须用同一个号源服务与同一份待确认单，否则"在问诊页提议、在对话页确认"会两边都对不上。
+    它们由 `create_app` 建好挂在 `app.state` 上再传进来；不传就各自惰性构造（单测用）。
     """
 
-    def __init__(self, runtime: Any, *, pipeline: Any = None, store: Any = None) -> None:
+    def __init__(
+        self,
+        runtime: Any,
+        *,
+        pipeline: Any = None,
+        store: Any = None,
+        pending: PendingBookings | None = None,
+        booking_provider: Callable[[], Any] | None = None,
+    ) -> None:
         self._runtime = runtime
         # 测试接缝：允许直接塞一个现成管线，从而不必加载嵌入器/语料/密钥。
         # 生产路径不传，走下面的惰性装配。
         self._pipeline: Any = pipeline
         # 存储同样可以注入（测试接缝）：不注入就按 settings 惰性构造真库。
         self._store: Any = store
+        # 待确认挂号单：**进程内**、一次性消费（理由见 `pending.py`）。它不需要惰性构造，
+        # 建一个空字典的成本可以忽略。
+        self._pending = pending if pending is not None else PendingBookings()
+        self._booking_provider = booking_provider
+        self._booking: Any = None
         # RLock 而不是 Lock：`pipeline()` 持锁时会调 `_build()`，后者要取 store（同一把锁），
         # 用普通 Lock 会在第一次请求上自锁死。
         self._lock = threading.RLock()
         self._sessions: OrderedDict[str, _Session] = OrderedDict()
         self._sessions_lock = threading.Lock()
+
+    # ---------------------------------------------------------------- 号源
+    def pending(self) -> PendingBookings:
+        """待确认挂号单的存储（工具层与确认端点共用同一份）。"""
+        return self._pending
+
+    def booking(self) -> Any:
+        """号源服务（`BookingService`），惰性构造一次并缓存。
+
+        `booking_provider` 由 `create_app` 注入时**直接沿用**（不做二次包装）：
+        `/chat` 与 `/consult` 拿到的必须是同一个对象，否则号源库（连接池）会被建两遍。
+        """
+        with self._lock:
+            if self._booking is None:
+                if self._booking_provider is not None:
+                    self._booking = self._booking_provider()
+                else:
+                    from kubedocs.domains.clinic.assembly import build_booking_service
+
+                    self._booking = build_booking_service(getattr(self._runtime, "settings", None))
+            return self._booking
 
     # ---------------------------------------------------------------- 存储
     def store(self) -> Any:
@@ -258,7 +345,14 @@ class ConsultRuntime:
         # 实际上 R3「检索不到就不给」被架空了。
         from kubedocs.agent.bootstrap import register_domain_tools
 
-        register_domain_tools("clinic", service=self._booking_backend(), retriever=retriever)
+        register_domain_tools(
+            "clinic",
+            service=self.booking(),
+            retriever=retriever,
+            # 没有 `pending` 就不会注册 `propose_booking`，模型也就没法发起挂号——
+            # 挂号的入口是"提议一张待确认单"，不是"直接取号"。
+            pending=self._pending,
+        )
         reasoner = ClinicalReasoner(LiteLLMAdapter(BudgetedClient(LiteLLMClient(settings), budget)))
         # **工具循环**：模型自己决定调哪些模块取证（架构决定：底层约束为大模型）。
         # 用同一个 BudgetedClient ⇒ 循环里每一次调用都过同一本日预算账。
@@ -281,12 +375,6 @@ class ConsultRuntime:
             store=self.store(),
             top_k=10,
         )
-
-    def _booking_backend(self) -> Any:
-        from kubedocs.domains.clinic.booking import BookingService
-        from kubedocs.domains.clinic.mock import MockAppointmentProvider
-
-        return BookingService(MockAppointmentProvider())
 
     # ---------------------------------------------------------------- 会话
     def _session(self, session_id: str) -> _Session:
@@ -331,10 +419,95 @@ class ConsultRuntime:
             patient_id=patient_id,
         )
         sess.turns += 1
+        sess.last_encounter_id = str(getattr(turn, "encounter_id", "") or "")
         # 记住这一轮：下一轮追问（"那该挂哪个科"）要在上文里看到本轮结论
         sess.remember(question, turn)
         turn_typed: ClinicalTurn = turn
         return turn_typed
+
+    # ---------------------------------------------------------------- 挂号
+    def confirm_booking(
+        self, *, session_id: str, proposal_id: str, patient_id: str, patient_name: str = ""
+    ) -> dict[str, Any]:
+        """执行一张待确认挂号单。**这是本仓库唯一的挂号写入口**。
+
+        顺序刻意如此：
+
+        1. `take()` 先取出单子——**一次性**，所以双击/重放只会有一张单子生效；
+        2. 再用单子上的参数取号（号源层用一句条件更新占号，并发不超卖）；
+        3. 最后写挂号关联（就诊 → 号，单向）。关联写失败**不回滚挂号**：号已经挂出去了，
+           退掉它比少一条关联更糟。失败留 warning，`/consult/status` 能看到关联行数。
+        """
+        from kubedocs.domains.clinic.provider import BookingError
+
+        proposal = self._pending.take(proposal_id, patient_id=patient_id)
+        try:
+            ticket = self.booking().book(
+                proposal.department,
+                proposal.patient_id,
+                date=proposal.date,
+                time_slot=proposal.time_slot,
+                patient_name=patient_name or proposal.patient_name,
+            )
+        except BookingError as e:
+            # 科室/时段在提议之后被别人占满、或排班被停诊：这是**可预期**的业务失败，
+            # 端点把它翻成 409 + 一句人话，让界面提示"换一个时段"。
+            raise HTTPException(status_code=409, detail=str(e)) from e
+        self._link_booking(session_id, ticket)
+        return ticket
+
+    def cancel_booking(self, *, session_id: str, ticket_no: str, patient_id: str) -> dict[str, Any]:
+        """退号。归属由号源层核对（只有本人能退自己的号）。"""
+        from kubedocs.domains.clinic.provider import BookingError
+
+        try:
+            result = self.booking().cancel(ticket_no, patient_id)
+        except BookingError as e:
+            raise HTTPException(status_code=409, detail=str(e)) from e
+        store = self.store()
+        sync = getattr(store, "set_booking_status", None)
+        if callable(sync):
+            try:
+                sync(ticket_no, str(result.get("status", "cancelled")))
+            except Exception as e:  # noqa: BLE001 - 关联表只是投影，同步失败不该让退号失败
+                logger.warning("退号后同步挂号关联失败（%s: %s）：号源那边已经退掉了", type(e).__name__, e)
+        del session_id  # 退号不需要会话：凭据号 + 就诊人已经唯一确定了那张单子
+        return result
+
+    def appointments(self, patient_id: str, limit: int = 10) -> list[dict[str, Any]]:
+        """患者本人的挂号记录（新 → 旧）。号源层只按 `patient_id` 过滤，别人的看不见。"""
+        rows = self.booking().my_appointments(patient_id, limit)
+        return [dict(r) for r in rows]
+
+    def _link_booking(self, session_id: str, ticket: dict[str, Any]) -> None:
+        """把"这次就诊挂出了哪张号"写进就诊记录（**单向**关联）。
+
+        目标就诊 = **本会话最近一轮**。挂号按钮是异步点的，请求里不可能带着
+        `encounter_id`；而"刚才那轮问诊挂的号"正是唯一有意义的归属。
+        会话不存在（例如患者直接调端点、没走问诊）时 `encounter_id` 留空，
+        关联仍然记下来——号是真的挂出去了，不该因为找不到就诊行就丢掉这条事实。
+        """
+        with self._sessions_lock:
+            sess = self._sessions.get(session_id or "anon")
+            encounter_id = sess.last_encounter_id if sess else ""
+        store = self.store()
+        add = getattr(store, "add_booking", None)
+        if not callable(add):
+            return
+        try:
+            add(
+                BookingLink(
+                    ticket_no=str(ticket.get("ticket_no", "")),
+                    encounter_id=encounter_id,
+                    department=str(ticket.get("department", "")),
+                    date=str(ticket.get("date", "")),
+                    time_slot=str(ticket.get("time", "")),
+                    fee=int(ticket.get("fee") or 0),
+                    status=str(ticket.get("status", "")),
+                )
+            )
+        except Exception as e:  # noqa: BLE001 - 号已经挂出去了，少一条关联不能反过来退号
+            logger.warning("挂号关联写入失败（%s: %s）：号已挂出，关联缺失", type(e).__name__, e)
 
 
 # ===========================================================================
@@ -360,6 +533,30 @@ def _assessment_payload(a: ClinicalAssessment | None) -> dict[str, Any]:
     }
 
 
+def _booking_cards(tool_calls: Any) -> tuple[dict[str, Any] | None, list[dict[str, Any]]]:
+    """从这一轮的工具调用留档里拣出**待确认挂号单**与**患者已有的挂号记录**。
+
+    卡片的内容来自**工具的结构化结果**，不是模型那段散文。模型可以说得天花乱坠，
+    但界面上"呼吸内科 2026-10-17 上午 35 元"这几个字必然来自服务端写下的那张单子——
+    这是"确认按钮可以被信任"的前提。
+    """
+    pending: dict[str, Any] | None = None
+    appointments: list[dict[str, Any]] = []
+    for call in tool_calls or []:
+        if not isinstance(call, dict):
+            continue
+        result = call.get("result")
+        if not isinstance(result, dict):
+            continue
+        proposal = result.get("proposal")
+        if call.get("name") == "propose_booking" and isinstance(proposal, dict):
+            pending = dict(proposal)
+        rows = result.get("appointments")
+        if call.get("name") == "my_appointments" and isinstance(rows, list):
+            appointments = [dict(r) for r in rows if isinstance(r, dict)]
+    return pending, appointments
+
+
 def to_payload(turn: ClinicalTurn, session_id: str, *, turns: int = 0) -> dict[str, Any]:
     """把一轮产物转成前端契约。三条规则都由产品决定，改动请连同测试一起改：
 
@@ -372,6 +569,9 @@ def to_payload(turn: ClinicalTurn, session_id: str, *, turns: int = 0) -> dict[s
        （后端留档、契约校验、运维排查都要用），但**前端只渲染 `message`**——
        也就是 `patient_summary`；提示词已要求模型把科室、可能方向、检查、用药以及
        急重症都写进那段话里。
+    4. **挂号例外**：`pending_action` / `appointments` 是**可操作**的卡片，前端必须渲染。
+       它们不是"模型的结论"，而是工具的结构化产出（待确认单 / 挂号记录），
+       文案里的科室、日期、费用都来自服务端，模型改不动。
     """
     assessment = turn.assessment
     degraded = bool(turn.degraded)
@@ -382,6 +582,7 @@ def to_payload(turn: ClinicalTurn, session_id: str, *, turns: int = 0) -> dict[s
         word = turn.evidence.red_line.word if turn.evidence and turn.evidence.red_line else "该症状"
         note = RED_LINE_CONFLICT_NOTE.format(word=word)
         message = f"{message}\n\n{note}" if message else note
+    pending_action, appointments = _booking_cards(getattr(turn, "tool_calls", None))
     payload: dict[str, Any] = {
         "session_id": session_id,
         "action": turn.action,
@@ -405,6 +606,11 @@ def to_payload(turn: ClinicalTurn, session_id: str, *, turns: int = 0) -> dict[s
         "keyword_hit_conflict": keyword_hit_conflict,
         # 模型这一轮**自己决定**调用了哪些模块（架构决定的可见落点：工具由模型驱动）
         "tool_calls": list(turn.tool_calls),
+        # 挂号的两张卡片：`pending_action` 需要患者点"确认"才会真的取号；
+        # `appointments` 是患者本人的挂号记录（卡片上带"退号"按钮）。
+        # 两者都由工具结果生成，不由模型那段话生成（见 `_booking_cards`）。
+        "pending_action": pending_action,
+        "appointments": appointments,
         "degraded": turn.degraded,
         "disclaimer": DISCLAIMER,
         "problems": list(turn.problems),
@@ -432,9 +638,26 @@ def to_payload(turn: ClinicalTurn, session_id: str, *, turns: int = 0) -> dict[s
     return payload
 
 
-def _encounter_payload(record: EncounterRecord) -> dict[str, Any]:
+def _booking_payload(link: BookingLink) -> dict[str, Any]:
+    """一条挂号关联的对外形状（读路径）。`status` 是投影，权威在号源库里。"""
+    return {
+        "ticket_no": link.ticket_no,
+        "encounter_id": link.encounter_id,
+        "department": link.department,
+        "date": link.date,
+        "time_slot": link.time_slot,
+        "fee": link.fee,
+        "status": link.status,
+        "created_at": link.created_at,
+    }
+
+
+def _encounter_payload(record: EncounterRecord, bookings: list[BookingLink] | None = None) -> dict[str, Any]:
     """一条就诊记录的对外形状（读路径）。`assessment` 复用 `_assessment_payload`，
     所以写进去的结论与读回来的结论是同一组字段，不会两处漂移。
+
+    `bookings` 是这次就诊挂出的号（**单向**关联）：号源那边不知道就诊记录，
+    而"这次问诊最后挂了哪个科"正是回看时最想知道的一件事。
     """
     return {
         "encounter_id": record.encounter_id,
@@ -444,10 +667,11 @@ def _encounter_payload(record: EncounterRecord) -> dict[str, Any]:
         "created_at": record.created_at,
         "assessment": _assessment_payload(record.assessment),
         "transcript": [dict(m) for m in record.transcript],
+        "bookings": [_booking_payload(b) for b in (bookings or [])],
     }
 
 
-_EMPTY_ROWS: dict[str, int] = {"patients": 0, "encounters": 0, "messages": 0}
+_EMPTY_ROWS: dict[str, int] = {"patients": 0, "encounters": 0, "messages": 0, "bookings": 0}
 
 
 def _store_row_counts(store: Any) -> dict[str, int]:
@@ -475,6 +699,8 @@ def build_consult_router(
     page_path: Path,
     pipeline: Any = None,
     store: Any = None,
+    pending: PendingBookings | None = None,
+    booking_provider: Callable[[], Any] | None = None,
 ) -> APIRouter:
     """构造 `/consult` 路由。
 
@@ -482,18 +708,33 @@ def build_consult_router(
     既不 import `app`（避免循环导入），又能复用同一份 store/embedder。
     `pipeline` 与 `store` 是测试接缝：传了就直接用，不装配真管线、也不去碰真实数据目录
     （见 `ConsultRuntime.__init__`）。
+
+    `pending` / `booking_provider` 同样是跨路由共享的接缝：`/chat` 与 `/consult` 必须
+    对着同一个号源服务与同一份待确认单说话（见 `ConsultRuntime`）。
     """
     router = APIRouter(tags=["consult"])
     runtimes: dict[int, ConsultRuntime] = {}
     runtimes_lock = threading.Lock()
 
     def _rt(request: Request) -> ConsultRuntime:
-        key = id(request.app)
+        app = request.app
+        # 优先复用**已经挂在 app.state 上的那一份**：`/chat` 可能先一步把它建出来了
+        # （它也要同一个号源服务）。各建各的会让"问诊页提议、对话页确认"两边对不上。
+        rt = getattr(app.state, "consult_runtime", None)
+        if rt is not None:
+            return rt
         with runtimes_lock:
-            rt = runtimes.get(key)
+            rt = getattr(app.state, "consult_runtime", None)
             if rt is None:
-                rt = ConsultRuntime(runtime_provider(request), pipeline=pipeline, store=store)
-                runtimes[key] = rt
+                rt = ConsultRuntime(
+                    runtime_provider(request),
+                    pipeline=pipeline,
+                    store=store,
+                    pending=pending,
+                    booking_provider=booking_provider,
+                )
+                app.state.consult_runtime = rt
+                runtimes[id(app)] = rt
             return rt
 
     @router.get("/consult", response_class=HTMLResponse)
@@ -538,6 +779,66 @@ def build_consult_router(
         _rt(request).reset(body.session_id)
         return {"ok": True, "session_id": body.session_id}
 
+    # ------------------------------------------------------------------ 挂号
+    @router.post("/consult/booking/confirm")
+    def booking_confirm(request: Request, body: ConfirmBookingRequest) -> dict[str, Any]:
+        """**确认挂号**（界面上的"确认"按钮调这个）。
+
+        这是全仓库唯一的挂号写入口，也是"写操作只由服务端执行"这条原则的落点：
+        模型只能提议（`propose_booking` 是只读的），参数留在服务端那张单子上，
+        前端只回传一个单号。
+
+        业务失败（单子过期 / 号被占满 / 停诊）返回 **409 + 一句人话**；
+        参数本身不合法由 pydantic 拦成 422。两者对界面的处理方式不同：
+        409 要展示那句话并引导改时段，422 是前端 bug。
+        """
+        rt = _rt(request)
+        try:
+            with span("http.consult.booking_confirm", session_id=body.session_id or "anon") as current:
+                ticket = rt.confirm_booking(
+                    session_id=body.session_id,
+                    proposal_id=body.proposal_id,
+                    patient_id=body.patient_id,
+                    patient_name=body.patient_name,
+                )
+                span_attrs(current, department=ticket.get("department", ""), ok=True)
+                trace_id = current_trace_id()
+        except RuntimeError as e:
+            raise HTTPException(status_code=503, detail=str(e)) from e
+        return {
+            "ok": True,
+            "ticket": ticket,
+            "trace_id": trace_id,
+            "message": (
+                f"已为 {ticket.get('department', '')} 取号："
+                f"{ticket.get('date', '')} {ticket.get('time', '')}，"
+                f"凭据号 {ticket.get('ticket_no', '')}，"
+                f"队列号 {ticket.get('queue_no', '')}，挂号费 {ticket.get('fee', 0)} 元。"
+            ),
+        }
+
+    @router.post("/consult/booking/cancel")
+    def booking_cancel(request: Request, body: CancelBookingRequest) -> dict[str, Any]:
+        """退号（挂号卡片上的"退号"按钮调这个）。只有本人能退自己的号。"""
+        rt = _rt(request)
+        result = rt.cancel_booking(
+            session_id=body.session_id,
+            ticket_no=body.ticket_no,
+            patient_id=body.patient_id,
+        )
+        return {"ok": True, "cancelled": result, "message": f"凭据号 {body.ticket_no} 已退号。"}
+
+    @router.get("/consult/appointments")
+    def consult_appointments(
+        request: Request,
+        patient_id: str = Query(default="anon", max_length=128),
+        limit: int = Query(default=10, ge=1, le=50),
+    ) -> dict[str, Any]:
+        """患者本人的挂号记录。**归属不是认证**，与 `GET /consult/encounters` 同一套取舍：
+        单机/内网可信部署由网关兜住，多用户场景必须在网关限制可读的 `patient_id`。"""
+        rows = _rt(request).appointments(patient_id, limit)
+        return {"patient_id": patient_id, "count": len(rows), "appointments": rows}
+
     @router.get("/consult/encounters")
     def consult_encounters(
         request: Request,
@@ -555,6 +856,10 @@ def build_consult_router(
         store = _rt(request).store()
         try:
             records = store.list_encounters(patient_id, limit=limit)
+            # 挂号关联一次取回（不是每条就诊查一次）：这是"这次问诊挂出了哪张号"的
+            # 唯一可见落点，`booking.appointments` 那边不知道就诊记录的存在。
+            many = getattr(store, "list_bookings_many", None)
+            links = many([r.encounter_id for r in records]) if callable(many) else {}
         except Exception as e:  # noqa: BLE001 - 库坏了是可预期的运维故障 ⇒ 503 + 原因
             logger.warning("读取就诊记录失败：%s: %s", type(e).__name__, e)
             raise HTTPException(503, detail=f"就诊记录不可读：{type(e).__name__}: {e}") from e
@@ -563,7 +868,7 @@ def build_consult_router(
             "limit": limit,
             "count": len(records),
             "persistence_backend": type(store).__name__,
-            "encounters": [_encounter_payload(r) for r in records],
+            "encounters": [_encounter_payload(r, links.get(r.encounter_id, [])) for r in records],
         }
 
     @router.get("/consult/status")
@@ -595,16 +900,26 @@ def build_consult_router(
             "persistence_path": str(getattr(store, "location", "")),
             "persistence_rows": _store_row_counts(store),
             "persistence_note": (
-                "就诊记录（患者/就诊/消息）已落 Postgres（`clinical` schema）；"
+                "就诊记录（患者/就诊/消息/**挂号关联**）已落 Postgres（`clinical` schema）；"
                 "备份 / PITR / 权限走数据库既有机制。"
-                "会话状态与号源仍是进程内，重启即丢。"
+                "会话状态与待确认挂号单仍是进程内，重启即丢。"
+            ),
+            # 号源：默认 Postgres（跨重启、跨副本），连不上时降级为进程内 Mock。
+            "booking_backend": type(getattr(rt.booking(), "provider", None)).__name__,
+            "pending_bookings": rt.pending().count(),
+            "pending_note": (
+                "待确认挂号单只在内存里且**一次性消费**（15 分钟过期）；"
+                "确认与退号都走 `/consult/booking/*`，模型拿不到任何写工具"
             ),
             "emergency_flag": (
                 "只由模型判出的 red_flags/urgency 决定（且该结论必须出自模型）；"
                 "关键词表已退出判断链，命中只在对话里留一句不一致提示，不打横幅"
             ),
             "redline_source": "大模型按「病症 + 严重程度」判断（system.md R1）；关键词表不参与",
-            "ui_contract": "前端只渲染 message 与急诊横幅；结构化字段仅供后端留档",
+            "ui_contract": (
+                "前端渲染 message、急诊横幅，以及 `pending_action` / `appointments` 两类挂号卡片"
+                "（卡片内容来自服务端，前端不自己拼）；其余结构化字段仅供后端留档"
+            ),
             # 前端开场白从这里取，避免在 HTML 里写第二份免责声明
             "disclaimer": DISCLAIMER,
         }

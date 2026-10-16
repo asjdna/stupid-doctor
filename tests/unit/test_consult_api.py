@@ -381,7 +381,7 @@ def test_status_endpoint_does_not_build_the_pipeline() -> None:
     assert body["disclaimer"] == DISCLAIMER  # 前端开场白从这里取，页面里不写第二份
     # 没有 settings（假 runtime）⇒ 不落盘：如实报 Noop，而不是假装有库
     assert body["persistence_backend"] == "NoopPersistence"
-    assert body["persistence_rows"] == {"patients": 0, "encounters": 0, "messages": 0}
+    assert body["persistence_rows"] == {"patients": 0, "encounters": 0, "messages": 0, "bookings": 0}
     assert rt.pipeline.__self__ is rt  # 静默：避免"未使用变量"告警同时确认绑定正确
 
 
@@ -411,8 +411,12 @@ class _StubRetriever:
 class _StubLoop:
     """最小工具循环替身：回一个合法契约 JSON（医学逻辑不在这里测）。"""
 
-    def run(self, *, system: str, question: str, intake: Any, history: Any = None) -> Any:
-        del system, question, intake, history
+    def run(
+        self, *, system: str, question: str, intake: Any, history: Any = None, context: Any = None
+    ) -> Any:
+        # `context` 是管线注入的环境参数（`patient_id`）。签名必须与真实循环一致，
+        # 否则待测路径会 TypeError 并静默降级，"验证答复"就变成了"验证降级"。
+        del system, question, intake, history, context
         text = json.dumps(
             {
                 "urgency": "routine",
@@ -476,7 +480,7 @@ def test_consult_writes_a_record_that_encounters_reads_back(client_factory: Any,
         # 运维可见性：状态端点能看到行数真的在涨（会话状态仍是内存态，如实说明）
         status = c.get("/consult/status").json()
         assert status["persistence_backend"] == "PgPersistence"
-        assert status["persistence_rows"] == {"patients": 1, "encounters": 1, "messages": 2}
+        assert status["persistence_rows"] == {"patients": 1, "encounters": 1, "messages": 2, "bookings": 0}
         # 落点描述是 `schema@脱敏 DSN`：说清落在哪，口令不回显
         assert status["persistence_path"].startswith(f"{pg_schema}@")
         assert "***" in status["persistence_path"]
@@ -539,7 +543,7 @@ def test_unreachable_database_degrades_to_noop_instead_of_failing(caplog: Any) -
     """**核心取舍**：Postgres 不可达时 `/consult` 必须照常可用，只是这轮不留档。
 
     用一个**解析不了的主机名**（`.invalid` 是保留后缀）：与"防火墙丢包"同样是"库不可达"，
-    但它立刻失败——换成 `127.0.0.1:1` 会白等满 10 秒连接超时，把单测拖慢。
+    但它立刻失败——换成 127.0.0.1 的 1 号端口 会白等满 10 秒连接超时，把单测拖慢。
     """
 
     class _BadDsn:
@@ -552,7 +556,7 @@ def test_unreachable_database_degrades_to_noop_instead_of_failing(caplog: Any) -
         store = ConsultRuntime(_BadDsn()).store()
 
     assert isinstance(store, NoopPersistence), "连不上库就该降级，而不是让 /consult 起不来"
-    assert store.counts() == {"patients": 0, "encounters": 0, "messages": 0}
+    assert store.counts() == {"patients": 0, "encounters": 0, "messages": 0, "bookings": 0}
     assert any("不可用" in r.message for r in caplog.records), "降级必须留痕（warning）"
 
 

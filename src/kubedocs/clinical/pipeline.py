@@ -146,7 +146,7 @@ class ClinicalPipeline:
             guard=self._guard,
             triage=self._triage,
         )
-        turn = self._tool_loop_turn(question, intake, evidence, history)
+        turn = self._tool_loop_turn(question, intake, evidence, history, patient_id=patient_id)
         # 三条返回路径（正常/工具循环失败/输出不合契约）都从这里出去，所以主键在这里统一生成。
         turn.encounter_id = uuid4().hex
         self._persist(question, history, patient_id, turn)
@@ -211,6 +211,8 @@ class ClinicalPipeline:
         intake: IntakeState,
         fallback_evidence: EvidenceBundle,
         history: list[dict[str, Any]] | None = None,
+        *,
+        patient_id: str = "anon",
     ) -> ClinicalTurn:
         """让模型自己取证，再把它的最终答复按契约解析。
 
@@ -218,13 +220,22 @@ class ClinicalPipeline:
         关键词命中（仅用于"模型是否漏了急症"的留痕与降级提示）
         和分诊结果（降级时当科室兜底）。**它的知识条目不进模型上下文**——
         否则"模型自己决定要不要检索"就名存实亡了。
+
+        `patient_id` 经 `context=` 注入工具执行体：查"我的挂号"、建待确认挂号单都要知道
+        这是谁，而这个值是**服务端**给的，不进工具 schema，模型伪造不了。
         """
         from kubedocs.clinical.contracts import ClinicalAssessment, enforce
         from kubedocs.clinical.prompts import prompt_version, system_prompt
 
         loop = self._tool_loop
         try:
-            result = loop.run(system=system_prompt(), question=question, intake=intake, history=history)
+            result = loop.run(
+                system=system_prompt(),
+                question=question,
+                intake=intake,
+                history=history,
+                context={"patient_id": patient_id},
+            )
         except Exception as e:  # noqa: BLE001 - 工具循环失败要退回到降级产物，不崩对话
             logger.warning("工具循环失败，走降级：%s: %s", type(e).__name__, e)
             degraded_evidence = fallback_evidence.model_copy(
@@ -281,7 +292,9 @@ class ClinicalPipeline:
             assessment=assessment,
             evidence=evidence,
             problems=problems,
-            tool_calls=[{"name": c.name, "ok": c.ok, "summary": c.summary} for c in result.calls],
+            tool_calls=[
+                {"name": c.name, "ok": c.ok, "summary": c.summary, "result": c.result} for c in result.calls
+            ],
             prompt_version=prompt_version(),
             red_line_positive=evidence.red_line_positive,
             intake=intake,
