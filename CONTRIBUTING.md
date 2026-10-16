@@ -79,12 +79,31 @@ python scripts/ci_local.py
 评测口径的分层与拒绝比较逻辑定义在 `docs/EVALUATION.md`。
 调整口径时请同时更新基线（`eval --write-baseline`），并在 PR 里说明为什么旧基线不再适用。
 
-clinic 域的门限分两处，改哪一处都要在 PR 里说明理由：
+clinic 域没有可调的门限：指标是记录，参考目标（召回 100% / 误报率 ≤20% / 分诊 ≥60%）只是
+「差多远」的参照，不判通过/不通过。**要让某个指标变好，只能真的改实现**（提示词、检索、
+用例集），改指标不是改门限。
 
-- **规则臂**（`evaluation/clinic.py`）：确定性的，误报率与**冻结基线**比较，靠重建基线更新；
-- **LLM 臂**（`evaluation/clinic_llm.py` 的 `LLM_REDLINE_MIN_RECALL` /
-  `LLM_FALSE_POSITIVE_LIMIT` / `LLM_TRIAGE_MIN_ACCURACY`）：写死的常量，不与基线比较
-  ——模型不是确定性的。改常量等于改闸门，不要为了让某次运行变绿而改。
+改**安全资产**要留痕。安全资产指：提示词（`src/kubedocs/clinical/prompts/system.md`）、
+危险信号词表（`src/kubedocs/domains/clinic/redline.py`）、症状词表
+（`src/kubedocs/domains/clinic/data/symptom_dict.py`）、科室表
+（`src/kubedocs/domains/clinic/data/departments.py`）、金标集
+（`data/eval/clinic_gold.jsonl`）。改了其中任何一个，都必须更新
+`data/governance/safety_assets.json` 里对应条目的 `sha256` / `version` / `rationale`：
+
+```bash
+python scripts/check_governance.py --update-hashes   # 只刷哈希
+```
+
+`--update-hashes` **只刷哈希**：版本号与「为什么改」必须由人写——机器能代填的只有哈希。
+
+新增或删除**确定性安全不变量**要同时改三处，否则 CI 的 `scripts/check_governance.py` 会红：
+
+1. `src/kubedocs/clinical/safety.py` 的 `INVARIANTS`（代码里的唯一来源）；
+2. `data/governance/safety_assets.json` 的 `invariants` 条目（负责人 / 生效日期 / 理由 /
+   `verified_by`）；
+3. `tests/` 里至少一处引用它的 id——没有测试覆盖的不变量等于没人守。
+
+分层与治理机制的完整说明见 [`docs/GOVERNANCE.md`](docs/GOVERNANCE.md)。
 
 ## 提交信息
 
