@@ -45,7 +45,7 @@ from typing import Any, Protocol
 from pydantic import BaseModel, ValidationError
 
 from kubedocs.agent.tools import ToolError, ToolSpec
-from kubedocs.observability import observe_llm_call
+from kubedocs.observability import observe_llm_call, span, span_attrs
 
 TOOL_RESULT_LIMIT = 4000
 """单条工具结果回灌给模型的最大字符数。
@@ -403,12 +403,17 @@ def _execute(
         if denial:
             return ToolCall(name=spec.name, arguments=parsed.arguments, error=denial)
 
+    current = None
     try:
-        result = _invoke(spec, validated, context)
+        with span("tool.call", tool=spec.name) as current:
+            result = _invoke(spec, validated, context)
+            span_attrs(current, ok=True)
     except ToolError as e:
+        span_attrs(current, ok=False, error=type(e).__name__)
         # 可预期的业务失败（号源已满、检索器连不上）：一句人话就够，不要 traceback。
         return ToolCall(name=spec.name, arguments=parsed.arguments, error=f"工具报告失败：{e}")
     except Exception as e:  # noqa: BLE001 - 工具的编程错误同样不该让整轮 traceback
+        span_attrs(current, ok=False, error=type(e).__name__)
         return ToolCall(
             name=spec.name, arguments=parsed.arguments, error=f"工具抛出未预期异常（{type(e).__name__}: {e}）"
         )

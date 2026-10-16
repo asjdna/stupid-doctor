@@ -31,6 +31,7 @@ ALIAS = {
     "sqlite_vec": "sqlite-vec",
     "sentence_transformers": "sentence-transformers",
     "prometheus_client": "prometheus-client",
+    "opentelemetry": "opentelemetry-api",
     "sse_starlette": "sse-starlette",
     "pydantic_settings": "pydantic-settings",
     "dotenv": "python-dotenv",

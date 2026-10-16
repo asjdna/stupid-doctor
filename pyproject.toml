@@ -33,8 +33,17 @@ dependencies = [
     "litellm>=1.50",               # 多供应商路由/重试/回退/成本统计
     "sentence-transformers>=3.0",  # 本地嵌入（可换成 API，见 embedder 抽象）
     "langgraph>=0.2",              # Agent 编排（耐久状态 + 中断）
-    # 可观测：/metrics 用 prometheus_client，有真实分支（见 observability.py）。
+    # 工具对外暴露（MCP = Model Context Protocol）：与 HTTP /tools 同一份工具注册表，
+    # 走标准协议，外部客户端不必为每个工具写适配层。**必须显式声明**——
+    # 它能作为传递依赖被装上，而"能用但没声明"是脆的。
+    "mcp>=1.27",
+    # 可观测：/metrics 用 prometheus_client；OTel 分三个分布包——
+    # `opentelemetry-api` 才是 `observability.py` 里 `import opentelemetry` 的那个包
+    # （sdk 依赖它，但"靠传递依赖装上"是脆的），sdk 建 provider，http exporter 走 OTLP。
     "prometheus-client>=0.20",
+    "opentelemetry-api>=1.25",
+    "opentelemetry-sdk>=1.25",
+    "opentelemetry-exporter-otlp-proto-http>=1.25",
     # 杂项
     "httpx>=0.27",
     "orjson>=3.10",

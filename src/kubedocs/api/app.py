@@ -90,6 +90,8 @@ from kubedocs.observability import (
     configure_logging,
     metrics_payload,
     publish_config_gauges,
+    setup_tracing,
+    span,
 )
 from kubedocs.retrieve.hybrid import HybridRetriever
 from kubedocs.store import Store, StoreError, from_settings
@@ -502,8 +504,9 @@ def _run_turn(app: FastAPI, request: ChatRequest, thread_id: str) -> _ChatOutcom
         react = _get_clinic_react(app)
     except Exception:  # noqa: BLE001 - 装配失败就退图，不能因此让 /chat 挂掉
         logger.exception("装配工具循环失败，回退到确定性图")
-    if react is not None and react.has_llm():
-        return _converse_with_tools(app, request, thread_id)
+    with span("chat.turn", thread_id=thread_id, llm=bool(react is not None and react.has_llm())):
+        if react is not None and react.has_llm():
+            return _converse_with_tools(app, request, thread_id)
 
     agent = _get_clinic_agent(app)
     resuming = agent.pending_question(thread_id=thread_id) is not None
@@ -643,9 +646,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     app = FastAPI(title="kubedocs", version="0.1.0", lifespan=lifespan)
     app.state.settings = cfg
-    # "设了要有反应"的开关在装配点生效（见 observability.py 的说明）：
-    # 日志级别真正设到 root logger。
+    # 两个"设了要有反应"的开关在装配点生效（见 observability.py 的说明）：
+    # 日志级别真正设到 root logger，OTel 真正建 provider。
     configure_logging(cfg)
+    setup_tracing(cfg)
     # 预算上限与"有没有调用过 LLM"无关，必须在装配点就发出去；否则控制台会把一个
     # 真实存在的上限读成 gauge 默认值 0，而 0 的约定是"不限"（假信息）。
     publish_config_gauges(cfg)
@@ -732,7 +736,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 diagnostics={"degraded": [f"索引不可用：{runtime.index_error}"]},
                 note=_index_note(runtime, 0),
             )
-        result = retriever.search(body.q, top_k=body.top_k)
+        with span("http.search", domain=runtime.settings.domain, top_k=body.top_k):
+            result = retriever.search(body.q, top_k=body.top_k)
         hits = [Hit.from_chunk(chunk) for chunk in result.results]
         return SearchResponse(
             query=result.query,

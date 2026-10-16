@@ -137,6 +137,14 @@ class Settings(BaseSettings):
     # 也避免"开关 + 另一处写路径"两处状态不一致。
     clinic_state_db: str = ""
 
+    # ---------- 就诊记录（临床） ----------
+    # 患者 / 就诊 / 消息三张表落在**一个独立的 SQLite 文件**里（见临床 persistence 模块）。
+    # 为什么单独一个文件而不是塞进索引库：**索引是派生物**（语料在、脚本在，随时重建，
+    # 每次 ingest 还会整批改写 FTS/向量表），而**就诊记录不是**——它是原始数据，
+    # 重建不出来，丢了就是真的丢了。放在 index_dir 下只是部署上就近（都在 data/ 里，
+    # 备份一处即可），读写路径与索引完全独立。留空 = <index_dir>/clinic/records.db。
+    clinic_records_db: str = ""
+
     # ---------- 检索 ----------
     top_k: int = Field(default=8, ge=1, le=100)
     rrf_k: int = Field(default=60, ge=1)
@@ -174,8 +182,14 @@ class Settings(BaseSettings):
     llm_unpriced_call_usd: float = Field(default=0.25, ge=0.0)
 
     # ---------- 可观测 ----------
-    # `log_level` 有真实分支（见 `observability.py`）：configure_logging() 设 root logger 级别。
-    # /metrics 与它无关：Prometheus 指标始终可用。
+    # 两个字段都有真实分支（见 `observability.py`）：
+    #   · log_level     -> configure_logging() 设 root logger 级别
+    #   · otel_enable   -> setup_tracing() 建 TracerProvider
+    #   · otel_exporter -> console / otlp 分流（`none` = 不装 processor）
+    # `otel_enable` 默认关：console 导出器会往 stdout 打 span，在测试与库场景里是噪声。
+    # /metrics 与这个开关无关：Prometheus 指标始终可用。
+    otel_enable: bool = False
+    otel_exporter: Literal["console", "otlp", "none"] = "console"
 
     # ---------- 数据 ----------
     corpus_dir: str = "data/raw/k8s-docs"
@@ -245,6 +259,18 @@ class Settings(BaseSettings):
     @property
     def sqlite_path(self) -> Path:
         return self.index_path / "kubedocs.db"
+
+    @property
+    def clinic_records_path(self) -> Path:
+        """就诊记录库的位置（患者 / 就诊 / 消息）。
+
+        默认 `<index_dir>/clinic/records.db`；**不是** `<index_dir>/clinic/kubedocs.db`——
+        那个文件是索引，`ingest` 会重建它（见字段上的说明）。**部署方要备份的是这个文件。**
+        """
+        override = self.clinic_records_db.strip()
+        if override:
+            return self._resolve(override)
+        return self.index_root / "clinic" / "records.db"
 
     @property
     def vector_path(self) -> Path:

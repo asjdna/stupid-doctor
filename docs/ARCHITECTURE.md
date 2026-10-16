@@ -6,7 +6,7 @@
 
 ```
 ┌──────────────────────────────────────────────────────────────────────────┐
-│ 接入层  CLI（kubedocs.cli）· HTTP API（api/）                              │
+│ 接入层  CLI（kubedocs.cli）· HTTP API（api/）· MCP server（mcp/）        │
 ├──────────────────────────────────────────────────────────────────────────┤
 │ 应用层  agent/（工具循环 · 图编排）· clinical/（医疗产品能力）             │
 ├──────────────────────────────────────────────────────────────────────────┤
@@ -158,6 +158,7 @@ src/kubedocs/
   agent/           工具注册表、ReAct 循环、图编排
   clinical/        医疗产品层
   api/             FastAPI 端点数与页面
+  mcp/             MCP server：把同一份工具注册表经 MCP 协议暴露给外部客户端（stdio）
   evaluation/      评测闸门与基线
 ```
 
@@ -166,7 +167,7 @@ src/kubedocs/
 | 想做的事 | 改哪里 |
 |---|---|
 | 加一个域 | 新增域包 + `domains.load_all()` 注册一行 |
-| 加一个工具 | `agent/tools.py` 注册 `ToolSpec` |
+| 加一个工具 | `agent/tools.py` 注册 `ToolSpec`（HTTP `/tools`、Agent 循环与 MCP 清单同时生效） |
 | 加一步服务端编排 | `clinical/orchestration.py` 的工具循环 |
 | 换嵌入模型 | 域包里的 `embedding_model`，然后**重建索引** |
 | 换向量后端 | 配置 `KUBEDOCS_STORE`，实现新后端则加一个 `Store` 子类 |

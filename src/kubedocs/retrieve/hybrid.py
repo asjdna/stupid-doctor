@@ -21,7 +21,7 @@ from dataclasses import dataclass, field
 
 from kubedocs.config import Settings
 from kubedocs.embed import Embedder, EmbedderError
-from kubedocs.observability import RETRIEVE_LATENCY
+from kubedocs.observability import RETRIEVE_LATENCY, span
 from kubedocs.retrieve.fusion import Fused, rrf_fuse
 from kubedocs.retrieve.rerank import CrossEncoderReranker, Reranker, apply_rerank
 from kubedocs.store.base import ChunkHit, Store
@@ -102,7 +102,8 @@ class HybridRetriever:
     # ------------------------------------------------------------------ 单路
     def keyword_channel(self, query: str, limit: int) -> tuple[list[str], dict[str, object]]:
         t0 = time.perf_counter()
-        hits = self.store.keyword_search(query, limit)
+        with span("retrieve.keyword", limit=limit):
+            hits = self.store.keyword_search(query, limit)
         elapsed = time.perf_counter() - t0
         RETRIEVE_LATENCY.labels(channel="bm25").observe(elapsed)
         return [cid for cid, _ in hits], {
@@ -112,26 +113,27 @@ class HybridRetriever:
 
     def dense_channel(self, query: str, limit: int) -> tuple[list[str], dict[str, object], str | None]:
         t0 = time.perf_counter()
-        try:
-            qv = self.embedder.encode([query], is_query=True)[0]
-        except (EmbedderError, RuntimeError, OSError, ValueError) as e:
-            # 嵌入不可用 -> 退化到单路，但把原因带出去
-            return (
-                [],
-                {"n": 0, "ms": round((time.perf_counter() - t0) * 1000, 1)},
-                f"{type(e).__name__}: {e}",
-            )
-        try:
-            hits = self.store.dense_search(qv, limit)
-        except Exception as e:  # noqa: BLE001 - 存储层不可用同样降级，不向上抛
-            # 存储层的失败（sqlite-vec 行数不一致、维度不符等）也必须走同一条降级
-            # 路径：返回空结果并在 diagnostics["degraded"] 里留下原因，交由上层用
-            # 纯全文结果兜底。
-            return (
-                [],
-                {"n": 0, "ms": round((time.perf_counter() - t0) * 1000, 1)},
-                f"{type(e).__name__}: {e}",
-            )
+        with span("retrieve.dense", limit=limit):
+            try:
+                qv = self.embedder.encode([query], is_query=True)[0]
+            except (EmbedderError, RuntimeError, OSError, ValueError) as e:
+                # 嵌入不可用 -> 退化到单路，但把原因带出去
+                return (
+                    [],
+                    {"n": 0, "ms": round((time.perf_counter() - t0) * 1000, 1)},
+                    f"{type(e).__name__}: {e}",
+                )
+            try:
+                hits = self.store.dense_search(qv, limit)
+            except Exception as e:  # noqa: BLE001 - 存储层不可用同样降级，不向上抛
+                # 存储层的失败（sqlite-vec 行数不一致、维度不符等）也必须走同一条降级
+                # 路径：返回空结果并在 diagnostics["degraded"] 里留下原因，交由上层用
+                # 纯全文结果兜底。
+                return (
+                    [],
+                    {"n": 0, "ms": round((time.perf_counter() - t0) * 1000, 1)},
+                    f"{type(e).__name__}: {e}",
+                )
         elapsed = time.perf_counter() - t0
         RETRIEVE_LATENCY.labels(channel="dense").observe(elapsed)
         return (

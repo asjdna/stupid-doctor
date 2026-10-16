@@ -4,8 +4,11 @@
 见 `clinical/orchestration.py`。
 
 ```
-intake ─▶ evidence（仅作降级兜底）─▶ 工具循环（模型自己取证）─▶ 契约化应答
+intake ─▶ evidence（仅作降级兜底）─▶ 工具循环（模型自己取证）─▶ 契约化应答 ─▶ 落库
 ```
+
+**落库在最后一步，而且落库失败不影响应答**：宁可少一条记录，也不能因为落库失败让患者
+拿不到答复（写入异常在这里被记成 warning，见 `_persist`）。
 
 两条硬规则在这里落地，不靠提示词自觉：
 
@@ -31,10 +34,17 @@ import json
 import logging
 from dataclasses import dataclass, field
 from typing import Any, Literal
+from uuid import uuid4
 
 from kubedocs.clinical.contracts import ClinicalAssessment
 from kubedocs.clinical.evidence import EvidenceBundle, Guard, TriageEngine, build_evidence
 from kubedocs.clinical.intake import IntakeState, RuleSlotExtractor, SlotExtractor
+from kubedocs.clinical.persistence import (
+    ClinicalStore,
+    EncounterRecord,
+    NoopPersistence,
+    PatientRecord,
+)
 from kubedocs.clinical.rag import RetrievalBackend
 from kubedocs.clinical.reasoning import ClinicalReasoner, _extract_json
 
@@ -64,6 +74,12 @@ class ClinicalTurn:
     """
     intake: IntakeState = field(default_factory=IntakeState)
 
+    encounter_id: str = ""
+    """这一轮落库的**就诊记录主键**（`uuid4().hex`）。空串 = 没落库（测试接缝/直接调 `_tool_loop_turn`）。
+
+    HTTP 层把它回给前端：前端拿它去 `GET /consult/encounters` 对账"这一轮到底存下来了没有"。
+    """
+
 
 class ClinicalPipeline:
     """把各项能力装到一起。**每个依赖都是注入的**，所以每一段都能被单测替换。
@@ -74,6 +90,10 @@ class ClinicalPipeline:
     `backend` / `guard` / `triage` 仍然要传：它们喂的是**代码预取的降级兜底证据**
     （工具循环失败时的有限结论、红线留痕、科室兜底）。这份证据的知识条目
     **不进模型上下文**，否则"模型自己决定要不要检索"就名存实亡了。
+
+    `store` 是就诊记录的落点（默认 `NoopPersistence` = 不落盘）。真实部署由 HTTP 层注入
+    `SqlitePersistence`；这里注入而不是模块内 new，是为了单测能塞一个会抛异常的假 store
+    去验证"落库失败不打断问诊"。
     """
 
     def __init__(
@@ -84,6 +104,7 @@ class ClinicalPipeline:
         tool_loop: Any,
         guard: Guard | None = None,
         triage: TriageEngine | None = None,
+        store: ClinicalStore | None = None,
         extractor: SlotExtractor | None = None,
         top_k: int = 10,
     ) -> None:
@@ -91,6 +112,7 @@ class ClinicalPipeline:
         self._reasoner = reasoner
         self._guard = guard
         self._triage = triage
+        self._store: ClinicalStore = store or NoopPersistence()
         self._extractor = extractor or RuleSlotExtractor()
         self._tool_loop = tool_loop
         self._top_k = top_k
@@ -101,12 +123,17 @@ class ClinicalPipeline:
         *,
         state: IntakeState | None = None,
         history: list[dict[str, Any]] | None = None,
+        patient_id: str = "anon",
     ) -> ClinicalTurn:
         """推进一轮。`state` 与 `history` 由调用方持有（会话状态属于会话层，不属于流程）。
 
         `history` 是之前的对话（`[{"role","content"}, ...]`）。产品要求"科室/用药
         作为回答之后的可选扩展项、等用户来问"，而**追问要答得一致就必须有上文**——
         否则模型会把判断重跑一遍，同一个病例可能问出另一个科室。
+
+        `patient_id` 决定这一轮**记在谁名下**（默认 `anon` = 匿名）。它是记录的归属，
+        **不是认证**：谁都能声明自己是谁，认证由部署方在网关做（见 SECURITY.md）。
+        它在这里的真实读者就是落库那一步（`_persist`），以及读回路径的按人查询。
         """
         intake = state if state is not None else IntakeState()
         intake.merge(question, self._extractor)
@@ -119,7 +146,64 @@ class ClinicalPipeline:
             guard=self._guard,
             triage=self._triage,
         )
-        return self._tool_loop_turn(question, intake, evidence, history)
+        turn = self._tool_loop_turn(question, intake, evidence, history)
+        # 三条返回路径（正常/工具循环失败/输出不合契约）都从这里出去，所以主键在这里统一生成。
+        turn.encounter_id = uuid4().hex
+        self._persist(question, history, patient_id, turn)
+        return turn
+
+    def _persist(
+        self,
+        question: str,
+        history: list[dict[str, Any]] | None,
+        patient_id: str,
+        turn: ClinicalTurn,
+    ) -> None:
+        """把这一轮写进就诊记录（患者 / 就诊 / 消息）。
+
+        **取舍：宁可少一条记录，也不能因为落库失败让患者拿不到答复。** 写入异常在这里
+        被 `logger.warning` 吞掉，本轮结果照常返回——磁盘满、库被锁、权限不对都是
+        可预期的运维故障，而"已经算出来的答复"不该因为记不下来就丢掉。代价是这种轮次
+        不会出现在 `GET /consult/encounters` 里，所以**失败必须留痕**（warning 里有异常类型）。
+
+        顺序有讲究：**消息先写，再落就诊行**。`save_encounter` 只在"这次就诊还没有任何
+        消息"时才用 `transcript` 播种消息表（见 persistence 的说明），反过来调就会把
+        这段对话上文按轮重复写进消息表——N 轮变 N² 条。
+
+        `institution` 用默认空串：多机构不在本次范围内，列先留着（见 persistence 模块文档）。
+        """
+        try:
+            self._store.upsert_patient(PatientRecord(patient_id=patient_id))
+            self._store.append_message(encounter_id=turn.encounter_id, role="user", text=question)
+            if turn.message:
+                self._store.append_message(
+                    encounter_id=turn.encounter_id, role="assistant", text=turn.message
+                )
+            self._store.save_encounter(
+                EncounterRecord(
+                    encounter_id=turn.encounter_id,
+                    patient_id=patient_id,
+                    chief_complaint=question,
+                    transcript=self._transcript(history, question, turn.message),
+                    assessment=turn.assessment,
+                )
+            )
+        except Exception as e:  # noqa: BLE001 - 落库失败不许影响这一轮的答复
+            logger.warning("就诊记录落库失败，本轮结果照常返回：%s: %s", type(e).__name__, e)
+
+    @staticmethod
+    def _transcript(
+        history: list[dict[str, Any]] | None, question: str, message: str
+    ) -> list[dict[str, str]]:
+        """这一轮用到的对话上文 + 本轮问答（存成普通 dict，不存 pydantic 对象）。"""
+        rows: list[dict[str, str]] = [
+            {"role": str(m.get("role", "user")), "content": str(m.get("content", ""))}
+            for m in (history or [])
+        ]
+        rows.append({"role": "user", "content": question})
+        if message:
+            rows.append({"role": "assistant", "content": message})
+        return rows
 
     def _tool_loop_turn(
         self,

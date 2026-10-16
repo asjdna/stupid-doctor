@@ -31,7 +31,7 @@ from pathlib import Path
 from typing import Any, Protocol
 
 from kubedocs.config import Settings
-from kubedocs.observability import observe_llm_call
+from kubedocs.observability import observe_llm_call, span, span_attrs
 from kubedocs.retrieve.hybrid import HybridRetriever, SearchResult
 from kubedocs.store.base import ChunkHit
 
@@ -574,9 +574,17 @@ class LiteLLMClient:
         fallbacks = self.settings.llm_fallback_list
         if fallbacks:
             kwargs["fallbacks"] = fallbacks
-        resp = litellm.completion(**kwargs)  # type: ignore[attr-defined]
+        with span("llm.call", model=self.model, purpose="text") as current:
+            resp = litellm.completion(**kwargs)  # type: ignore[attr-defined]
+            usage = getattr(resp, "usage", None)
+            # 属性必须在 span 结束**之前**写：结束后再写只会得到
+            # "Setting attribute on ended span" 警告，值也进不去
+            span_attrs(
+                current,
+                prompt_tokens=int(getattr(usage, "prompt_tokens", 0) or 0),
+                completion_tokens=int(getattr(usage, "completion_tokens", 0) or 0),
+            )
         text = (resp.choices[0].message.content or "").strip()
-        usage = getattr(resp, "usage", None)
         cost, priced = 0.0, True
         try:
             raw_cost = litellm.completion_cost(completion_response=resp)  # type: ignore[attr-defined]
@@ -622,7 +630,14 @@ class LiteLLMClient:
         fallbacks = self.settings.llm_fallback_list
         if fallbacks:
             kwargs["fallbacks"] = fallbacks
-        resp = litellm.completion(**kwargs)  # type: ignore[attr-defined]
+        with span("llm.call", model=self.model, purpose="tools") as current:
+            resp = litellm.completion(**kwargs)  # type: ignore[attr-defined]
+            resp_usage = getattr(resp, "usage", None)
+            span_attrs(
+                current,
+                prompt_tokens=int(getattr(resp_usage, "prompt_tokens", 0) or 0),
+                completion_tokens=int(getattr(resp_usage, "completion_tokens", 0) or 0),
+            )
         message = resp.choices[0].message
         calls: list[ToolCallRequest] = []
         for raw_call in getattr(message, "tool_calls", None) or []:

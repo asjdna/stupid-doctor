@@ -99,10 +99,38 @@ docker compose up -d          # → http://127.0.0.1:8080
 GET  /healthz  /metrics  /domains  /tools
 POST /search   /ask      /chat
 GET  /         /console
-GET  /consult  POST /consult  POST /consult/reset  GET /consult/status
+GET  /consult  POST /consult  POST /consult/reset  GET /consult/status  GET /consult/encounters
 ```
 
 `/search` 与 `/ask` 共用请求体：`{"q": "...", "top_k": 8}`。
+`GET /consult/encounters?patient_id=...&limit=20` 读回该患者的最近就诊记录
+（主诉 / 时间 / 结论摘要 / 对话），是"就诊记录真的落库了"的查证入口；
+`POST /consult` 的 `patient_id` 只是记录归属，**不是认证**（见 [`SECURITY.md`](SECURITY.md)）。
+
+### MCP（Claude Desktop / Cursor 等外部客户端）
+
+```bash
+python -m kubedocs.cli mcp --domain k8s_docs                 # 长驻：stdio，一条命令即可用
+python -m kubedocs.cli mcp --domain clinic --allow-side-effects
+```
+
+两个域都暴露**真实工具**：`k8s_docs` → `search_docs` + `check_citations`；`clinic` 再加
+`list_departments` / `get_availability` / `book_appointment`。工具定义与 HTTP `/tools`、
+Agent 工具循环**同源**（`ToolRegistry`），不另写一份。
+
+- **副作用默认不外露**：取号会真实占号，默认不在清单里；开 `--allow-side-effects` 后
+  调用时仍必须传 `confirm: true`，否则拒绝执行。
+- **启动不加载嵌入模型**：列工具不碰索引，第一次真调 `search_docs` 才装配 store + 检索器；
+  索引没建时返回可读的 `isError`（提示先跑 `ingest`），而不是把服务打挂。
+- 域决定嵌入模型与维度（clinic 中文 512 维 / k8s_docs 英文 384 维），不要跨域共用索引。
+
+客户端配置（stdio，`command` 指向本仓库 venv 里的 python）：
+
+```json
+{"mcpServers": {"kubedocs": {
+  "command": "C:/path/to/kubedocs/.venv/Scripts/python.exe",
+  "args": ["-m", "kubedocs", "mcp", "--domain", "k8s_docs"]}}}
+```
 
 ## 架构
 
@@ -128,6 +156,7 @@ GET  /consult  POST /consult  POST /consult/reset  GET /consult/status
 | Agent | `agent/` | 工具注册表、ReAct 循环、图编排（LangGraph） |
 | 医疗产品层 | `clinical/` | 契约、分诊、证据、采问、提示词、工具编排、挂号 |
 | API | `api/` | FastAPI 端点与静态页面 |
+| MCP | `mcp/` | 把同一份工具注册表经 MCP 协议（stdio）暴露给外部客户端 |
 | 观测 | `observability.py` | Prometheus 指标 |
 
 ### 一次问诊的流程
@@ -238,6 +267,7 @@ python -m kubedocs.cli eval --gate           # 之后每次回归检查（指标
 | `KUBEDOCS_LLM_DAILY_BUDGET_USD` | `2.0` | 日花费上限，账本落在 `data/index/llm_spend.json` |
 | `KUBEDOCS_EMBEDDING_PROVIDER` | `bge` | `hashing` 用于不下载模型的冒烟测试 |
 | `KUBEDOCS_HF_ENDPOINT` | — | 拉模型时的镜像端点（受限网络下有用） |
+| `KUBEDOCS_CLINIC_RECORDS_DB` | `<index_dir>/clinic/records.db` | 就诊记录库（患者/就诊/消息）。**要备份的是这个文件** |
 
 ## 目录结构
 
@@ -250,6 +280,7 @@ src/kubedocs/
   agent/        # 工具注册表、ReAct 循环、图编排
   clinical/     # 契约 · 分诊 · 证据 · 采问 · 提示词 · 工具编排
   api/          # FastAPI 端点与页面
+  mcp/          # MCP server（stdio）：把工具注册表暴露给外部 MCP 客户端
   evaluation/   # 评测闸门与基线
 docs/           # 架构、评测、设计决策
 scripts/        # 摄取、评测、运维脚本（各脚本内 --help 有说明）
@@ -260,7 +291,7 @@ tests/          # 单元测试
 
 - **加一个域**：新增一个域包（语料路径、嵌入模型、检索器、工具），在 `domains.load_all()` 注册一行。
 - **加一个工具**：在 `agent/tools.py` 的 `ToolRegistry` 注册一个 `ToolSpec`（含"什么时候不该用"）。
-  同一个注册表同时供给 HTTP 端点与 Agent 循环，不写第二份定义。
+  同一个注册表同时供给 HTTP 端点、Agent 循环与 MCP server（`kubedocs mcp`），不写第二份定义。
 - **加一步编排**：需要在服务端固定顺序里插入一步（采问、取证、判定、落库）时，改
   `clinical/orchestration.py` 的工具循环，而不是在提示词里堆约束。
 - **换检索/存储后端**：实现 `Store` 或重排接口，在配置里切换即可。

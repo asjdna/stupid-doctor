@@ -389,17 +389,45 @@ def cmd_serve(args: argparse.Namespace) -> int:
     import uvicorn
 
     from kubedocs.api.app import create_app
+    from kubedocs.observability import setup_tracing
 
     settings = make_settings(args)
+    tracer = setup_tracing(settings)
     app = create_app(settings)
     host = args.host or "127.0.0.1"
     port = int(args.port or settings.api_port)
     print(f"服务地址：http://{host}:{port}")
     print(f"域：{settings.domain}    索引：{settings.sqlite_path}")
-    print(f"可观测：日志级别 {settings.log_level}／指标 /metrics")
+    print(
+        f"可观测：日志级别 {settings.log_level}／指标 /metrics／"
+        f"OTel {settings.otel_exporter if tracer else '未启用'}"
+    )
     print("首页（前端演示）：/    接口文档：/docs")
     uvicorn.run(app, host=host, port=port, log_level=(args.log_level or "info").lower())
     return EXIT_OK
+
+
+# --------------------------------------------------------------------------- mcp
+def cmd_mcp(args: argparse.Namespace) -> int:
+    """把工具经 MCP 协议（stdio）暴露给外部客户端，阻塞到客户端断开。
+
+    **只是转调**：参数解析在 `kubedocs.mcp.server.main`，工具装配与协议细节也在那里——
+    CLI 这边多写一份装配，就会多出一个"CLI 能列的工具有 MCP 没有"的机会。
+    传 `settings` 而不是让 MCP 层自己再造一份配置：`--index-dir` / `--provider` /
+    `--hf-offline` 这些全局参数已经在这里解析好了，域自报的嵌入模型与维度也由
+    `make_settings` 套好（clinic 512 维中文模型、k8s_docs 384 维英文模型，不能混用）。
+
+    注意 stdout：MCP 的 stdio 传输把它当协议通道，所以这条命令**不往 stdout 写任何人类可读文本**
+    （启动信息走 MCP 层自己的日志、收尾计时在 `main` 里改道 stderr）。
+    """
+    from kubedocs.mcp.server import main as mcp_main
+
+    return mcp_main(
+        [],
+        settings=make_settings(args),
+        domain=args.domain or "",
+        allow_side_effects=args.allow_side_effects,
+    )
 
 
 # --------------------------------------------------------------------------- 解析
@@ -446,7 +474,8 @@ def build_parser() -> argparse.ArgumentParser:
             "  2) python -m kubedocs.cli ingest           # 建索引\n"
             '  3) python -m kubedocs.cli search "..."     # 检索\n'
             '  4) python -m kubedocs.cli ask "..."        # 带引用回答（需 LLM 密钥）\n'
-            "  5) python -m kubedocs.cli eval --gate      # 评测并卡闸门\n\n"
+            "  5) python -m kubedocs.cli eval --gate      # 评测并卡闸门\n"
+            "  6) python -m kubedocs.cli mcp --domain k8s_docs   # 以 MCP server 暴露工具（stdio）\n\n"
             "全局参数（--index-dir/--provider 等）放在子命令前后都可以。\n"
         ),
     )
@@ -481,6 +510,30 @@ def build_parser() -> argparse.ArgumentParser:
     psrv.add_argument("--host", default=None, help="监听地址（默认 127.0.0.1）")
     psrv.add_argument("--port", type=int, default=None, help="端口（默认取配置 api_port）")
     psrv.set_defaults(func=cmd_serve)
+
+    pm = sub.add_parser(
+        "mcp",
+        help="把工具经 MCP 协议（stdio）暴露给 Claude Desktop / Cursor 等外部客户端",
+        description=(
+            "把 ToolRegistry 里的工具经 MCP 协议（stdio）暴露出去，长驻到客户端断开。\n"
+            "\n"
+            "两个域都支持：\n"
+            "  --domain k8s_docs   检索 k8s 文档：search_docs + check_citations\n"
+            "  --domain clinic     号源三件套 + search_docs + check_citations\n"
+            "\n"
+            "副作用工具（取号）默认**不暴露**；开 --allow-side-effects 后仍必须传 confirm=true。\n"
+            "启动不加载嵌入模型：只有 search_docs 真被调用时才装配检索器（索引不可用时\n"
+            "返回可读的 isError，而不是把服务打挂）。"
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        parents=[common],
+    )
+    pm.add_argument(
+        "--allow-side-effects",
+        action="store_true",
+        help="同时暴露有副作用的工具（**调用时仍必须显式 confirm=true**）",
+    )
+    pm.set_defaults(func=cmd_mcp)
 
     pt = sub.add_parser("stats", help="索引体检", parents=[common])
     pt.add_argument("--verify", action="store_true", help="顺便做 FTS 一致性自检")
@@ -526,7 +579,14 @@ def main(argv: list[str] | None = None) -> int:
     try:
         rc = int(args.func(args))
     except SystemExit as e:
-        return int(e.code or 0)
+        # `SystemExit.code` 可能是**字符串**（例如域没注册时由内核给出的那句人话）：
+        # 直接 `int()` 会在这里抛出一个看不懂的 ValueError，把真正的原因盖掉。
+        if e.code is None:
+            return EXIT_OK
+        if isinstance(e.code, int):
+            return e.code
+        print(e.code, file=sys.stderr)
+        return EXIT_USER
     except FileNotFoundError as e:
         print(f"找不到文件：{e}", file=sys.stderr)
         return EXIT_PRECONDITION
@@ -542,7 +602,9 @@ def main(argv: list[str] | None = None) -> int:
         # `--json` 的契约是"stdout 上只有一份机器可读的 JSON"，所以这条人类可读的
         # 收尾计时在 `--json` 时改道 stderr。否则 `json.loads` 会因为多出这一行而
         # 整体失败，机器读不到任何东西；search / ask / stats 的 `--json` 分支同理。
-        stream = sys.stderr if getattr(args, "json", False) else sys.stdout
+        # `mcp` 同样改道：那条命令的 stdout 是 MCP 协议通道，多一行文本就会让客户端解析失败。
+        quiet = getattr(args, "json", False) or getattr(args, "cmd", "") == "mcp"
+        stream = sys.stderr if quiet else sys.stdout
         print(f"\n完成，用时 {time.perf_counter() - t0:.1f}s", file=stream)
     return rc
 

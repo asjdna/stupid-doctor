@@ -53,8 +53,11 @@ python scripts/ci_local.py
 在 `agent/tools.py` 注册一个 `ToolSpec`：名称、说明、参数模型、
 **"什么时候不该用"**（必填，它比正向描述更能约束模型）、是否有副作用、执行体。
 
-同一份注册表同时供给 HTTP `/tools` 与 Agent 工具循环，
+同一份注册表同时供给 HTTP `/tools`、Agent 工具循环与 MCP server（`kubedocs mcp`），
 因此**不要另写一份工具定义**。
+
+执行体有两种等价形状（`handler(params)` 收 pydantic 模型，或 `handler(**kwargs)`），
+调用方按签名自动分派（`agent/tool_loop._invoke`，MCP 层复用同一份），选哪种都不会漏。
 
 有副作用的工具默认不暴露；如需暴露，必须同时保证"调用前显式确认"。
 

@@ -19,6 +19,7 @@ import json
 from typing import Any
 
 from kubedocs.config import Settings
+from kubedocs.observability import span, span_attrs
 
 
 class LiteLLMToolCaller:
@@ -60,7 +61,15 @@ class LiteLLMToolCaller:
         if tools:
             kwargs["tools"] = tools
             kwargs["tool_choice"] = "auto"
-        resp = self.litellm.completion(**kwargs)
+        with span("llm.call", model=self.model, purpose="choose") as current:
+            resp = self.litellm.completion(**kwargs)
+            usage = getattr(resp, "usage", None)
+            # 属性在 span 结束前写；结束后写只会得到 warning，值进不去
+            span_attrs(
+                current,
+                prompt_tokens=int(getattr(usage, "prompt_tokens", 0) or 0),
+                completion_tokens=int(getattr(usage, "completion_tokens", 0) or 0),
+            )
         self.calls += 1
         cost, priced = 0.0, True
         try:

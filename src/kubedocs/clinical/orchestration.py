@@ -25,6 +25,7 @@ from typing import Any, Protocol
 
 from kubedocs.clinical.evidence import EvidenceBundle, EvidenceItem
 from kubedocs.clinical.intake import IntakeState
+from kubedocs.observability import span, span_attrs
 
 logger = logging.getLogger(__name__)
 
@@ -156,12 +157,17 @@ class ClinicalToolLoop:
             msg = f"参数不符合 {name} 的 schema：{e}"
             return {"error": msg}, ToolCallRecord(name, arguments, False, msg)
 
+        current = None
         try:
-            result = spec.handler(params)
+            with span("tool.call", tool=name) as current:
+                result = spec.handler(params)
+                span_attrs(current, ok=True)
         except ToolError as e:
+            span_attrs(current, ok=False, error=type(e).__name__)
             msg = f"工具执行失败：{e}"
             return {"error": msg}, ToolCallRecord(name, arguments, False, msg)
         except Exception as e:  # noqa: BLE001 - 工具炸掉不该让整轮问诊挂掉，但必须留痕
+            span_attrs(current, ok=False, error=type(e).__name__)
             logger.warning("工具 %s 抛出未预期异常：%s: %s", name, type(e).__name__, e)
             msg = f"工具内部错误（{type(e).__name__}）：{e}"
             return {"error": msg}, ToolCallRecord(name, arguments, False, msg)

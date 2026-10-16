@@ -9,6 +9,7 @@
     急诊     ← **模型按「病症 + 严重程度」判出的 `red_flags`**（`system.md` R1）
     挂号     ← `default_registry(booking_backend=BookingService(MockAppointmentProvider()))`
     会话     ← 进程内 `IntakeState` + 对话上文（多轮采问的状态属于会话层，不属于流程）
+    就诊记录 ← `SqlitePersistence(settings.clinic_records_path)`（患者 / 就诊 / 消息，**落盘**）
 
 ## ⚠️ 急诊红线在本路径上**不是** `RiskGuard`（与图路径相反）
 
@@ -27,6 +28,11 @@
 
 - 会话状态**在进程内**：单进程内存字典，**重启即丢**，多副本部署下同一 `session_id`
   会落到不同实例；有条数上限（`MAX_SESSIONS`），超出按最久未用淘汰。
+- **就诊记录（患者 / 就诊 / 消息）落在 SQLite 文件里**，重启与多副本共享同一份；
+  `GET /consult/encounters` 就是读它（`POST /consult` 的 `encounter_id` 是那里的主键）。
+  落库失败**不影响本轮答复**（管线记 warning 后继续，见 `clinical/pipeline.py`）。
+- `patient_id` 决定记录挂在谁名下，**不是认证**：调用方可以声明任意值。单机内网可信
+  部署下没问题，多用户场景必须由网关按调用方身份限制可读的 `patient_id`（见 SECURITY.md）。
 - `emergency` = 模型这一轮的 `urgency == "emergency"`（由模型判出的 `red_flags` 推出），
   且 `degraded` 为空——结论来自兜底时不算模型判断，不弹横幅。
 - **关键词红线不参与判断**：`domains.clinic.redline` 的命中既不进提示词、也不影响
@@ -46,13 +52,20 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, HTTPException, Query, Request
 from fastapi.responses import HTMLResponse
 from pydantic import BaseModel, Field
 
 from kubedocs.clinical.contracts import ClinicalAssessment
 from kubedocs.clinical.intake import IntakeState
+from kubedocs.clinical.persistence import (
+    DEFAULT_ENCOUNTER_LIMIT,
+    EncounterRecord,
+    NoopPersistence,
+    SqlitePersistence,
+)
 from kubedocs.clinical.pipeline import ClinicalPipeline, ClinicalTurn
+from kubedocs.observability import current_trace_id, span, span_attrs
 
 logger = logging.getLogger(__name__)
 
@@ -100,6 +113,12 @@ class ConsultRequest(BaseModel):
 
     question: str = Field(min_length=1, max_length=2000)
     session_id: str = Field(default="", max_length=128)
+    patient_id: str = Field(default="anon", max_length=128)
+    """这次就诊**记在谁名下**（默认 `anon` = 匿名）。
+
+    它**不是认证**：谁能读到记录取决于调用方声明了什么。单机 / 内网可信部署下由网关
+    做鉴权；多用户场景必须在那里限制可读的 `patient_id`（见 SECURITY.md）。
+    """
 
 
 class ResetRequest(BaseModel):
@@ -149,14 +168,45 @@ class ConsultRuntime:
     故意不 import `api.app`：那会形成循环导入，也会让本模块无法单测。
     """
 
-    def __init__(self, runtime: Any, *, pipeline: Any = None) -> None:
+    def __init__(self, runtime: Any, *, pipeline: Any = None, store: Any = None) -> None:
         self._runtime = runtime
         # 测试接缝：允许直接塞一个现成管线，从而不必加载嵌入器/语料/密钥。
         # 生产路径不传，走下面的惰性装配。
         self._pipeline: Any = pipeline
-        self._lock = threading.Lock()
+        # 存储同样可以注入（测试接缝）：不注入就按 settings 惰性构造真库。
+        self._store: Any = store
+        # RLock 而不是 Lock：`pipeline()` 持锁时会调 `_build()`，后者要取 store（同一把锁），
+        # 用普通 Lock 会在第一次请求上自锁死。
+        self._lock = threading.RLock()
         self._sessions: OrderedDict[str, _Session] = OrderedDict()
         self._sessions_lock = threading.Lock()
+
+    # ---------------------------------------------------------------- 存储
+    def store(self) -> Any:
+        """就诊记录库（惰性构造一次并缓存）。
+
+        **不触发管线装配**（那会加载嵌入器）：开一个 SQLite 文件 + 建表是毫秒级的，
+        所以 `/consult/status` 与 `GET /consult/encounters` 都能便宜地拿到它。
+        """
+        with self._lock:
+            if self._store is None:
+                self._store = self._build_store()
+            return self._store
+
+    def _build_store(self) -> Any:
+        """按 settings 构造存储。**打不开库也不能让服务起不来**：退回 `NoopPersistence()`
+        并留 warning——索引/模型装不上是致命的，记录库装不上只是"这轮不留档"。
+        """
+        settings = getattr(self._runtime, "settings", None)
+        path = getattr(settings, "clinic_records_path", None)
+        if path is None:
+            # 没有 settings = 测试接缝里的假 runtime：不落盘，也不去碰真实数据目录。
+            return NoopPersistence()
+        try:
+            return SqlitePersistence(path)
+        except Exception as e:  # noqa: BLE001 - 存储不可用不该拖垮整个问诊服务
+            logger.warning("就诊记录库打不开（%s）：本次起不落盘，问诊不受影响：%s", path, e)
+            return NoopPersistence()
 
     # ---------------------------------------------------------------- 装配
     def pipeline(self) -> Any:
@@ -220,6 +270,7 @@ class ConsultRuntime:
             guard=RiskGuard(),
             triage=RetrievalTriage(department_map=dep_map),
             tool_loop=tool_loop,
+            store=self.store(),
             top_k=10,
         )
 
@@ -261,6 +312,7 @@ class ConsultRuntime:
         self,
         session_id: str,
         question: str,
+        patient_id: str = "anon",
     ) -> ClinicalTurn:
         sess = self._session(session_id)
         pipeline = self.pipeline()
@@ -268,6 +320,7 @@ class ConsultRuntime:
             question,
             state=sess.intake,
             history=list(sess.history),
+            patient_id=patient_id,
         )
         sess.turns += 1
         # 记住这一轮：下一轮追问（"那该挂哪个科"）要在上文里看到本轮结论
@@ -325,6 +378,8 @@ def to_payload(turn: ClinicalTurn, session_id: str, *, turns: int = 0) -> dict[s
         "session_id": session_id,
         "action": turn.action,
         "message": message,
+        # 这一轮的就诊记录主键：前端拿它去 GET /consult/encounters 对账（空串 = 没落库）
+        "encounter_id": turn.encounter_id,
         "emergency": model_emergency,
         "emergency_note": EMERGENCY_NOTE if model_emergency else "",
         # 模型自己判出的急重症（可审计：病症 + 严重程度 + 依据）
@@ -369,6 +424,40 @@ def to_payload(turn: ClinicalTurn, session_id: str, *, turns: int = 0) -> dict[s
     return payload
 
 
+def _encounter_payload(record: EncounterRecord) -> dict[str, Any]:
+    """一条就诊记录的对外形状（读路径）。`assessment` 复用 `_assessment_payload`，
+    所以写进去的结论与读回来的结论是同一组字段，不会两处漂移。
+    """
+    return {
+        "encounter_id": record.encounter_id,
+        "patient_id": record.patient_id,
+        "institution": record.institution,  # 保留列：当前恒为空串（多机构不在范围内）
+        "chief_complaint": record.chief_complaint,
+        "created_at": record.created_at,
+        "assessment": _assessment_payload(record.assessment),
+        "transcript": [dict(m) for m in record.transcript],
+    }
+
+
+_EMPTY_ROWS: dict[str, int] = {"patients": 0, "encounters": 0, "messages": 0}
+
+
+def _store_row_counts(store: Any) -> dict[str, int]:
+    """就诊记录三张表的行数（`/consult/status` 用）。
+
+    `counts()` 不在 `ClinicalStore` 协议里（它是运维读数，不是产品能力），所以存储没实现
+    就报零；读取失败也只报零 + warning——**状态端点不该因为存储能力不全而 500**。
+    """
+    fn = getattr(store, "counts", None)
+    if not callable(fn):
+        return dict(_EMPTY_ROWS)
+    try:
+        return dict(fn())
+    except Exception as e:  # noqa: BLE001
+        logger.warning("读取就诊记录行数失败：%s: %s", type(e).__name__, e)
+        return dict(_EMPTY_ROWS)
+
+
 # ===========================================================================
 # 路由
 # ===========================================================================
@@ -377,12 +466,14 @@ def build_consult_router(
     runtime_provider: Callable[[Request], Any],
     page_path: Path,
     pipeline: Any = None,
+    store: Any = None,
 ) -> APIRouter:
     """构造 `/consult` 路由。
 
     `runtime_provider` 由 `create_app` 注入（返回 clinic 域的运行时对象），这样本模块
     既不 import `app`（避免循环导入），又能复用同一份 store/embedder。
-    `pipeline` 是测试接缝：传了就直接用，不装配真管线（见 `ConsultRuntime.__init__`）。
+    `pipeline` 与 `store` 是测试接缝：传了就直接用，不装配真管线、也不去碰真实数据目录
+    （见 `ConsultRuntime.__init__`）。
     """
     router = APIRouter(tags=["consult"])
     runtimes: dict[int, ConsultRuntime] = {}
@@ -393,7 +484,7 @@ def build_consult_router(
         with runtimes_lock:
             rt = runtimes.get(key)
             if rt is None:
-                rt = ConsultRuntime(runtime_provider(request), pipeline=pipeline)
+                rt = ConsultRuntime(runtime_provider(request), pipeline=pipeline, store=store)
                 runtimes[key] = rt
             return rt
 
@@ -407,29 +498,78 @@ def build_consult_router(
     def consult(request: Request, body: ConsultRequest) -> dict[str, Any]:
         rt = _rt(request)
         try:
-            turn = rt.advance(
-                body.session_id,
-                body.question,
-            )
+            # 一次问诊 = 一条 trace：端点开根 span，模型调用与工具执行是它的子 span
+            with span(
+                "http.consult",
+                session_id=body.session_id or "anon",
+                question_chars=len(body.question),
+            ) as current:
+                turn = rt.advance(
+                    body.session_id,
+                    body.question,
+                    body.patient_id,
+                )
+                span_attrs(
+                    current,
+                    action=turn.action,
+                    urgency=str(getattr(turn.assessment, "urgency", "")),
+                )
+                # trace id 必须在 span 结束**之前**取：结束后当前 span 已失效，
+                # 取出来是空串（这正是它一开始为空的bug）。
+                trace_id = current_trace_id()
         except RuntimeError as e:
             # 索引没建好是**可预期的运维状态**，给出可执行的指引而不是 500 堆栈
             raise HTTPException(status_code=503, detail=str(e)) from e
-        return to_payload(turn, body.session_id, turns=rt.session_turns(body.session_id))
+        payload = to_payload(turn, body.session_id, turns=rt.session_turns(body.session_id))
+        # 回写 trace id：日志/前端/评测报告都能用它把这次问诊与追踪对上
+        payload["trace_id"] = trace_id
+        return payload
 
     @router.post("/consult/reset")
     def consult_reset(request: Request, body: ResetRequest) -> dict[str, Any]:
         _rt(request).reset(body.session_id)
         return {"ok": True, "session_id": body.session_id}
 
+    @router.get("/consult/encounters")
+    def consult_encounters(
+        request: Request,
+        patient_id: str = Query(default="anon", max_length=128),
+        limit: int = Query(default=DEFAULT_ENCOUNTER_LIMIT, ge=1, le=100),
+    ) -> dict[str, Any]:
+        """**读回**某患者的最近若干次就诊（新 → 旧）。
+
+        这是"持久化真的在写"的对外证据：`POST /consult` 落的每一轮都能在这里查到，
+        `encounter_id` 与那次响应里回传的完全一致（重启进程后依然查得到）。
+
+        **归属不是认证**：`patient_id` 由调用方声明，本仓库不做认证与授权。
+        单机 / 内网可信部署下由网关兜住；多用户场景必须在那里限制可读的 `patient_id`。
+        """
+        store = _rt(request).store()
+        try:
+            records = store.list_encounters(patient_id, limit=limit)
+        except Exception as e:  # noqa: BLE001 - 库坏了是可预期的运维故障 ⇒ 503 + 原因
+            logger.warning("读取就诊记录失败：%s: %s", type(e).__name__, e)
+            raise HTTPException(503, detail=f"就诊记录不可读：{type(e).__name__}: {e}") from e
+        return {
+            "patient_id": patient_id,
+            "limit": limit,
+            "count": len(records),
+            "persistence_backend": type(store).__name__,
+            "encounters": [_encounter_payload(r) for r in records],
+        }
+
     @router.get("/consult/status")
     def consult_status(request: Request) -> dict[str, Any]:
-        """运维可见性：会话数、管线是否已装配、补全映射表条数。
+        """运维可见性：会话数、管线是否已装配、补全映射表条数、就诊记录落盘情况。
 
         **不触发管线装配**（那会加载嵌入器），所以这个端点便宜、可以随便探。
+        存储会惰性构造（开 SQLite 文件 + 建表，毫秒级），这样 `persistence_rows`
+        是真实读数而不是"还没装配所以显示 0"。
         """
         from kubedocs.clinical.triage import load_department_map
 
         rt = _rt(request)
+        store = rt.store()
         dep_map = load_department_map(min_confidence="high")
         return {
             "sessions": rt.session_count(),
@@ -440,6 +580,14 @@ def build_consult_router(
                 "" if dep_map else "空：data/clinic/department_map.json 缺失 ⇒ 分诊退化为只解析卡片正文"
             ),
             "session_store": "in-process（重启即丢，多副本不共享）",
+            # 就诊记录是**落盘**的：这几行的读数就是"它真的在写"的证明。
+            "persistence_backend": type(store).__name__,
+            "persistence_path": str(getattr(store, "path", "")),
+            "persistence_rows": _store_row_counts(store),
+            "persistence_note": (
+                "就诊记录（患者/就诊/消息）已落 SQLite；**备份那个文件**。"
+                "会话状态与号源仍是进程内，重启即丢。"
+            ),
             "emergency_flag": (
                 "只由模型判出的 red_flags/urgency 决定（且该结论必须出自模型）；"
                 "关键词表已退出判断链，命中只在对话里留一句不一致提示，不打横幅"

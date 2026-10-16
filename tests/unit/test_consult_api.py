@@ -5,10 +5,15 @@
    `emergency_note`——前端只渲染、不判断，两处判断必然会不一致；
 3. 降级要说出来：模型没走通时必须回传 `degraded`，不能把兜底文案伪装成模型结论；
 4. 索引不可用是 503 + 可执行指引，不是 500 堆栈。全部用假管线，不联网、不花钱。
+5. **就诊记录真的落库**：`POST /consult` 之后 `GET /consult/encounters` 能把它读回来
+   （用临时 db 路径），`/consult/status` 能看到行数在涨。
 """
 
 from __future__ import annotations
 
+import json
+import threading
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -32,7 +37,10 @@ from kubedocs.clinical.contracts import (
 )
 from kubedocs.clinical.evidence import EvidenceBundle, EvidenceItem, RedLineSignal
 from kubedocs.clinical.intake import IntakeState
-from kubedocs.clinical.pipeline import ClinicalTurn
+from kubedocs.clinical.persistence import SqlitePersistence
+from kubedocs.clinical.pipeline import ClinicalPipeline, ClinicalTurn
+from kubedocs.clinical.rag import LocalIndexBackend
+from kubedocs.clinical.reasoning import ClinicalReasoner
 
 
 def _assessment(urgency: str = "routine", *, red_flags: bool = False) -> ClinicalAssessment:
@@ -90,7 +98,7 @@ class _Runtime:
 
 @pytest.fixture
 def client_factory(tmp_path: Any) -> Any:
-    def make(pipeline: _FakePipeline | None) -> TestClient:
+    def make(pipeline: _FakePipeline | Any, store: Any = None) -> TestClient:
         page = tmp_path / "consult.html"
         page.write_text("<html>consult page</html>", encoding="utf-8")
         app = FastAPI()
@@ -99,6 +107,7 @@ def client_factory(tmp_path: Any) -> Any:
                 runtime_provider=lambda _req: _Runtime(pipeline),
                 page_path=page,
                 pipeline=pipeline,
+                store=store,
             )
         )
         return TestClient(app)
@@ -238,6 +247,7 @@ class _Turn:
     def __init__(self, *, red_line: bool, urgency: str, degraded: str = "", red_flags: bool = False) -> None:
         self.action = "answer"
         self.message = "m"
+        self.encounter_id = "e1"
         self.assessment = _assessment(urgency, red_flags=red_flags)
         self.evidence = EvidenceBundle(items=[], red_line=RedLineSignal(word="胸痛") if red_line else None)
         self.problems = []
@@ -310,6 +320,12 @@ def test_no_emergency_when_neither_signals() -> None:
     assert p["disclaimer"] == DISCLAIMER
 
 
+def test_payload_carries_the_encounter_id() -> None:
+    """这一轮的就诊记录主键必须回给前端：否则前端无法对账"这一轮到底存下来没有"。"""
+    p = to_payload(_Turn(red_line=False, urgency="routine"), "s")  # type: ignore[arg-type]
+    assert p["encounter_id"] == "e1"
+
+
 def test_status_endpoint_does_not_build_the_pipeline() -> None:
     """状态端点要便宜：不能因为探活就把嵌入器加载起来。"""
     rt = ConsultRuntime(_Runtime(_FakePipeline()))
@@ -325,7 +341,147 @@ def test_status_endpoint_does_not_build_the_pipeline() -> None:
     assert body["sessions"] == 0
     assert "in-process" in body["session_store"]
     assert body["disclaimer"] == DISCLAIMER  # 前端开场白从这里取，页面里不写第二份
+    # 没有 settings（假 runtime）⇒ 不落盘：如实报 Noop，而不是假装有库
+    assert body["persistence_backend"] == "NoopPersistence"
+    assert body["persistence_rows"] == {"patients": 0, "encounters": 0, "messages": 0}
     assert rt.pipeline.__self__ is rt  # 静默：避免"未使用变量"告警同时确认绑定正确
+
+
+# ===========================================================================
+# 就诊记录：POST /consult 真的写进去了，GET /consult/encounters 能读回来
+# ===========================================================================
+class _StubChunk:
+    """一条检索命中（字段与 `retrieve.hybrid.RetrievedChunk` 对齐）。"""
+
+    chunk_id = "c1"
+    doc_id = "d1"
+    ordinal = 0
+    title = "咳嗽"
+    breadcrumb = "呼吸"
+    source_url = "https://example.invalid/x"
+    body = "咳嗽常见于呼吸道感染"
+    score = 1.0
+    ranks: dict[str, int] = {}
+
+
+class _StubRetriever:
+    def search(self, query: str, *, top_k: int | None = None, channels: Any = None) -> Any:
+        del query, top_k, channels
+        return type("_R", (), {"query": "q", "results": [_StubChunk()]})()
+
+
+class _StubLoop:
+    """最小工具循环替身：回一个合法契约 JSON（医学逻辑不在这里测）。"""
+
+    def run(self, *, system: str, question: str, intake: Any, history: Any = None) -> Any:
+        del system, question, intake, history
+        text = json.dumps(
+            {
+                "urgency": "routine",
+                "departments": [{"name": "呼吸内科", "confidence": 0.7}],
+                "patient_summary": "建议到呼吸内科就诊。",
+            },
+            ensure_ascii=False,
+        )
+        return type("_R", (), {"final_text": text, "calls": [], "evidence": EvidenceBundle(items=[])})()
+
+
+class _StubLLM:
+    """只服务降级路径（正常轮次不经过主判）。"""
+
+    def complete(self, system: str, user: str) -> str:
+        del system, user
+        return "{}"
+
+
+def _real_pipeline(store: Any) -> ClinicalPipeline:
+    """真的 `ClinicalPipeline`（检索/模型/工具循环是替身）：**落库这一段必须走真代码**。"""
+    return ClinicalPipeline(
+        backend=LocalIndexBackend(_StubRetriever()),
+        reasoner=ClinicalReasoner(_StubLLM()),
+        tool_loop=_StubLoop(),
+        store=store,
+    )
+
+
+def test_consult_writes_a_record_that_encounters_reads_back(client_factory: Any, tmp_path: Any) -> None:
+    """**"持久化有作用"的证据**：POST 一轮 → GET /consult/encounters 能查到同一条。
+
+    库落在 `tmp_path`，不碰本机 `data/index`（测试不该在生产数据目录里留文件）。
+    """
+    store = SqlitePersistence(tmp_path / "records.db")
+    c = client_factory(_real_pipeline(store), store=store)
+
+    posted = c.post(
+        "/consult", json={"question": "我咳嗽三天了", "session_id": "s1", "patient_id": "p-1"}
+    ).json()
+    assert posted["action"] == "answer"
+    assert posted["encounter_id"], "响应必须回传就诊记录主键，前端才能对账"
+
+    got = c.get("/consult/encounters", params={"patient_id": "p-1"}).json()
+    assert got["count"] == 1
+    assert got["persistence_backend"] == "SqlitePersistence"
+    enc = got["encounters"][0]
+    assert enc["encounter_id"] == posted["encounter_id"]
+    assert enc["chief_complaint"] == "我咳嗽三天了"
+    assert enc["created_at"]
+    assert enc["assessment"]["patient_summary"] == "建议到呼吸内科就诊。"
+    assert [m["role"] for m in enc["transcript"]] == ["user", "assistant"]
+    assert enc["transcript"][1]["content"] == posted["message"]
+
+    # 归属：换个人查就查不到（`patient_id` 是记录归属，不是认证）
+    assert c.get("/consult/encounters", params={"patient_id": "p-2"}).json()["count"] == 0
+
+    # 运维可见性：状态端点能看到行数真的在涨（会话状态仍是内存态，如实说明）
+    status = c.get("/consult/status").json()
+    assert status["persistence_backend"] == "SqlitePersistence"
+    assert status["persistence_rows"] == {"patients": 1, "encounters": 1, "messages": 2}
+    assert status["persistence_path"].endswith("records.db")
+    assert "in-process" in status["session_store"]
+    store.close()
+
+
+def test_encounters_endpoint_is_empty_without_persistence(client_factory: Any) -> None:
+    """没有注入存储（假 runtime 没有 settings）时读回空列表并如实报后端，而不是 500。"""
+    got = client_factory(_FakePipeline()).get("/consult/encounters").json()
+    assert got["count"] == 0
+    assert got["encounters"] == []
+    assert got["persistence_backend"] == "NoopPersistence"
+
+
+def test_encounters_limit_is_validated(client_factory: Any) -> None:
+    """`limit` 有上下界：`0` 或超界是 422，不是"悄悄按 0 条返回"。"""
+    c = client_factory(_FakePipeline())
+    assert c.get("/consult/encounters", params={"limit": 0}).status_code == 422
+    assert c.get("/consult/encounters", params={"limit": 1000}).status_code == 422
+
+
+def test_runtime_builds_the_records_db_from_settings_without_self_deadlock(tmp_path: Any) -> None:
+    """`pipeline()` 持锁时会调 `_build()` 去取 store（**同一把锁**）。
+
+    锁因此必须是可重入的：普通 `Lock` 会让第一次 `/consult` 直接自锁死（挂住，不报错）。
+    这条测试用带超时的线程把"挂住"变成"5 秒后断言失败"，并在 `tmp_path` 里建库。
+    """
+
+    class _WithSettings:
+        settings = SimpleNamespace(clinic_records_path=tmp_path / "records.db")
+
+        def retriever(self) -> Any:
+            return None
+
+    rt = ConsultRuntime(_WithSettings())
+    got: dict[str, Any] = {}
+
+    def take() -> None:
+        with rt._lock:  # noqa: SLF001 - 这就是 `pipeline()` 持锁调 `_build()` 的形状
+            got["store"] = rt.store()
+
+    worker = threading.Thread(target=take, daemon=True)
+    worker.start()
+    worker.join(timeout=5)
+    assert not worker.is_alive(), "持锁取 store 自锁死了：`ConsultRuntime._lock` 必须是 RLock"
+    assert isinstance(got["store"], SqlitePersistence), "有 settings 就该建真库，而不是退回 Noop"
+    got["store"].close()
 
 
 @pytest.fixture(scope="module")
