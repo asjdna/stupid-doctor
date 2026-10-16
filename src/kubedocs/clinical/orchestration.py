@@ -224,6 +224,9 @@ class ClinicalToolLoop:
                     context=str(hit.get("context") or "").strip(),
                     score=float(hit.get("score") or 0.0),
                     source_url=str(hit.get("source_url") or ""),
+                    # `search_docs` 返回给模型的就是这个 chunk_id，模型会照抄成依据编号；
+                    # 校验接受它，才不会把**真实命中**判成编造（见 `EvidenceItem.source_id`）。
+                    source_id=str(hit.get("chunk_id") or ""),
                 )
             )
 

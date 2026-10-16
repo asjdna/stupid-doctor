@@ -114,7 +114,15 @@ class FactSet:
 
     # ------------------------------------------------------------------ 查询
     def evidence_ids(self) -> set[str]:
-        return {i.id for i in self.evidence.items}
+        """这一轮**允许被引用**的全部依据标识。
+
+        两种写法都算数：我们自己分配的 `K#`（提示词要求用的），以及索引里的真实
+        `chunk_id`（`search_docs` 返回给模型的就是它，模型很自然会照抄）。
+        只认前者会把真实命中判成编造——那是误伤，还会顺手丢掉一条本来正确的建议。
+        """
+        out = {i.id for i in self.evidence.items}
+        out.update(i.source_id for i in self.evidence.items if i.source_id)
+        return out
 
     def has_evidence(self) -> bool:
         """有没有**知识依据**。空 ⇒ 模型不得给出任何医学内容，只能如实说不知道。"""

@@ -3,6 +3,7 @@
 用途：
 1. 回答生成时把「心内科 / 心血管内科」统一成「心内科」展示，避免同科室多种写法。
 2. 评测时用同一套归一化判定「导诊科室命中」，保证金标与系统输出可比。
+3. **挂号与接地校验**：模型说"呼吸内科门诊"、科室表写"呼吸内科"，两边要能对上。
 """
 
 # 知识库中的多种写法 -> 标准科室名（按临床习惯归类，便于导诊与命中判定）
@@ -54,10 +55,40 @@ DEPARTMENT_ALIAS = {
 }
 
 
+_TRAILING_SUFFIXES = ("门诊", "科室", "科门诊")
+"""科室名的口语后缀。
+
+**这是实测逼出来的**：大模型与患者都会说"呼吸内科门诊""全科门诊"，而科室表里只有
+"呼吸内科""全科"。不收掉这个后缀会有两个后果，都在真实路径上：
+
+1. 挂号：`BookingService.resolve_department("呼吸内科门诊")` 会判定"不在可挂号科室里"，
+   整轮取号失败——而模型说的明明是同一个科；
+2. 接地校验：`verify` 把"全科门诊"判成未接地科室并剔除，患者那条建议被删掉。
+"""
+
+
 def normalize_department(name: str) -> str:
-    """返回标准科室名；未知名称原样返回（不丢信息）。"""
+    """返回标准科室名；未知名称原样返回（不丢信息）。
+
+    先查别名表，再试"去掉口语后缀"（门诊/科室）。**只在去掉后缀后确实命中**
+
+    别名表**或** `DEPARTMENTS`（可挂号科室表）时才采用——两张表不是包含关系：
+    `全科` 在 `DEPARTMENTS` 里但不在别名表里，只查前者会漏掉"全科门诊"。
+    反过来，一个不认识的"某某门诊"一律截断，会把科室名改成另一个不存在的名字，
+    那比原样返回更糟（原样返回至少能在报错里被看见）。
+    """
     name = (name or "").strip()
-    return DEPARTMENT_ALIAS.get(name, name)
+    hit = DEPARTMENT_ALIAS.get(name)
+    if hit:
+        return hit
+    for suffix in _TRAILING_SUFFIXES:
+        if name.endswith(suffix) and len(name) > len(suffix):
+            head = name[: -len(suffix)]
+            if head in DEPARTMENT_ALIAS:
+                return DEPARTMENT_ALIAS[head]
+            if head in DEPARTMENTS:
+                return head
+    return name
 
 
 # 可挂号科室（从 DEPARTMENT_ALIAS 的规范值里精选，booking / 前端共用唯一真相源）

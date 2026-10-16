@@ -57,6 +57,15 @@ class EvidenceItem(BaseModel):
     score: float = 0.0
     source_url: str = ""
 
+    source_id: str = ""
+    """这条依据在**索引里的真实 id**（`chunk_id`，形如 `disease/咳嗽::0000`）。
+
+    为什么必须留着：`search_docs` 工具返回给模型的就是这个 id，模型很自然地会拿它当
+    "依据编号"写进 `evidence_ids`（实测如此）。只认我们自己分配的 `K#`，会把一条**真实
+    命中**判成"编造依据"并丢掉整条建议——那是纯粹的误伤，而且看起来像模型在撒谎。
+    校验因此接受两种写法：我们的 `K#`，或索引里的真实 `chunk_id`。
+    """
+
 
 class RedLineSignal(BaseModel):
     """红线信号。字段取自 `domains.clinic.redline.RedLineHit`（三维判定）。
@@ -257,6 +266,9 @@ def build_evidence(
                 context=parent[:_KNOWLEDGE_PARENT_CHARS],
                 score=hit.score,
                 source_url=hit.source_url,
+                # 索引里的真实 id：模型在 `search_docs` 结果里看到的就是它，
+                # 校验要接受这个写法（见 `EvidenceItem.source_id`）。
+                source_id=str(getattr(hit, "chunk_id", "") or ""),
             )
         )
         chunks.append(hit)
