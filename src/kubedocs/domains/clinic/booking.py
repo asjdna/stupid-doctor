@@ -13,9 +13,27 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import date as _date
 
 from kubedocs.domains.clinic.data.departments import normalize_department
 from kubedocs.domains.clinic.provider import AppointmentProvider, BookingError
+
+
+def _display_date(date: str | None, slots: list[dict]) -> str:
+    """`Availability.date` 的三级兜底：显式传入 > 时段自带的 `date` > 今天。
+
+    `date` 是**展示字段**（工具层直接回给模型/前端），空串会被渲染成"没有日期"，所以
+    "provider 没给时段"这种正常情况也必须回一个具体日期。`date=None` 时号源的实际口径
+    就是"今天"（见 `PgAppointmentProvider.get_availability`），兜底取今天才和取到的号一致。
+
+    时段自带的 `date` 排在"今天"之前：由号源解析出的日期比调用方的假设更可信。
+    """
+    if date:
+        return str(date)
+    for slot in slots:
+        if slot.get("date"):
+            return str(slot["date"])
+    return _date.today().isoformat()
 
 
 @dataclass(frozen=True)
@@ -59,14 +77,7 @@ class BookingService:
     def availability(self, department: str, date: str | None = None) -> Availability:
         dep = self.resolve_department(department)
         slots = self.provider.get_availability(dep, date)
-        day = date or slots and self._guess_date(slots) or ""
-        return Availability(department=dep, date=str(day), slots=slots)
-
-    @staticmethod
-    def _guess_date(_slots: list[dict]) -> str:
-        from datetime import date as _date
-
-        return _date.today().isoformat()
+        return Availability(department=dep, date=_display_date(date, slots), slots=slots)
 
     def first_available_slot(self, department: str, date: str | None = None) -> str | None:
         """该科室当天的第一个有余号时段；都没有则 None（agent 据此改推荐日期）。"""
@@ -96,8 +107,44 @@ class BookingService:
     def my_appointments(self, patient_id: str, limit: int = 20) -> list[dict]:
         return self.provider.list_appointments(patient_id, limit)
 
-    def cancel(self, ticket_no: str, patient_id: str) -> None:
+    def availability_window(self, department: str, days: int = 7) -> list[dict]:
+        """整个放号窗口的余量（`[{date, slots}]`），给"哪天还有号"用。
+
+        与 `availability` 分开是刻意的：`availability` 的契约是"某一天"，而"哪天有号"
+        要跨天看；用两次单日查询去拼会多两轮数据库往返，也会让上层自己写日期循环。
+        号源实现不支持时报一句人话——模型据此改用单日查询，而不是收到 AttributeError。
+        """
+        dep = self.resolve_department(department)
+        window = getattr(self.provider, "availability_window", None)
+        if window is None:
+            raise BookingError("当前号源实现不支持查询放号窗口，请改用 get_availability 逐天查询")
+        try:
+            return window(dep, days)
+        except NotImplementedError as e:
+            # ABC 给可选能力留了默认实现（抛 NotImplementedError），所以"没覆盖"这件事
+            # 只能靠异常认出来——`getattr(...) is None` 对 ABC 的子类永远不成立。
+            raise BookingError("当前号源实现不支持查询放号窗口，请改用 get_availability 逐天查询") from e
+
+    def cancel(self, ticket_no: str, patient_id: str) -> dict:
+        """退号，返回号源给出的取消结果（`{ticket_no, department, date, time, status, remaining}`）。
+
+        **回 dict 而不是 None**：退号是给前端看的操作（"已退号、余量已释放"），而释放后的
+        余量只有号源实现知道。
+
+        "不支持取消"有两种形态，都要接住：provider 没有这个方法（鸭子类型），或它继承了
+        ABC 的默认实现而抛 `NotImplementedError`（`MockAppointmentProvider` 就是后者）。
+        **只判 `getattr(...) is None` 是不够的**——可选能力一旦在 ABC 上有了默认实现，
+        `getattr` 永远拿得到东西。
+
+        权限在号源层（只有同一 `patient_id` 能退自己的号），这一层不做也不该做鉴权：
+        它拿不到"当前登录用户"，硬判会把唯一真相源拆成两半。
+        """
         cancel = getattr(self.provider, "cancel", None)
         if cancel is None:
             raise BookingError("当前号源实现不支持取消")
-        cancel(ticket_no, patient_id)
+        try:
+            result = cancel(ticket_no, patient_id)
+        except NotImplementedError as e:
+            raise BookingError("当前号源实现不支持取消") from e
+        # 兼容"只做事、不返回内容"的实现（旧契约的返回是 None）
+        return dict(result) if result is not None else {}

@@ -79,3 +79,23 @@ DEPARTMENTS = [
     "风湿免疫科",
     "全科",
 ]
+
+
+# ---------------------------------------------------------------------------
+# 挂号费：**唯一真相源**（号源库 `booking.departments.fee` 的初始数据由它来）
+#
+# 刻意不把 fee 塞进 `DEPARTMENTS`（改成 [{name, fee}] 那样）：那个列表的读者有导诊、
+# 号源、前端，改形状的收益不抵风险；而费用天然是"科室 → 钱"的映射，单独一张表更直白。
+# 只有与 DEFAULT_FEE 不同的科室才需要写进 DEPARTMENT_FEES。
+DEFAULT_FEE = 30
+DEPARTMENT_FEES = {
+    "呼吸内科": 35,
+}
+
+
+def department_fee(name: str) -> int:
+    """科室的挂号费；未单独定价的一律 `DEFAULT_FEE`。
+
+    先过一遍 `normalize_department`：调用方可能说"心血管内科"，而定价是按标准科室名记的。
+    """
+    return DEPARTMENT_FEES.get(normalize_department(name), DEFAULT_FEE)
