@@ -102,7 +102,9 @@ def main(argv: list[str] | None = None) -> int:
         cov_num: int = 0
         cov_den: int = 0
         for case in triage_cases:
-            ev = extract_evidence(case.text, 1)
+            # `links` 一起传进去：抽取与打分必须用同一张词表，否则抽出的键在关联表里
+            # 查不到、分数全空——那正是这条指标一直是 0 的形态。
+            ev = extract_evidence(case.text, 1, links=links)
             # 覆盖率诊断：抽出的症状有几个真在关联表里做键。两套词汇不重合时命中率必然为 0，
             # 而这个数字能区分"数据还支撑不了该指标"与"系统试过但失败了"。
             cov_den += len(ev)

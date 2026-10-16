@@ -21,6 +21,7 @@ from __future__ import annotations
 import re
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
+from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
@@ -37,6 +38,16 @@ from kubedocs.domains.clinic.redline import (
     emergency_menu,
     wants_emergency_care,
 )
+
+# 口语症状最多展开成多少个语料症状键。一个词（如"咳嗽"）在语料里能对上几十个更细的症状名，
+# 全靠它会把这次发言变成一次全表扫描式的投票。60 覆盖住了实测最宽的那几个词。
+MAX_KEYS_PER_SYMPTOM = 60
+
+# 逐字命中的关联键最多取几个（患者一句话里很少出现超过两三个规范症状名）。
+MAX_VERBATIM_KEYS = 20
+
+# 逐字扫描忽略的 1 字键：太容易在无关句子里撞上，噪声大于信息。
+MIN_VERBATIM_KEY_CHARS = 2
 
 # 挂号意图词表：**必须列变体**。「挂号」不是「帮我挂个号」的子串（中间插了"个"），
 # 朴素子串匹配在中文里会直接失效。
@@ -122,17 +133,123 @@ def confirm_booking(text: str) -> bool:
     return any(w in text and not _negated(text, w) for w in CONFIRM_WORDS)
 
 
-def extract_evidence(text: str, turn: int, *, suggested: Sequence[str] = ()) -> list[SymptomEvidence]:
-    """从用户这句话里抽症状证据，并判定**来源**。
+@lru_cache(maxsize=1)
+def link_vocabulary() -> tuple[str, ...]:
+    """**当前语料**的症状关联表键，按长度降序。**进程内只读一次语料**。
+
+    只在调用方拿不到 `links` 时用（例如只做症状抽取、不做打分的脚本）。
+    装配好的路径一律把 `links` 传给 `match_symptoms`——见那里的说明：
+    词表必须与打分用的是同一张表，否则抽出来的键在打分表里查不到。
+
+    语料缺失时返回空元组，抽取退化为"只用口语词典"（不抛异常：没有语料是部署状态）。
+    测试要换一套卡片语料时记得 `link_vocabulary.cache_clear()`。
+    """
+    try:
+        from kubedocs.domains.clinic.domain import ClinicPack
+
+        keys = tuple(str(k) for k in ClinicPack().triage_links())
+    except Exception:  # noqa: BLE001 - 缺语料/格式坏都只是"这一层没有词表"
+        return ()
+    return tuple(sorted(keys, key=len, reverse=True))
+
+
+def _vocabulary(links: Mapping[str, Sequence[str]] | None) -> tuple[str, ...]:
+    """要拿来匹配的词表：**调用方给的那张关联表**优先，否则退回当前语料的表。
+
+    这一点是刻意的：抽取与打分必须用同一张表。测试会注入一张自己的 `links`
+    （键是口语词），生产用的是语料派生出来的表——如果词表写死在模块里，
+    注入的那张表就永远对不上，而那正是"桥修好了、打分还是 0"的形态。
+    """
+    if links is None:
+        return link_vocabulary()
+    return tuple(sorted((str(k) for k in links), key=len, reverse=True))
+
+
+def _corpus_keys_for(symptom: str, vocab: Sequence[str]) -> list[str]:
+    """口语/标准症状 -> **词表里可用**的症状键。
+
+    三档，顺序就是优先级：
+
+    1. 这个词**本身就是**词表的键 -> 用它自己；
+    2. 再补上**包含它**的键（语料的症状名比口语细：咳嗽 -> 持续性咳嗽、夜间咳嗽…）。
+       按长度升序取前 `MAX_KEYS_PER_SYMPTOM` 个——越短越接近这个词本身，
+       "一咳嗽胸口就疼"这种带其他症状的复合名往后排；
+    3. 一个都没有 -> 返回空列表，调用方退回口语词本身（见 `match_symptoms`）。
+
+    第 1 档与第 2 档**都要**，不是二选一：实测"瘙痒"本身在关联表里只挂着 5 个科室
+    （急诊/感染/肛肠/血液/风湿免疫，全都 1 票并列），只取它自己的话前 3 名是随机的；
+    把"局部瘙痒""冬季皮肤瘙痒"这些一起算进来，皮肤科才会以明显优势浮上来。
+    """
+    if not vocab:
+        return []
+    out = [k for k in vocab if k == symptom]
+    out += [k for k in reversed(vocab) if len(k) > len(symptom) and symptom in k]
+    return out[:MAX_KEYS_PER_SYMPTOM]
+
+
+def match_symptoms(text: str, links: Mapping[str, Sequence[str]] | None = None) -> list[tuple[str, str]]:
+    """患者原话 -> `[(症状键, 命中原词), ...]`，症状键**取自语料词表**。
+
+    ## 为什么必须有这一层桥
+
+    口语词典（`symptom_dict`）说的是"患者会怎么讲"，关联表的键来自知识卡片语料，
+    粒度比口语**细**：患者说"咳嗽"，语料里是「持续性咳嗽」「夜间咳嗽」「一咳嗽胸口就疼」。
+    两边直接做等值连接，实测 5 条分诊 gold 里只有 **1 个**症状键能在关联表里找到——
+    分诊分数全空、准确率 0，而这不是"语料不行"，是**两套词汇之间缺一层映射**。
+
+    两条路一起走，因为患者有时用口语、有时用规范说法：
+
+    1. **逐字扫**词表里的键（长键优先）：患者直接说"反酸""烧心""耳痛"时命中，
+       这几个词在口语词典里根本没有条目；
+    2. **口语词典命中 -> 展开**成词表里包含它的键（见 `_corpus_keys_for`）。
+
+    展开不出来（缺语料，或这个词在语料里没有任何关联）时**退回口语词本身**：
+    打分器查不到关联会跳过，行为与加这层桥之前一致——不会因为语料缺失把整条路堵死。
+    """
+    hits: list[tuple[str, str]] = []
+    seen: set[str] = set()
+
+    def add(key: str, matched: str) -> None:
+        if key and key not in seen:
+            seen.add(key)
+            hits.append((key, matched))
+
+    vocab = _vocabulary(links)
+    verbatim = 0
+    for key in vocab:  # 已按长度降序：长键先占，避免被它的子串抢先
+        if verbatim >= MAX_VERBATIM_KEYS:
+            break
+        if len(key) >= MIN_VERBATIM_KEY_CHARS and key in text:
+            add(key, key)
+            verbatim += 1
+
+    for canonical, matched in match_symptom_in_text(text):
+        for key in _corpus_keys_for(canonical, vocab) or [canonical]:
+            add(key, matched)
+    return hits
+
+
+def extract_evidence(
+    text: str,
+    turn: int,
+    *,
+    suggested: Sequence[str] = (),
+    links: Mapping[str, Sequence[str]] | None = None,
+) -> list[SymptomEvidence]:
+    """从用户这句话里抽症状证据（**键与 `links` 同一套词表**），并判定**来源**。
 
     来源决定权重（见 `hypothesis.WEIGHTS`）：系统建议后确认的降权，
-    因为引导式提问会引入建议性偏倚——用户倾向于顺着说"是"。
+    因为引导式提问会引入引导性偏倚——用户倾向于顺着说"是"。
+
+    `links` 是**这张证据将要拿去打分的那张关联表**。抽出来的键必须能在它里面查到，
+    否则打分器只会静静跳过（那正是分诊全 0 的形态）。不传时用当前语料的表，
+    只适合"不打算打分"的调用方。
     """
     from kubedocs.agent.hypothesis import weight_of
 
     out: list[SymptomEvidence] = []
-    for canonical, matched in match_symptom_in_text(text):
-        hinted = matched in suggested or canonical in suggested
+    for symptom_key, matched in match_symptoms(text, links):
+        hinted = matched in suggested or symptom_key in suggested
         if is_negated(text, matched):
             source = EvidenceSource.NEGATED_AFTER_SUGGESTION if hinted else EvidenceSource.NEGATED
             present = False
@@ -141,7 +258,7 @@ def extract_evidence(text: str, turn: int, *, suggested: Sequence[str] = ()) -> 
             present = True
         out.append(
             SymptomEvidence(
-                symptom=canonical, present=present, source=source, turn=turn, weight=weight_of(source)
+                symptom=symptom_key, present=present, source=source, turn=turn, weight=weight_of(source)
             )
         )
     return out
@@ -214,7 +331,9 @@ def build_clinic_deps(
 
     def _observe(text: str, state: Any) -> list[SymptomEvidence]:
         suggested = tuple(state.get("pending_suggestion", {}).get("symptoms", ()) or ())
-        return extract_evidence(text, int(state.get("turn", 0)) + 1, suggested=suggested)
+        # 把**本装配用的那张关联表**传进去：抽出来的症状键必须能在 `_score` 的表里查到，
+        # 否则打分器只会静静跳过（分诊全 0 的形态）。
+        return extract_evidence(text, int(state.get("turn", 0)) + 1, suggested=suggested, links=link_map)
 
     def _score(evidence: Sequence[SymptomEvidence]) -> dict[str, float]:
         return hypothesis.score(evidence, link_map, tie_breaker=tie_breaker)

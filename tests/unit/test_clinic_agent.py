@@ -41,30 +41,30 @@ def _agent(**kw):
 # 证据抽取与来源归因
 class TestExtractEvidence:
     def test_volunteered_symptom_gets_full_weight(self):
-        ev = extract_evidence("我最近咳嗽", 1)
+        ev = extract_evidence("我最近咳嗽", 1, links=LINKS)
         assert ev[0].symptom == "咳嗽"
         assert ev[0].source is EvidenceSource.VOLUNTEERED
         assert ev[0].weight == pytest.approx(1.0)
 
     def test_confirmed_after_suggestion_is_discounted(self):
         """系统建议后用户确认 → 权重减半。这是防建议性偏倚的核心机制。"""
-        ev = extract_evidence("是的，有咳嗽", 2, suggested=["咳嗽"])
+        ev = extract_evidence("是的，有咳嗽", 2, suggested=["咳嗽"], links=LINKS)
         assert ev[0].source is EvidenceSource.CONFIRMED
         assert ev[0].weight == pytest.approx(0.5)
 
     def test_negated_symptom_is_recorded_as_negative(self):
-        ev = extract_evidence("我没有咳嗽", 1)
+        ev = extract_evidence("我没有咳嗽", 1, links=LINKS)
         assert ev and ev[0].present is False
         assert ev[0].source is EvidenceSource.NEGATED
         assert ev[0].weight < 0
 
     def test_negated_after_suggestion_is_even_weaker(self):
-        ev = extract_evidence("没有咳嗽", 2, suggested=["咳嗽"])
+        ev = extract_evidence("没有咳嗽", 2, suggested=["咳嗽"], links=LINKS)
         assert ev[0].source is EvidenceSource.NEGATED_AFTER_SUGGESTION
         assert abs(ev[0].weight) < 0.5
 
     def test_symptom_free_text_yields_nothing(self):
-        assert extract_evidence("今天天气不错", 1) == []
+        assert extract_evidence("今天天气不错", 1, links=LINKS) == []
 
 
 class TestLinkInversion:

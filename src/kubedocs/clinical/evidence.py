@@ -59,7 +59,13 @@ class EvidenceItem(BaseModel):
 
 
 class RedLineSignal(BaseModel):
-    """红线信号。字段取自 `domains.clinic.redline.RedLineHit`（三维判定）。"""
+    """红线信号。字段取自 `domains.clinic.redline.RedLineHit`（三维判定）。
+
+    它现在是**给模型的线索**（不再是强制边）：`assertion` / `experiencer` / `temporality`
+    一起进参考面板，由模型判断这是不是急症。`reportable` 记下三维门控的结论，
+    而 `notes` 保留**全部出现处**的判定明细——包括"不触发"的那些，
+    因为「我老公胸痛」「去年胸痛」为什么不触发，恰恰是模型最需要看到的解释。
+    """
 
     model_config = ConfigDict(extra="forbid")
 
@@ -67,6 +73,14 @@ class RedLineSignal(BaseModel):
     category: str = ""
     experiencer: str = ""
     temporality: str = ""
+    assertion: str = ""
+    """三维里的断言状态：present / absent / possible / hypothetical（取自 `RedLineHit.status`）。"""
+
+    reportable: bool = True
+    """三维门控是否认为它可作**患者本人当前的主诉**上报（False = 家属/既往/否定/假设）。"""
+
+    notes: list[str] = Field(default_factory=list)
+    """`RiskGuard.explain()` 的逐条明细：`触发/不触发 「词」 status=… exp=… tmp=…`。"""
 
 
 class EvidenceBundle(BaseModel):
@@ -132,9 +146,15 @@ class EvidenceBundle(BaseModel):
 
 
 class Guard(Protocol):
-    """红线判定器。与 `domains.clinic.redline.RiskGuard` 形状一致（便于直接注入）。"""
+    """红线判定器。与 `domains.clinic.redline.RiskGuard` 形状一致（便于直接注入）。
+
+    `explain()` 是可选的：有它就能把"为什么没触发"也讲给模型（三维判定的明细），
+    没有它只是线索少一层，判定链不受影响。
+    """
 
     def check(self, text: str) -> object | None: ...
+
+    def explain(self, text: str) -> list[str]: ...
 
 
 class TriageEngine(Protocol):
@@ -143,15 +163,58 @@ class TriageEngine(Protocol):
     def rank(self, question: str, chunks: list[object]) -> list[DepartmentAdvice]: ...
 
 
-def _red_line_signal(hit: object) -> RedLineSignal:
+def _red_line_signal(
+    hit: object, *, reportable: bool = True, notes: list[str] | None = None
+) -> RedLineSignal:
     """把 `RedLineHit` 读成信号。字段用 `getattr` 兜底：三维判定将来可能增字段，
-    这里不该因为多/少一个字段就把整条链弄崩。"""
+    这里不该因为多/少一个字段就把整条链弄崩。
+
+    `notes` 是 `RiskGuard.explain()` 的明细（含"不触发"的出现处）。它经 `getattr` 取
+    ——`Guard` 协议只强制 `check()`，没有 `explain()` 的实现照样能用。
+    """
     return RedLineSignal(
         word=str(getattr(hit, "word", "") or ""),
         category=str(getattr(hit, "category", "") or ""),
         experiencer=str(getattr(hit, "experiencer", "") or ""),
         temporality=str(getattr(hit, "temporality", "") or ""),
+        assertion=str(getattr(hit, "status", "") or ""),
+        reportable=bool(reportable),
+        notes=list(notes or []),
     )
+
+
+def red_line_from_guard(
+    guard: Guard, question: str, *, degraded: list[str] | None = None
+) -> RedLineSignal | None:
+    """跑一次红线判定，返回 `RedLineSignal`（或 None）。**两个调用点共用这一份**。
+
+    - `check()` 命中 ⇒ `reportable=True` 的信号（三维门控认为可作本人当前主诉）；
+    - 只出现红线词但门控判定"不触发"（家属/既往/否定/假设）⇒ 仍然返回一个
+      `reportable=False` 的信号，**明细照给**。"系统看到过这个词、但认为不该上报"
+      本身就是要交给模型的线索：抹掉它等于让模型不知道系统担心过。
+    - 完全没出现 ⇒ None（面板会如实写"未命中"）。
+
+    `degraded` 传进来就记失败原因：判定失败**不许让整轮崩**，但也不能无声。
+    """
+    notes: list[str] = []
+    red_hit: object | None = None
+    try:
+        red_hit = guard.check(question)
+    except Exception as e:  # noqa: BLE001 - 注入的实现可能任何异常，都不该炸掉整条链
+        if degraded is not None:
+            degraded.append(f"红线判定失败：{type(e).__name__}: {e}")
+    explain = getattr(guard, "explain", None)
+    if callable(explain):
+        try:
+            notes = [str(x) for x in explain(question)]
+        except Exception as e:  # noqa: BLE001 - 诊断信息取不到不影响判定
+            if degraded is not None:
+                degraded.append(f"红线明细取不到：{type(e).__name__}: {e}")
+    if red_hit is not None:
+        return _red_line_signal(red_hit, reportable=True, notes=notes)
+    if notes:
+        return RedLineSignal(word="", assertion="", reportable=False, notes=notes)
+    return None
 
 
 def build_evidence(
@@ -200,16 +263,9 @@ def build_evidence(
 
     red_line: RedLineSignal | None = None
     if guard is not None:
-        # 变量名不叫 `hit`：上面那个循环已经用过它了，
-        # 复用同名变量会让 mypy 的类型推断对不上。
-        red_hit: object | None = None
-        try:
-            red_hit = guard.check(question)
-        except Exception as e:  # noqa: BLE001
-            red_hit = None
-            degraded.append(f"红线判定失败：{type(e).__name__}: {e}")
-        if red_hit is not None:
-            red_line = _red_line_signal(red_hit)
+        # 明细（含**不触发**的出现处）一并取回：这是参考面板里最有价值的一条线索——
+        # 「我老公胸痛」为什么不触发，只有 explain() 说得清，而模型需要这个解释。
+        red_line = red_line_from_guard(guard, question, degraded=degraded)
 
     departments: list[DepartmentAdvice] = []
     if triage is not None:

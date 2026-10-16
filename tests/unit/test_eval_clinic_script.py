@@ -60,7 +60,9 @@ def _stub_triage(script: ModuleType, monkeypatch: pytest.MonkeyPatch, *, top: st
     def fake(*, json_mode: bool = False) -> Any:
         return (
             {"咳嗽": ("呼吸内科",)},
-            lambda text, n: [SimpleNamespace(symptom="咳嗽")],
+            # 抽取器签名是 `(text, turn, *, suggested=(), links=None)`：替身必须接住
+            # `links`，否则脚本一调就 TypeError（"分诊为 0"会被误读成"脚本崩了"）。
+            lambda text, n, **_: [SimpleNamespace(symptom="咳嗽")],
             SimpleNamespace(score=lambda ev, links: {top: 1.0}),
             None,
         )
