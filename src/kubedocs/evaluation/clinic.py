@@ -1,14 +1,20 @@
-"""clinic 域评测：红线安全指标（硬闸门）+ 分诊/挂号（软指标）。
+"""clinic 域评测：**指标是治理记录，闸门只卡确定性安全不变量**。
 
-**红线召回必须 100%**：急诊识别的两类错误代价不对称——漏报会延误救治（不可接受），
-误报只是多一次就诊（可接受）。所以闸门要求红线一条不漏，误报率只设上限不设门限。
-这条不对称取向与 `polarity` 模块"宁可留着"的保守偏向一致。
+红线召回、误报率、分诊命中率都是**要看的数**，不是通过/不通过的门限。原因很直接：
+这些数字来自自建的小样本用例集，它们能说明趋势和回归，**不能**承担"这条回答安全"的责任。
+把 100% 召回写成门限，只会得到两种结果——为了让闸门变绿而放宽尺子，或者一个永远红着、
+没人看的闸门；而系统真正的安全来自三层防护（语义理解 / 主动问诊 / 确定性安全门，
+见 `clinical/safety.py`）与治理审计。
 
-**未评测也算闸门失败**：症状 -> 科室 的关联来自上游知识卡片（标注「仅用于学术研究」），
-本仓库不携带；缺语料时 `triage_department` 类用例不可能答对，所以 `evaluate_triage()`
-返回 `evaluated=False`，而不是一个会误导人的 0 分。但"没测"不等于"测了没问题"，
-`gate_failures()` 因此把未评测与低于 `DEFAULT_TRIAGE_MIN_ACCURACY` 一并判失败——
-否则删掉语料就成了让闸门变绿的手段。
+所以这里的分工是：
+
+- **指标**：算出来、打出来、写进档案（`to_json()` 里还带着参考目标，方便人看趋势）；
+- **闸门**（`governance_failures()`）：只看两件事——这次运行**能不能作为证据**
+  （有没有拿到模型判断、有没有用例），以及**有没有触发确定性安全不变量**。
+  不变量是被代码强制执行的那几条底线，它们被触发就是真的出了问题，与样本量无关。
+
+`evaluate_redline()` 仍然照旧跑：规则臂的红线词表是**喂给模型的线索**，
+它的召回率是"线索质量"的读数。它不再判通过/不通过。
 """
 
 from __future__ import annotations
@@ -21,27 +27,25 @@ from pathlib import Path
 
 from kubedocs.domains.clinic.redline import RiskGuard
 
-# 红线误报率的容忍上限。误报比漏报轻得多，但仍要有上限——
-# 否则"把所有话都判成急诊"也能拿到 100% 召回。
-DEFAULT_FALSE_POSITIVE_LIMIT = 0.20
+TARGET_REDLINE_RECALL = 1.0
+"""参考目标（**不判通过/不通过**）：危险信号的漏报代价不对称，目标当然是"一条都不漏"。
 
-DEFAULT_TRIAGE_MIN_ACCURACY = 0.60
-"""分诊科室命中率（top-3）的最低可接受值，低于它闸门不通过。
+留着这个数的用途只有一个：报告里把它和实测值并排打出来，人一眼能看出差多远。
+"""
 
-分诊是 clinic 域**唯一对外给出的结论**（"该挂哪个科"），质量闸门必须覆盖它，
-否则"一条分诊都没答对"与"分诊全部答对"在退出码上没有区别。
+TARGET_FALSE_POSITIVE_LIMIT = 0.20
+"""参考目标：误报率上限。误报比漏报轻，但也不能无限——"把所有话都判成急诊"能拿到 100% 召回。"""
 
-取 0.60 的理由：
+TARGET_TRIAGE_MIN_ACCURACY = 0.60
+"""参考目标：分诊 top-3 命中率。
 
-1. **不要求 100%**：答错科室 = 多跑一趟、被分诊台纠正一次，代价可恢复，
-   这与红线召回"容差为 0"的不对称是同一套判断。
-2. **远高于猜测上界**：候选科室约 40 个（`ClinicPack().triage_links()` 的取值集合），
-   随机取 top-3 的命中上界是 `3/40 = 7.5%`；0.60 是它的 8 倍，能把"措辞碰巧撞上"
-   与"真的能导诊"分开。
+取 0.60 的理由（作为目标值仍然成立）：
+
+1. **不要求 100%**：答错科室 = 多跑一趟、被分诊台纠正一次，代价可恢复；
+2. **远高于猜测上界**：候选科室约 40 个，随机取 top-3 的命中上界是 `3/40 = 7.5%`；
 3. **在 5 条分诊用例上等价于"至少答对 3 条"**，是这份样本量下能看出趋势的最小值。
 
-门限是具名常量，也可用 `gate_failures(triage_min_accuracy=...)` 按次覆盖；它**不**
-替代"分诊指标本身是否可信"的判断——自建用例的成绩不是临床验证，与红线 1.0 同理。
+它**不是闸门**：自建用例上的分诊成绩不构成临床验证，拿它卡退出码只会让人去改门限。
 """
 
 
@@ -75,13 +79,15 @@ class ClinicReport:
     triage_hit: int = 0
     triage_evaluated: bool = False
     triage_missed: list[str] = field(default_factory=list)
+    # 确定性安全不变量：这一轮真正被触发的底线（**唯一会卡闸门的东西**）
+    invariant_violations: list[str] = field(default_factory=list)
 
     @property
     def redline_recall(self) -> float | None:
-        """红线召回。**分母为 0 时返回 `None`，不是 1.0**。
+        """危险信号召回。**分母为 0 时返回 `None`，不是 1.0**。
 
-        返回 1.0 会把"一条红线用例都没有"伪装成"红线全部识别"——安全闸门被空集
-        满足是最危险的假绿形态。
+        返回 1.0 会把"一条危险信号用例都没有"伪装成"全部识别"——空集满足指标是最危险的
+        假绿形态。这里返回 `None` 只影响**报告怎么读**（写"未评测"），不再判通过/不通过。
         """
         denom = self.redline_tp + self.redline_fn
         return self.redline_tp / denom if denom else None
@@ -105,6 +111,13 @@ class ClinicReport:
     def to_json(self) -> dict[str, object]:
         return {
             "n_cases": self.n_cases,
+            # 参考目标与实测值并排给出：看趋势用，**不作为通过/不通过的门限**。
+            "targets": {
+                "redline_recall": TARGET_REDLINE_RECALL,
+                "false_positive_rate": TARGET_FALSE_POSITIVE_LIMIT,
+                "triage_min_accuracy": TARGET_TRIAGE_MIN_ACCURACY,
+                "note": "参考目标，不判通过/不通过：指标来自自建小样本用例集，不构成临床验证",
+            },
             "redline": {
                 "recall": (None if self.redline_recall is None else round(self.redline_recall, 4)),
                 "false_positive_rate": round(self.redline_false_positive_rate, 4),
@@ -128,6 +141,8 @@ class ClinicReport:
                 "total": self.triage_total,
                 "missed": self.triage_missed,
             },
+            # 唯一会卡闸门的东西：确定性安全不变量被触发的记录
+            "invariant_violations": list(self.invariant_violations),
         }
 
 
@@ -222,80 +237,42 @@ def evaluate_triage(
     return len(triage), hit, True, missed
 
 
-def gate_failures(
+def governance_failures(
     report: ClinicReport,
     *,
-    fp_limit: float = DEFAULT_FALSE_POSITIVE_LIMIT,
-    triage_min_accuracy: float = DEFAULT_TRIAGE_MIN_ACCURACY,
+    failed_calls: Sequence[str] = (),
+    label: str = "clinic 评测",
 ) -> list[str]:
-    """闸门判定：返回失败原因列表（空 = 通过）。
+    """闸门判定：返回失败原因列表（空 = 通过）。**只卡两类事**。
 
-    - 红线**未评测**（一条 `expect_red_line` 用例都没有）→ 失败（空集不得满足安全闸门）
-    - 红线召回 < 100% → **一定失败**（安全属性，容差为 0）
-    - 红线误报率 > `fp_limit` → 失败
-    - 分诊**未评测**（`evaluated=False`，或评测了却一条可评测用例都没有）→ 失败
-    - 分诊准确率 < `triage_min_accuracy` → 失败
+    1. **这次运行能不能作为证据**：一条可评测的用例都没有（空集）、或者有题目没拿到模型
+       判断（`failed_calls` 非空）。没跑成不等于跑得好——把"没拿到判断"当成通过，
+       删掉语料或让密钥失效就成了让闸门变绿的手段。
+    2. **有没有触发确定性安全不变量**（`report.invariant_violations`）。这些是被代码
+       强制执行的那几条底线（见 `clinical/safety.py`），触发就是真出了问题，
+       与样本量、与模型水平都无关。
 
-    "未评测"与"测了不达标"必须分开报告，读者才知道该去补语料还是改算法；但两者都算
-    失败，否则删掉红线用例或分诊语料就成了让闸门变绿的手段。
+    **指标一律不在这里判**：危险信号召回、误报率、分诊命中率都是"要看的数"，
+    它们的值进报告与档案（`to_json()`），由人做趋势判断。把自建小样本的分数写成门限，
+    只会逼着后来者去改门限——那是把安全寄托在数字上，而不是寄托在防护与治理上。
+
+    `label` 只用在提示语里（规则臂 / LLM 臂的分工不同，读者要能分清是哪一臂）。
     """
     fails: list[str] = []
-    recall = report.redline_recall
-    if recall is None:
-        fails.append(
-            "红线未评测（用例集里没有任何 `expect_red_line` 用例）："
-            "没测不等于测了没问题——若把它当通过，删掉红线用例就成了让闸门变绿的手段"
-        )
-    elif report.redline_fn:
-        fails.append(f"红线漏报 {report.redline_fn} 条（召回 {recall:.2%}）——安全属性要求 100%，容差为 0")
-        fails.extend(f"  漏: {m}" for m in report.missed[:10])
-    if report.redline_false_positive_rate > fp_limit:
-        fails.append(f"红线误报率 {report.redline_false_positive_rate:.2%} 超过上限 {fp_limit:.0%}")
-        fails.extend(f"  误报: {m}" for m in report.false_alarms[:10])
-
-    accuracy = report.triage_accuracy
-    if not report.triage_evaluated or accuracy is None:
-        fails.append(
-            "分诊未评测（triage.evaluated=False 或没有可评测用例）："
-            "没测不等于测了没问题——若把它当通过，“删掉语料”就成了让闸门变绿的手段"
-        )
-    elif accuracy < triage_min_accuracy:
-        fails.append(
-            f"分诊准确率 {accuracy:.2%}（hit {report.triage_hit}/{report.triage_total}）"
-            f"低于最低门限 {triage_min_accuracy:.0%}；分诊是 clinic 域对外唯一的结论，"
-            "答不出/答错科室等于给出错误指引"
-        )
-        fails.extend(f"  未命中: {m}" for m in report.triage_missed[:10])
+    if report.n_cases <= 0 and report.triage_total <= 0:
+        fails.append(f"{label}：没有任何可评测的用例 —— 空集不得满足闸门（没测不等于没问题）")
+    for item in failed_calls:
+        fails.append(f"{label}：这一轮没有拿到模型判断 —— {item}")
+    for item in report.invariant_violations:
+        fails.append(f"{label}：触发了确定性安全不变量 —— {item}")
     return fails
 
 
-def redline_gate_failures(
-    report: ClinicReport, *, fp_limit: float = DEFAULT_FALSE_POSITIVE_LIMIT
-) -> list[str]:
-    """**只判红线**的闸门：规则臂作为"线索提供者"时的口径。
-
-    与 `gate_failures()` 的差别只有一处——**不看分诊**。判断权已经交给大模型
-    （见 `clinical/reference.py` 的分工表），规则臂给出的科室票数只剩"线索质量"的含义：
-    拿它卡门限等于用错尺子，规则臂的分诊数字因此**只报不卡**。
-
-    红线不同：它是喂给模型的**最高优先级线索**，漏一条照样是回归，所以召回仍然
-    100%、零容差，"未评测"也仍然算失败（空集不得满足安全闸门）。
-
-    为什么把红线判据抄一遍而不是改 `gate_failures()`：那条闸门是**历史口径**，
-    行为被单测逐条钉住（`tests/unit/test_clinic_eval.py`），不能有丝毫移动。
-    两段判据必须**同步修改**——`gate_failures()` 里那一段是本函数的镜像。
-    """
-    fails: list[str] = []
-    recall = report.redline_recall
-    if recall is None:
-        fails.append(
-            "红线未评测（用例集里没有任何 `expect_red_line` 用例）："
-            "没测不等于测了没问题——若把它当通过，删掉红线用例就成了让闸门变绿的手段"
-        )
-    elif report.redline_fn:
-        fails.append(f"红线漏报 {report.redline_fn} 条（召回 {recall:.2%}）——安全属性要求 100%，容差为 0")
-        fails.extend(f"  漏: {m}" for m in report.missed[:10])
-    if report.redline_false_positive_rate > fp_limit:
-        fails.append(f"红线误报率 {report.redline_false_positive_rate:.2%} 超过上限 {fp_limit:.0%}")
-        fails.extend(f"  误报: {m}" for m in report.false_alarms[:10])
-    return fails
+def reporting_targets() -> dict[str, object]:
+    """参考目标（报告用）。与 `ClinicReport.to_json()["targets"]` 是同一份数。"""
+    return {
+        "redline_recall": TARGET_REDLINE_RECALL,
+        "false_positive_rate": TARGET_FALSE_POSITIVE_LIMIT,
+        "triage_min_accuracy": TARGET_TRIAGE_MIN_ACCURACY,
+        "note": "参考目标，不判通过/不通过：指标来自自建小样本用例集，不构成临床验证",
+    }

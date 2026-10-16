@@ -455,6 +455,8 @@ class _ChatOutcome:
         # 与 `reference` 成对：给它看了什么 + 它哪里越界被拦了（见 `clinical/verify.py`）。
         # 图路径不接约束层，但**字段形状保持一致**，前端只有一条渲染分支。
         self.contract_violations: list[dict[str, str]] = []
+        # 确定性安全门这一轮触发了哪几条不变量（图路径不接安全门，留空形状）
+        self.safety: dict[str, Any] = {"fired": [], "ids": [], "followup": ""}
 
     @classmethod
     def no_llm(cls) -> _ChatOutcome:
@@ -476,6 +478,8 @@ class _ChatOutcome:
         self.pending_action = None
         self.reference = None
         self.contract_violations = []
+        # 无密钥那一轮没有判断者，也就没有安全门要执行（留空形状，前端只有一条分支）
+        self.safety = {"fired": [], "ids": [], "followup": ""}
         return self
 
     @classmethod
@@ -509,6 +513,8 @@ class _ChatOutcome:
         self.reference = getattr(turn, "reference", None)
         # 与 `reference` 成对：给它看了什么 + 它哪里越界被拦了（见 `clinical/verify.py`）。
         self.contract_violations = list(getattr(turn, "contract_violations", None) or [])
+        # **第三层安全门**这一轮执行了哪几条底线（散文路径只留档，见 `clinical/safety.py`）。
+        self.safety = dict(getattr(turn, "safety", None) or {"fired": [], "ids": [], "followup": ""})
         return self
 
 
@@ -631,6 +637,8 @@ async def _chat_events(app: FastAPI, request: ChatRequest, thread_id: str) -> As
             # 无密钥时是 None（那一轮没有判断者，也就没有依据可言）。
             "reference": outcome.reference,
             "contract_violations": outcome.contract_violations,
+            # 确定性安全门这一轮执行了哪几条底线（不变量 id + 处置动作）
+            "safety": outcome.safety,
         },
     )
     yield _sse("done", {"thread_id": thread_id, "ok": True})

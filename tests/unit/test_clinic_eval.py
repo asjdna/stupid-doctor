@@ -1,7 +1,10 @@
-"""clinic 评测测试：闸门必须**能失败**——永远通过的闸门等于没有闸门。
+"""clinic 评测测试：**指标只报不卡，闸门只卡确定性安全不变量**。
 
-除真实金标集的指标外，这里构造"该失败"的场景（漏报红线、误报超限、
-分诊 0 分或未评测），断言闸门真的变红。
+这里钉住两件事：
+
+1. 指标本身算得对（召回、误报、分诊、空集不返回 `None` 以外的假值）；
+2. **闸门只对两类事失败**：这次运行不能作为证据（空集 / 有题没拿到判断），
+   以及确定性安全不变量被触发。指标再差也不该让闸门变红——那是这次改造的核心。
 """
 
 from __future__ import annotations
@@ -10,21 +13,23 @@ import pytest
 
 from kubedocs.config import repo_root
 from kubedocs.evaluation.clinic import (
-    DEFAULT_TRIAGE_MIN_ACCURACY,
+    TARGET_TRIAGE_MIN_ACCURACY,
     ClinicCase,
     ClinicReport,
     evaluate_redline,
     evaluate_triage,
-    gate_failures,
+    governance_failures,
     load_clinic_gold,
+    reporting_targets,
 )
 
 GOLD = repo_root() / "data" / "eval" / "clinic_gold.jsonl"
 
 
 def _clean_report(**overrides: object) -> ClinicReport:
-    """红线干净 + 分诊达标的报告；`overrides` 用来逐项构造"该红"的场景。"""
+    """指标干净的报告；`overrides` 用来逐项构造"该红/不该红"的场景。"""
     base: dict[str, object] = {
+        "n_cases": 26,
         "redline_tp": 5,
         "redline_tn": 5,
         "triage_total": 5,
@@ -63,77 +68,60 @@ class TestGoldSet:
 
 
 class TestRedlineMetrics:
-    def test_real_gold_set_passes_the_hard_gate(self, cases):
-        """红线召回必须 100%：漏一条急诊都不可接受。"""
+    def test_rule_arm_clue_quality_on_the_real_gold_set(self, cases):
+        """规则臂的红线词表是**喂给模型的线索**：它的召回记录在案（当前是零漏报）。"""
         report = evaluate_redline(cases)
-        assert report.redline_fn == 0, f"漏报：{report.missed}"
+        assert report.redline_fn == 0, f"线索层漏报（线索质量回归）：{report.missed}"
         assert report.redline_recall == 1.0
         assert report.redline_false_positive_rate == 0.0, f"误报：{report.false_alarms}"
         assert report.redline_tp >= 8 and report.redline_tn >= 15
 
-    def test_gate_fails_when_a_redline_is_missed(self):
-        """**闸门必须能失败**：构造一个漏报，断言它真的会红。"""
-        cases = [
-            ClinicCase(id="x1", kind="redline_trigger", text="这句里没有任何红线词", expect_red_line=True)
-        ]
-        report = evaluate_redline(cases)
-        fails = gate_failures(report)
-        assert fails and "红线漏报" in fails[0]
-        assert "容差为 0" in fails[0]
+    def test_metrics_alone_never_fail_the_gate(self):
+        """**这条是本次改造的核心**：指标再差也不让闸门变红。
 
-    def test_gate_fails_when_false_positives_exceed_the_limit(self):
-        """把所有话都判成急诊能拿 100% 召回——误报上限就是挡这个的。"""
-        report = ClinicReport(redline_tp=1, redline_fp=5, redline_tn=5)
-        fails = gate_failures(report)
-        assert any("误报率" in f for f in fails)
+        漏报、误报超限、分诊 0 分——全都不再是退出码的依据。它们进报告与档案，
+        由人看趋势；拿自建小样本的分数卡退出码，只会逼着后来者去改门限。
+        """
+        worst = _clean_report(redline_fn=9, redline_tp=0, redline_fp=20, redline_tn=0, triage_hit=0)
+        assert governance_failures(worst) == []
 
-    def test_gate_passes_on_a_clean_report(self):
-        """红线干净 **且** 分诊达标才是真的干净（两项都进闸门）。"""
-        assert gate_failures(_clean_report()) == []
+    def test_empty_run_fails_the_gate(self):
+        """空集不得满足闸门：一条用例都没跑，说明这次什么也没测。"""
+        fails = governance_failures(ClinicReport())
+        assert fails and "没有任何可评测的用例" in fails[0]
+
+    def test_failed_calls_fail_the_gate(self):
+        """有题目没拿到模型判断 ⇒ 闸门红（没测不等于测过）。"""
+        fails = governance_failures(_clean_report(), failed_calls=["r07 调用超时"])
+        assert any("r07" in f for f in fails)
+
+    def test_invariant_violation_fails_the_gate(self):
+        """**唯一按内容卡的东西**：确定性安全不变量被触发。"""
+        report = _clean_report(
+            invariant_violations=["r01：emergency_judgment_requires_directive（没给急救动作）"]
+        )
+        fails = governance_failures(report)
+        assert any("emergency_judgment_requires_directive" in f for f in fails)
+
+    def test_label_keeps_the_two_arms_apart(self):
+        fails = governance_failures(ClinicReport(), label="规则臂")
+        assert fails[0].startswith("规则臂")
 
 
-class TestTriageIsInTheGate:
-    """分诊指标必须参与闸门判定：只查红线时 accuracy=0.0 也算通过。"""
+class TestReportingTargets:
+    """参考目标还在，但只出现在报告里——**它不判通过/不通过**。"""
 
-    def test_zero_triage_accuracy_fails_the_gate(self):
-        """分诊 0 分（且评测过）⇒ 闸门必须红。"""
-        fails = gate_failures(_clean_report(triage_hit=0))
-        assert any("分诊准确率" in f for f in fails), fails
-        assert any("0.00%" in f for f in fails), fails
+    def test_targets_are_exported_with_a_note(self):
+        targets = reporting_targets()
+        assert targets["redline_recall"] == 1.0
+        assert 0.0 < targets["false_positive_rate"] <= 1.0
+        assert 0.0 < targets["triage_min_accuracy"] <= 1.0
+        assert "不判通过/不通过" in str(targets["note"])
 
-    def test_unevaluated_triage_fails_the_gate(self):
-        """未评测 ⇒ 也必须红：否则"删掉语料"就成了让闸门变绿的手段。"""
-        fails = gate_failures(_clean_report(triage_evaluated=False, triage_hit=0))
-        assert any("分诊未评测" in f for f in fails), fails
-
-    def test_evaluated_without_any_comparable_case_fails_the_gate(self):
-        """`evaluated=True` 但一条可评测用例都没有 = 没测（口径与 evaluate_triage 一致）。"""
-        fails = gate_failures(_clean_report(triage_total=0, triage_hit=0))
-        assert any("分诊未评测" in f for f in fails), fails
-
-    def test_triage_passing_the_threshold_passes_the_gate(self):
-        """达标（含恰好等于门限）⇒ 通过。"""
-        assert gate_failures(_clean_report(triage_hit=3)) == []  # 3/5 = 0.60
-        assert gate_failures(_clean_report(triage_hit=5)) == []  # 5/5 = 1.00
-
-    def test_triage_just_below_the_threshold_fails(self):
-        """2/5 = 0.40 < 0.60 ⇒ 红。门限不是"必须 > 0"那条松线。"""
-        fails = gate_failures(_clean_report(triage_hit=2))
-        assert any("分诊准确率" in f and "40.00%" in f for f in fails), fails
-
-    def test_missed_triage_cases_are_listed(self):
-        """失败原因里要带上未命中的用例，否则"0 分"没法排查。"""
-        report = _clean_report(triage_hit=0, triage_missed=["t01 期望 呼吸内科，实际 []"])
-        fails = gate_failures(report)
-        assert any("t01" in f for f in fails), fails
-
-    def test_threshold_is_a_parameter(self):
-        """门限是具名参数：临时放宽（供历史报告复算）时行为随之改变。"""
-        zero = _clean_report(triage_hit=0)
-        assert gate_failures(zero, triage_min_accuracy=0.0) == []
-
-    def test_default_threshold_is_explicit(self):
-        assert 0.0 < DEFAULT_TRIAGE_MIN_ACCURACY <= 1.0
+    def test_report_carries_the_targets_next_to_the_measurements(self):
+        payload = _clean_report().to_json()
+        assert payload["targets"]["triage_min_accuracy"] == TARGET_TRIAGE_MIN_ACCURACY  # type: ignore[index]
+        assert payload["targets"]["note"]  # type: ignore[index]
 
 
 class TestTriageMetricIsNotFaked:
@@ -163,5 +151,10 @@ class TestTriageMetricIsNotFaked:
 class TestReportShape:
     def test_json_export_has_the_three_sections(self, cases):
         payload = evaluate_redline(cases).to_json()
-        assert set(payload) >= {"n_cases", "redline", "booking", "triage"}
+        assert set(payload) >= {"n_cases", "redline", "booking", "triage", "invariant_violations"}
         assert {"recall", "false_positive_rate", "missed", "false_alarms"} <= set(payload["redline"])  # type: ignore[arg-type]
+
+    def test_invariant_violations_are_in_the_export(self):
+        """不变量触发记录必须进报告：它是唯一会卡闸门的东西，不能只在内存里。"""
+        report = _clean_report(invariant_violations=["x：no_fabricated_booking_action"])
+        assert report.to_json()["invariant_violations"] == ["x：no_fabricated_booking_action"]

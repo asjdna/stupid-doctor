@@ -284,3 +284,209 @@ class TestThePanelReachesTheModel:
         assert len(loop.calls) == 2
         assert "参考标准" in loop.calls[1], "重生成时把面板摘掉，等于换个更差的环境要求它做对"
         assert "完成态说法" in loop.calls[1]
+
+
+def _payload_with_signal(
+    *, summary: str, likelihood: str, severity: str = "severe", ruled_out_by: str = ""
+) -> str:
+    """带一条危险信号的模型输出（`angle` 必填，否则契约会记一条）。"""
+    return json.dumps(
+        {
+            "urgency": "urgent",
+            "red_flags": [
+                {
+                    "condition": "急性冠脉综合征",
+                    "severity": severity,
+                    "why": "胸痛伴气短",
+                    "angle": "组合共现",
+                    "likelihood": likelihood,
+                    "discriminator": "",
+                    "ruled_out_by": ruled_out_by,
+                    "evidence_ids": [],
+                }
+            ],
+            "departments": [{"name": "心内科", "confidence": 0.6}],
+            "differentials": [],
+            "exams": [],
+            "medications": [],
+            "patient_summary": summary,
+            "followup_questions": [],
+            "information_gaps": [],
+            "confidence": 0.7,
+            "citations": [],
+        },
+        ensure_ascii=False,
+    )
+
+
+class TestActiveInquiryLayer:
+    """**第二层：主动问诊**。未排除的危险信号必须有下文，否则服务端补一句追问。"""
+
+    def test_unresolved_signal_gets_a_deterministic_fallback_question(self):
+        loop = _Loop(_payload_with_signal(summary="建议尽快就诊，注意休息。", likelihood="possible"))
+        turn = _pipeline(loop).advance("我胸口有点闷")
+
+        assert safety_outcome(turn)["followup"], "未排除的信号没有下文时必须补追问"
+        assert "急性冠脉综合征" in turn.message
+        assert turn.action == "ask", "补了追问就该是 ask，否则前端不会把它当成待回答的问题"
+
+    def test_the_model_discriminator_is_used_when_present(self):
+        """服务端优先用模型写的那句"能区分要急救/不用急救"的问题。"""
+        payload = json.loads(_payload_with_signal(summary="建议尽快就诊。", likelihood="possible"))
+        payload["red_flags"][0]["discriminator"] = "有没有伴随大汗或向左肩放射？"
+        loop = _Loop(json.dumps(payload, ensure_ascii=False))
+        turn = _pipeline(loop).advance("我胸口有点闷")
+
+        assert "有没有伴随大汗或向左肩放射？" in turn.message
+
+    def test_a_ruled_out_signal_gets_no_question(self):
+        """写清排除依据的 `unlikely` 算排除：不该凭空多问一句。
+
+        `ruled_out_by` 为空时按未排除处理（缺省值不许把安全问题抹掉）——那条由下一个用例钉住。
+        """
+        loop = _Loop(
+            _payload_with_signal(
+                summary="目前更像肌肉拉伤，建议门诊就诊。",
+                likelihood="unlikely",
+                ruled_out_by="按压可诱发、无大汗、无放射痛",
+            )
+        )
+        turn = _pipeline(loop).advance("我胸口有点闷")
+
+        assert safety_outcome(turn)["followup"] == ""
+        assert "急性冠脉综合征" not in turn.message
+
+    def test_an_unexplained_unlikely_is_treated_as_unresolved(self):
+        """`unlikely` 但没写排除依据 ⇒ **仍算未排除**，照样要追问。"""
+        loop = _Loop(_payload_with_signal(summary="建议门诊就诊。", likelihood="unlikely"))
+        turn = _pipeline(loop).advance("我胸口有点闷")
+
+        assert safety_outcome(turn)["followup"], "没有依据的「已排除」不算排除"
+        assert turn.action == "ask"
+
+    def test_emergency_does_not_ask_first(self):
+        """判了急症就先给动作，不许反过来先追问（安全性优先）。"""
+        loop = _Loop(
+            _payload_with_signal(summary="请立即拨打 120。", likelihood="very_likely", severity="critical")
+        )
+        turn = _pipeline(loop).advance("我胸痛")
+
+        assert safety_outcome(turn)["followup"] == ""
+        assert "120" in turn.message
+
+    def test_a_critical_signal_with_urgent_urgency_is_escalated_by_the_gate(self):
+        """模型判出 `critical` 方向却把 `urgency` 写成 urgent ⇒ 安全门按信号升级。
+
+        这一条不能只看 `urgency`：契约层会记一条自相矛盾，但那是**留档**，
+        患者手上必须有急救动作，前端也才能弹出横幅。
+        """
+        loop = _Loop(
+            _payload_with_signal(
+                summary="这个情况建议尽快处理，请重视。", likelihood="possible", severity="critical"
+            )
+        )
+        turn = _pipeline(loop).advance("我胸口闷得厉害")
+
+        assert "120" in turn.message, "判出即刻危险的信号时必须给出急救动作"
+        assert turn.action == "emergency", "按信号升级后动作必须是 emergency（前端据此弹横幅）"
+        assert turns_invariant(turn, "emergency_judgment_requires_directive")
+
+
+class TestDeterministicSafetyGateLayer:
+    """**第三层：确定性安全门**。三条不变量里，急救指引那条是唯一"补内容"的。"""
+
+    def test_emergency_without_a_directive_is_amended(self):
+        """判了急症却只写"需要尽快处理" ⇒ 服务端把可执行的急救动作补上。"""
+        loop = _Loop(
+            json.dumps(
+                {
+                    "urgency": "emergency",
+                    "red_flags": [
+                        {
+                            "condition": "急性冠脉综合征",
+                            "severity": "critical",
+                            "why": "胸痛伴大汗",
+                            "angle": "组合共现",
+                            "likelihood": "likely",
+                            "evidence_ids": [],
+                        }
+                    ],
+                    "departments": [{"name": "心内科", "confidence": 0.9}],
+                    "differentials": [],
+                    "exams": [],
+                    "medications": [],
+                    "patient_summary": "这个情况需要尽快处理，请重视。",
+                    "followup_questions": [],
+                    "information_gaps": [],
+                    "confidence": 0.9,
+                    "citations": [],
+                },
+                ensure_ascii=False,
+            )
+        )
+        turn = _pipeline(loop).advance("我胸痛")
+
+        assert "120" in turn.message, "判了急症却没给动作时，服务端必须补固定指引"
+        assert turns_invariant(turn, "emergency_judgment_requires_directive")
+
+    def test_a_compliant_emergency_answer_is_left_untouched(self):
+        loop = _Loop(_payload(summary="请立即拨打 120 或前往最近医院急诊科。", urgency="emergency"))
+        turn = _pipeline(loop).advance("我胸痛")
+
+        assert turn.message == "请立即拨打 120 或前往最近医院急诊科。"
+        assert safety_outcome(turn)["fired"] == []
+
+    def test_detected_violations_show_up_as_invariants(self):
+        """`verify.py` 拦下的那两类要同时登记成不变量（同一件事的两个视角）。"""
+        loop = _Loop(
+            _payload(summary="已经为您挂上呼吸内科的号了。"),
+            _payload(summary="已经为您挂上呼吸内科的号了。"),
+        )
+        turn = _pipeline(loop).advance("帮我挂个号")
+
+        assert turns_invariant(turn, "no_fabricated_booking_action")
+
+    def test_safety_payload_shape_is_stable(self):
+        turn = _pipeline(_Loop(_payload(summary="建议到呼吸内科就诊。"))).advance("我咳嗽")
+        assert set(safety_outcome(turn)) == {"fired", "ids", "followup"}
+
+    def test_audit_is_written_when_an_index_root_is_configured(self, tmp_path):
+        """治理审计：触发的不变量要落一行 JSONL，并且**不带患者原话**。"""
+        from kubedocs.clinical.safety import read_audit
+
+        loop = _Loop(
+            _payload(summary="已经为您挂上呼吸内科的号了。"),
+            _payload(summary="已经为您挂上呼吸内科的号了。"),
+        )
+        pipeline = ClinicalPipeline(
+            backend=_Backend(),
+            reasoner=SimpleNamespace(),
+            tool_loop=loop,
+            index_root=tmp_path,
+        )
+        turn = pipeline.advance("帮我挂个号", patient_id="p-audit")
+
+        rows = read_audit(tmp_path)
+        assert rows, "触发了不变量却没写审计"
+        assert rows[0]["invariant"] == "no_fabricated_booking_action"
+        assert rows[0]["trace_id"] == turn.encounter_id, "审计要能对上就诊记录"
+        assert "挂上" not in json.dumps(rows, ensure_ascii=False), "审计里不许出现患者原话"
+
+    def test_no_audit_file_without_a_configured_root(self, tmp_path):
+        """没配落点（单测/嵌入式）时不许往磁盘上写东西。"""
+        loop = _Loop(
+            _payload(summary="已经为您挂上呼吸内科的号了。"),
+            _payload(summary="已经为您挂上呼吸内科的号了。"),
+        )
+        _pipeline(loop).advance("帮我挂个号")
+        assert list(tmp_path.iterdir()) == []
+
+
+def safety_outcome(turn: Any) -> dict[str, Any]:
+    """取安全门留档（缺字段就直接失败：那说明契约没接上）。"""
+    assert turn.safety is not None, "ClinicalTurn 必须带 safety 留档"
+    return dict(turn.safety)
+
+
+def turns_invariant(turn: Any, invariant: str) -> bool:
+    return invariant in safety_outcome(turn)["ids"]

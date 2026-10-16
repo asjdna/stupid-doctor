@@ -44,6 +44,7 @@ from kubedocs.agent.bootstrap import register_domain_tools
 from kubedocs.agent.tool_loop import AgentTurn, run_tool_loop
 from kubedocs.agent.tools import ToolRegistry, ToolSpec
 from kubedocs.clinical.reference import BookingFact
+from kubedocs.clinical.safety import prose_gate
 from kubedocs.clinical.verify import Verification, facts_only_answer, verify_prose
 from kubedocs.config import Settings
 from kubedocs.domains.clinic.data.departments import DEPARTMENTS
@@ -146,6 +147,12 @@ class ClinicTurn:
     与 `reference` **成对**回传：只给"让它看了什么"而没有"它哪里越界了"，事后无法回答
     "这次是依据不够，还是模型没守规矩"。重生成成功的那些违规**照样在这里**——回正不
     等于没发生过（与 `/consult` 的 `contract_violations` 同一口径）。
+    """
+    safety: dict[str, Any] | None = None
+    """**确定性安全门**这一轮触发了哪几条不变量（见 `clinical/safety.py`）。
+
+    散文路径拿不到结构化判断，所以这里只会有"能被事实锚定"的那两条
+    （无依据不给医学内容、不得声称未执行过的挂号动作）；急救指引那条只在 `/consult` 上成立。
     """
 
 
@@ -402,6 +409,10 @@ class ClinicReactRuntime:
             emergency = "120" in answer or "急诊" in answer
             notes.append("回答连续未通过事实校验：已改为只陈述事实")
 
+        # 第三层安全门在这条路径上**只留档**：散文路径没有结构化判断，
+        # 所以急救指引那条不适用（`safety.prose_gate`），能被事实锚定的两条已经拦在上面了。
+        safety = prose_gate([v.kind for v in recorded], trace_id=patient_id, domain="chat").to_payload()
+
         return ClinicTurn(
             text=answer,
             tool_calls=[
@@ -420,6 +431,7 @@ class ClinicReactRuntime:
             contract_violations=[
                 {"kind": v.kind, "severity": v.severity, "detail": v.detail} for v in recorded
             ],
+            safety=safety,
             steps=turn.steps,
             llm_calls=turn.llm_calls,
             notes=notes,

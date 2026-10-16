@@ -85,7 +85,19 @@ def pg_schema() -> Iterator[str]:
 
 
 def _assessment(urgency: str = "routine", *, red_flags: bool = False) -> ClinicalAssessment:
-    flags = [RedFlag(condition="急性冠脉综合征", severity="critical", why="胸痛伴大汗")] if red_flags else []
+    flags = (
+        [
+            RedFlag(
+                condition="急性冠脉综合征",
+                severity="critical",
+                why="胸痛伴大汗",
+                angle="组合共现",
+                likelihood="likely",
+            )
+        ]
+        if red_flags
+        else []
+    )
     return ClinicalAssessment(
         urgency=urgency,  # type: ignore[arg-type]
         red_flags=flags,
@@ -94,6 +106,7 @@ def _assessment(urgency: str = "routine", *, red_flags: bool = False) -> Clinica
         differentials=[DifferentialItem(condition="急性支气管炎", likelihood="medium")],
         exams=[ExamAdvice(name="血常规", why="看有没有感染")],
         medications=[MedicationAdvice(name="止咳糖浆", drug_class="镇咳药", why="对症")],
+        confidence=0.8,
     )
 
 
@@ -310,6 +323,8 @@ class _Turn:
         # 那会把"契约变了没同步"伪装成"接口挂了"。
         self.reference: dict[str, Any] | None = None
         self.contract_violations: list[dict[str, str]] = []
+        # 契约新增的第三个字段：确定性安全门这一轮执行了哪些底线（见 `clinical/safety.py`）。
+        self.safety: dict[str, Any] | None = {"fired": [], "ids": [], "followup": ""}
 
 
 @pytest.mark.parametrize("urgency", ["routine", "urgent"])

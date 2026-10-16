@@ -1,0 +1,101 @@
+{
+  "schema": 1,
+  "note": "临床安全资产与确定性安全不变量的治理清单。改动被哈希钉住的资产（rule_asset / prompt / goldset）必须在这里同步版本与理由，否则 scripts/check_governance.py 在 CI 里会失败——这就是变更控制。不变量条目必须与 kubedocs.clinical.safety.INVARIANTS 一一对应，并且每条都要在 tests/ 里能找到它的 id（没有测试覆盖的不变量等于没人守）。",
+  "assets": [
+    {
+      "id": "prompt.l1_l2_clinical",
+      "kind": "prompt",
+      "path": "src/kubedocs/clinical/prompts/system.md",
+      "sha256": "60618ef318cffc3d41dbecf342a0a7b17cb8dd244b2b5ec91bb87e91fc661a58",
+      "version": "2026.10.1",
+      "effective_date": "2026-10-16",
+      "source": "仓库内人工维护：L1 语义理解（多角度危险信号）、L2 主动问诊与不确定性交代的指令层",
+      "owner": "clinic 域维护者（尚未指派具名人员）",
+      "rationale": "提示词是产品契约的一部分：多角度扫描、不确定性交代、追问义务都写在里面。0.1 版补了「别人 / 既往 / 假设不算患者本人当前急症」这条边界——它是三维门控在模型侧的对应说法，少了它，模型会把家属与既往的症状判成本人的急症。改一个字的语气都会改变判断行为，所以哈希钉住，改了就留下记录。"
+    },
+    {
+      "id": "rule.danger_keywords",
+      "kind": "rule_asset",
+      "path": "src/kubedocs/domains/clinic/redline.py",
+      "sha256": "78a611ce4bb97662432fb2f5b3cfea09a4532fa10a11b252d1e2df6073c9805e",
+      "version": "2026.10.0",
+      "effective_date": "2026-10-16",
+      "source": "仓库内人工整理的危险信号关键词 + 三维门控（断言 / 经验者 / 时间性）",
+      "owner": "clinic 域维护者（尚未指派具名人员）",
+      "rationale": "这张表是喂给模型的**线索**，不参与判断：它决定模型能看到哪些词汇层面的信号，漏一条是线索质量回归，所以变更要留痕。"
+    },
+    {
+      "id": "rule.symptom_vocabulary",
+      "kind": "rule_asset",
+      "path": "src/kubedocs/domains/clinic/data/symptom_dict.py",
+      "sha256": "93079e23e96731d44c0df3a6e6e87598a281ce6c3d4cfcafc9203a9329703d93",
+      "version": "2026.10.0",
+      "effective_date": "2026-10-16",
+      "source": "仓库内人工整理的口语主诉词表（原话词 -> 标准症状词）",
+      "owner": "clinic 域维护者（尚未指派具名人员）",
+      "rationale": "口语归一是 L1 的输入线索之一：患者怎么说与词表认不认，直接决定面板里给到模型什么。"
+    },
+    {
+      "id": "rule.departments_and_fees",
+      "kind": "rule_asset",
+      "path": "src/kubedocs/domains/clinic/data/departments.py",
+      "sha256": "09d2d21e516d54ae2d8fa7dd25df871e175647af49c719cf3e4e743f1d39cb10",
+      "version": "2026.10.0",
+      "effective_date": "2026-10-16",
+      "source": "仓库内人工维护的可挂号科室清单与挂号费表（号源表的种子来源）",
+      "owner": "clinic 域维护者（尚未指派具名人员）",
+      "rationale": "科室清单是\"模型只能从可挂号科室里选\"这条约束的依据，挂号费是金额校验的唯一真相源。"
+    },
+    {
+      "id": "gold.clinic_cases",
+      "kind": "goldset",
+      "path": "data/eval/clinic_gold.jsonl",
+      "sha256": "ffb50eac69b510620ff953bb36fdc2016d9eb4297d100ff7d86168f904097a5f",
+      "version": "2026.10.0",
+      "effective_date": "2026-10-16",
+      "source": "仓库内自建评测用例（每行一条：期望危险信号 / 期望科室 / 期望挂号意图）",
+      "owner": "clinic 域维护者（尚未指派具名人员）",
+      "rationale": "它是评测的尺子本身，不构成临床验证。改动尺子要留痕：分数是治理记录，换尺子后与历史数字不可比。"
+    }
+  ],
+  "invariants": [
+    {
+      "id": "no_medical_advice_without_evidence",
+      "owner": "clinic 域维护者（尚未指派具名人员）",
+      "effective_date": "2026-10-16",
+      "rationale": "检索为空时给方向/检查/用药建议，等于用模型的通用知识冒充本地资料支撑的结论，患者分辨不出来。",
+      "verified_by": [
+        "tests/unit/test_safety.py",
+        "tests/unit/test_pipeline_constraints.py"
+      ]
+    },
+    {
+      "id": "no_fabricated_booking_action",
+      "owner": "clinic 域维护者（尚未指派具名人员）",
+      "effective_date": "2026-10-16",
+      "rationale": "号源动作只能由服务端执行；患者相信了\"已经挂上\"就不会再去挂号，这是不可挽回的误导。",
+      "verified_by": [
+        "tests/unit/test_safety.py",
+        "tests/unit/test_clinic_react.py",
+        "tests/unit/test_pipeline_constraints.py",
+        "scripts/eval_clinic.py"
+      ]
+    },
+    {
+      "id": "emergency_judgment_requires_directive",
+      "owner": "clinic 域维护者（尚未指派具名人员）",
+      "effective_date": "2026-10-16",
+      "rationale": "判了急症却没写可执行的急救动作，患者读完不知道该做什么。这条与另外两条相反：它补内容而不是删内容。",
+      "verified_by": [
+        "tests/unit/test_safety.py",
+        "tests/unit/test_pipeline_constraints.py",
+        "scripts/eval_clinic.py"
+      ]
+    }
+  ],
+  "governance_gaps": [
+    "尚无具名临床审阅人：所有安全资产目前只经过代码评审，**不能声称做过临床审阅**。",
+    "关键词表与症状词表的来源是仓库内人工整理，没有可追溯的外部标准版本号。",
+    "校准评测的样本量远小于能谈校准结论的量级（见 evaluation/calibration.py 的 MIN_MEANINGFUL_SAMPLES），它只用于看趋势。"
+  ]
+}

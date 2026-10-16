@@ -73,6 +73,7 @@ from kubedocs.clinical.persistence import (
     PgPersistence,
 )
 from kubedocs.clinical.pipeline import ClinicalPipeline, ClinicalTurn
+from kubedocs.clinical.safety import INVARIANTS, audit_path, read_audit
 from kubedocs.domains.clinic.pending import PendingBookings
 from kubedocs.observability import current_trace_id, span, span_attrs
 
@@ -112,6 +113,14 @@ RED_LINE_CONFLICT_NOTE = (
 
 DISCLAIMER = "本结果由系统根据您描述的症状与知识卡片生成，仅供导诊参考，不能替代医生诊断，也不构成处方。"
 """随每轮返回；前端把它作为**对话里的开场系统消息**，而不是页面上的独立面板。"""
+
+_SAFETY_MODEL_NOTE = (
+    "三层防护：① 语义理解（模型多角度识别危险信号，每条带角度与不确定性）；"
+    "② 主动问诊（未排除的危险信号必须问清能区分「要急救 / 不用急救」的那一个问题）；"
+    "③ 确定性安全门（服务端代码强制执行的三条不变量，见 safety_invariants）。"
+    "关键词表只是线索，不参与判断；安全门只做能被事实锚定的底线，不做医学判断。"
+)
+"""`/consult/status` 里对安全模型的**一句话自述**（部署方与运维看到的版本）。"""
 
 
 # ===========================================================================
@@ -372,6 +381,8 @@ class ConsultRuntime:
             # **有没有大模型**这条状态由 HTTP 层判定（密钥在 settings/env 里）：
             # 管线拿到它就知道该不该产出判断——没有判断者时它只回一句话。
             has_llm=self.has_llm,
+            # 安全审计日志（治理）落在索引根目录，与花费账本同处：一次备份就都带上了。
+            index_root=self._audit_root(),
         )
 
     # ---------------------------------------------------------------- 参考标准
@@ -383,6 +394,11 @@ class ConsultRuntime:
         if settings is None:  # 测试接缝里的假 runtime：当"有"，否则所有用例都会退化成无模型
             return True
         return bool(has_api_key(settings.llm_model))
+
+    def _audit_root(self) -> Any:
+        """安全审计日志的落点（索引根目录）。拿不到 settings 时返回 None = 不写文件。"""
+        settings = getattr(self._runtime, "settings", None)
+        return getattr(settings, "index_root", None)
 
     def link_map(self) -> Any:
         """症状→科室关联表（进程内缓存一次）。缺语料时返回空表，面板会如实写出来。"""
@@ -670,16 +686,25 @@ def to_payload(turn: ClinicalTurn, session_id: str, *, turns: int = 0) -> dict[s
         "encounter_id": turn.encounter_id,
         "emergency": model_emergency,
         "emergency_note": EMERGENCY_NOTE if model_emergency else "",
-        # 模型自己判出的急重症（可审计：病症 + 严重程度 + 依据）
+        # 模型自己判出的急重症（可审计：病症 + 严重程度 + 角度 + 不确定性 + 依据）
         "red_flags": [
             {
                 "condition": f.condition,
                 "severity": f.severity,
                 "why": f.why,
+                "angle": f.angle,
+                "likelihood": f.likelihood,
+                "discriminator": f.discriminator,
+                "ruled_out_by": f.ruled_out_by,
                 "evidence_ids": list(f.evidence_ids),
             }
             for f in (assessment.red_flags if assessment else [])
         ],
+        # **不确定性量化**：自报置信度 + 还缺什么信息。置信度不是概率，也不进任何阈值——
+        # 它只用来核对"低置信有没有交代缺口"，以及事后做校准统计。
+        "confidence": (assessment.confidence if assessment else None),
+        "information_gaps": list(assessment.information_gaps) if assessment else [],
+        "followup_questions": list(assessment.followup_questions) if assessment else [],
         # 关键词表的命中（**仅供排查**，不参与判断）：用来发现"模型是否漏了一个真急症"
         "keyword_hit": (turn.evidence.red_line.word if turn.evidence and turn.evidence.red_line else ""),
         "keyword_hit_conflict": keyword_hit_conflict,
@@ -690,6 +715,9 @@ def to_payload(turn: ClinicalTurn, session_id: str, *, turns: int = 0) -> dict[s
         # "这次是依据不够，还是模型没守规矩"——这是这套架构唯一可信的自证材料。
         "reference": turn.reference,
         "contract_violations": list(turn.contract_violations),
+        # **第三层安全门这一轮做了什么**：触发了哪几条不变量、处置动作是什么。
+        # 与 `contract_violations` 是同一件事的两个视角（明细 vs 底线执行）。
+        "safety": turn.safety or {"fired": [], "ids": [], "followup": ""},
         # 挂号的两张卡片：`pending_action` 需要患者点"确认"才会真的取号；
         # `appointments` 是患者本人的挂号记录（卡片上带"退号"按钮）。
         # 两者都由工具结果生成，不由模型那段话生成（见 `_booking_cards`）。
@@ -1000,7 +1028,12 @@ def build_consult_router(
                 "只由模型判出的 red_flags/urgency 决定（且该结论必须出自模型）；"
                 "关键词表已退出判断链，命中只在对话里留一句不一致提示，不打横幅"
             ),
-            "redline_source": "大模型按「病症 + 严重程度」判断（system.md R1）；关键词表不参与",
+            "safety_model": _SAFETY_MODEL_NOTE,
+            # 治理可见性：三层防护各自的落点与最近触发记录。**"没有触发"与"没在跑"要能分开**，
+            # 所以这里同时给出不变量条数与审计日志条数（读不到文件是 0，不是缺字段）。
+            "safety_invariants": [i.id for i in INVARIANTS],
+            "safety_audit_path": str(audit_path(Path(rt._audit_root()))) if rt._audit_root() else "",
+            "safety_audit_recent": read_audit(rt._audit_root()) if rt._audit_root() else [],
             "ui_contract": (
                 "前端渲染 message、急诊横幅，以及 `pending_action` / `appointments` 两类挂号卡片"
                 "（卡片内容来自服务端，前端不自己拼）；其余结构化字段仅供后端留档"

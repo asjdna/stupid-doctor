@@ -148,6 +148,8 @@ def _assessment_json(**over: object) -> str:
         "medications": [{"name": "硝酸酯类", "drug_class": "抗心绞痛", "why": "y", "evidence_ids": ["K1"]}],
         "patient_summary": "建议尽快到心血管内科就诊，可能需要做心电图。",
         "followup_questions": [],
+        "information_gaps": [],
+        "confidence": 0.8,
         "citations": [
             {"index": 1, "title": "T", "source_url": "https://example.invalid/x", "chunk_id": "K1"}
         ],
@@ -207,8 +209,92 @@ class TestContracts:
             departments=[{"name": "内科"}],
             exams=[{"name": "血常规", "evidence_ids": ["K1"]}],
             patient_summary="建议到内科就诊",
+            confidence=0.8,
         )
         assert contracts.validate_against(a, {"K1"}) == []
+
+    def test_missing_confidence_is_a_problem(self) -> None:
+        """不确定性没量化 ⇒ 记一条（不是替模型填一个中间值：那会让"没量化"看起来像"量化过了"）。"""
+        a = contracts.ClinicalAssessment(
+            urgency="routine", departments=[{"name": "内科"}], patient_summary="建议到内科就诊"
+        )
+        assert any("confidence" in p for p in contracts.validate_against(a, set()))
+
+    def test_low_confidence_requires_information_gaps(self) -> None:
+        """低置信又不交代缺什么 ⇒ 记一条；交代了就放行。"""
+        base = {
+            "urgency": "routine",
+            "departments": [{"name": "内科"}],
+            "patient_summary": "建议到内科就诊",
+            "confidence": 0.4,
+        }
+        assert any(
+            "information_gaps" in p
+            for p in contracts.validate_against(contracts.ClinicalAssessment(**base), set())
+        )
+        assert (
+            contracts.validate_against(
+                contracts.ClinicalAssessment(**base, information_gaps=["不知道疼痛是否活动后加重"]), set()
+            )
+            == []
+        )
+
+    def test_unresolved_danger_signal_must_be_asked_about(self) -> None:
+        """**L2 的落点**：未排除的危险信号既不追问、又不是急症 ⇒ 契约问题。"""
+        flag = {
+            "condition": "急性冠脉综合征",
+            "severity": "severe",
+            "why": "胸痛伴气短",
+            "angle": "组合共现",
+            "likelihood": "possible",
+        }
+        base = {
+            "urgency": "urgent",
+            "departments": [{"name": "心内科"}],
+            "patient_summary": "建议尽快就诊。",
+            "confidence": 0.8,
+            "red_flags": [flag],
+        }
+        assert any(
+            "没有追问" in p for p in contracts.validate_against(contracts.ClinicalAssessment(**base), set())
+        )
+        assert (
+            contracts.validate_against(
+                contracts.ClinicalAssessment(**base, followup_questions=["有没有大汗或放射痛？"]), set()
+            )
+            == []
+        )
+
+    def test_a_ruled_out_signal_needs_no_question(self) -> None:
+        """写清排除依据的 `unlikely` 算排除；**没写依据**的不算（缺省不许把安全问题抹掉）。"""
+        flag = {
+            "condition": "急性冠脉综合征",
+            "severity": "severe",
+            "why": "胸痛",
+            "angle": "症状性质",
+            "likelihood": "unlikely",
+            "ruled_out_by": "按压可诱发、无大汗、无放射痛",
+        }
+        a = contracts.ClinicalAssessment(
+            urgency="routine",
+            departments=[{"name": "心内科"}],
+            patient_summary="建议门诊就诊。",
+            confidence=0.8,
+            red_flags=[flag],
+        )
+        assert contracts.validate_against(a, set()) == []
+        assert contracts.unresolved_signals(a) == []
+
+    def test_angle_is_required_for_every_danger_signal(self) -> None:
+        """多角度扫描是硬性要求：`angle` 为空的危险信号记一条问题。"""
+        a = contracts.ClinicalAssessment(
+            urgency="emergency",
+            departments=[{"name": "急诊科"}],
+            patient_summary="请立刻拨打 120。",
+            confidence=0.9,
+            red_flags=[{"condition": "脑卒中", "severity": "critical", "why": "突发单侧无力"}],
+        )
+        assert any("角度" in p for p in contracts.validate_against(a, set()))
 
 
 # --------------------------------------------------------------------- RAG 后端
@@ -459,7 +545,7 @@ class TestContractEnforcement:
         assert out.assessment.departments
         assert out.assessment.patient_summary == "请立刻拨打 120。"
         assert out.assessment.exams == []  # 有依据才留
-        assert any("急重症判断" in p for p in out.problems)  # 只记不丢
+        assert any("危险信号" in p for p in out.problems)  # 只记不丢
 
     def test_clean_assessment_passes_untouched(self) -> None:
         a = contracts.ClinicalAssessment(
@@ -468,6 +554,7 @@ class TestContractEnforcement:
             exams=[contracts.ExamAdvice(name="血常规", evidence_ids=["K1"])],
             medications=[contracts.MedicationAdvice(name="止咳糖浆", evidence_ids=["K2"])],
             patient_summary="建议就诊。",
+            confidence=0.8,
         )
         out = contracts.enforce(a, {"K1", "K2"})
         assert out.dropped == []
@@ -488,14 +575,22 @@ class TestSystemPrompt:
             "检索不到就不给",  # R3
             "不给确定诊断",  # R4
             "不要编造依据编号",  # R6
-            # R1：急重症由模型按病症 + 严重程度判断，不查关键词表
-            "急重症由你判断",
+            # R1：危险信号由模型多角度判断，不查关键词表
+            "危险信号由你识别",
+            "多角度",
             "病症",
             "严重程度",
             "red_flags",
             "拿不准时往重的一侧判",  # 保守偏置必须写在提示词里
             "120",
             "followup_questions",
+            # L2 主动问诊 + 不确定性量化
+            "主动问诊",
+            "discriminator",
+            "information_gaps",
+            "confidence",
+            # L3 确定性安全门
+            "确定性安全门",
             "证据_ids",
         ],
     )

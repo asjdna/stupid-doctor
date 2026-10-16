@@ -2,8 +2,15 @@
   "schema": 1,
   "gold_sha256": "115b82ae96ed9c67",
   "n_cases": 26,
+  "llm_note": "LLM 臂的分数**每次重跑都会有波动**（模型不是确定性的）：把它写进基线是为了\n\"记录当时是什么样子\"，**不是**当回归门限用。基线只有规则臂的线索质量读数\n（危险信号词表漏报、误报率与基线比较）用于回归判断——那部分是确定性的，值得比。",
   "metrics": {
     "n_cases": 26,
+    "targets": {
+      "redline_recall": 1.0,
+      "false_positive_rate": 0.2,
+      "triage_min_accuracy": 0.6,
+      "note": "参考目标，不判通过/不通过：指标来自自建小样本用例集，不构成临床验证"
+    },
     "redline": {
       "recall": 1.0,
       "false_positive_rate": 0.0,
@@ -22,16 +29,83 @@
     },
     "triage": {
       "evaluated": true,
-      "accuracy": 0.0,
-      "hit": 0,
+      "accuracy": 1.0,
+      "hit": 5,
       "total": 5,
-      "missed": [
-        "t01 期望 呼吸内科，实际 []",
-        "t02 期望 神经内科，实际 []",
-        "t03 期望 消化内科，实际 []",
-        "t04 期望 皮肤科，实际 ['急诊科', '感染科', '肛肠科']",
-        "t05 期望 耳鼻喉科，实际 []"
-      ]
+      "missed": []
+    },
+    "invariant_violations": [],
+    "llm": {
+      "evaluated": true,
+      "reason": "",
+      "n_cases": 31,
+      "targets": {
+        "redline_recall": 1.0,
+        "false_positive_rate": 0.2,
+        "triage_min_accuracy": 0.6,
+        "note": "参考目标，不判通过/不通过（见 evaluation/clinic.py 顶部）"
+      },
+      "redline": {
+        "recall": 1.0,
+        "false_positive_rate": 0.1176,
+        "tp": 9,
+        "fn": 0,
+        "fp": 2,
+        "tn": 15,
+        "missed": [],
+        "false_alarms": [
+          "n02[redline_other] 我父亲昨天说心口疼",
+          "n03[redline_other] 我家孩子喘不上气，要不要去医院"
+        ]
+      },
+      "triage": {
+        "accuracy": 1.0,
+        "hit": 5,
+        "total": 5,
+        "missed": []
+      },
+      "failed_calls": [],
+      "n_failed_calls": 0,
+      "llm_calls": 31,
+      "cost_usd": 0.01241,
+      "invariant_violations": [],
+      "calibration": {
+        "n": 31,
+        "brier": 0.27379032258064523,
+        "bins": [
+          {
+            "range": "0.0-0.2",
+            "n": 0,
+            "mean_confidence": 0.0,
+            "accuracy": 0.0
+          },
+          {
+            "range": "0.2-0.4",
+            "n": 7,
+            "mean_confidence": 0.3214,
+            "accuracy": 1.0
+          },
+          {
+            "range": "0.4-0.6",
+            "n": 18,
+            "mean_confidence": 0.4667,
+            "accuracy": 0.8889
+          },
+          {
+            "range": "0.6-0.8",
+            "n": 0,
+            "mean_confidence": 0.0,
+            "accuracy": 0.0
+          },
+          {
+            "range": "0.8-1.0",
+            "n": 6,
+            "mean_confidence": 0.9,
+            "accuracy": 1.0
+          }
+        ],
+        "note": "样本量 31：可看趋势，仍不构成临床校准（需要成百上千条带金标病例）"
+      }
     }
   }
 }

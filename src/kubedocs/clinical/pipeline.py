@@ -36,6 +36,7 @@ from __future__ import annotations
 import json
 import logging
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any, Literal
 from uuid import uuid4
 
@@ -51,6 +52,8 @@ from kubedocs.clinical.persistence import (
 from kubedocs.clinical.rag import RetrievalBackend
 from kubedocs.clinical.reasoning import ClinicalReasoner, _extract_json
 from kubedocs.clinical.reference import FactSet, build_facts
+from kubedocs.clinical.safety import SafetyAudit, SafetyOutcome, apply_gate
+from kubedocs.clinical.safety import append_audit as append_safety_audit
 from kubedocs.clinical.verify import facts_only_answer, strip_ungrounded, verify
 from kubedocs.llm_status import NO_LLM_MESSAGE
 
@@ -100,6 +103,14 @@ class ClinicalTurn:
     而这个读数决定了这套"判断交给大模型"的架构能不能被信任。
     """
 
+    safety: dict[str, Any] | None = None
+    """**确定性安全门**（第三层）这一轮触发了哪些不变量（见 `clinical/safety.py`）。
+
+    与 `contract_violations` 的分工：`contract_violations` 是"模型哪里越界了"的**逐条明细**，
+    `safety` 是"程序因此执行了哪几条底线"的**可对账读数**（不变量 id + 处置动作）。
+    两者都进审计：前者在响应里给人看，后者另有一行写入 `safety_audit.jsonl`。
+    """
+
 
 class ClinicalPipeline:
     """把各项能力装到一起。**每个依赖都是注入的**，所以每一段都能被单测替换。
@@ -143,6 +154,7 @@ class ClinicalPipeline:
         top_k: int = 10,
         reference_builder: Any = None,
         has_llm: Any = None,
+        index_root: str | Path | None = None,
     ) -> None:
         self._backend = backend
         self._reasoner = reasoner
@@ -156,6 +168,9 @@ class ClinicalPipeline:
         # 默认"有"：单测里的打桩管线不需要每次都声明它，而"默认无 LLM"会让所有
         # 现有用例静默退化成"未连接大模型"，那是最难查的一种假绿。
         self._has_llm = has_llm or (lambda: True)
+        # 安全审计日志的落点。默认 None = **不写文件**（单测与嵌入式用法不该往磁盘上留东西），
+        # 真实部署由 HTTP 层注入 `settings.index_root`（见 api/consult.py）。
+        self._audit_root_override: Path | None = Path(index_root) if index_root else None
 
     def advance(
         self,
@@ -201,6 +216,7 @@ class ClinicalPipeline:
         # 三条返回路径（正常/工具循环失败/输出不合契约）都从这里出去，所以主键在这里统一生成。
         turn.encounter_id = uuid4().hex
         self._persist(question, history, patient_id, turn)
+        self._audit_safety(turn)
         return turn
 
     def _persist(
@@ -255,6 +271,31 @@ class ClinicalPipeline:
         if message:
             rows.append({"role": "assistant", "content": message})
         return rows
+
+    def _audit_safety(self, turn: ClinicalTurn) -> None:
+        """把这一轮触发的安全不变量写进治理审计日志（`safety_audit.jsonl`）。
+
+        写在落库之后、返回之前：审计要能拿 `trace_id`（= `encounter_id`）与就诊记录对上，
+        而失败**不影响这一轮应答**（与落库同一条纪律，见 `clinical/safety.py`）。
+        没有配审计落点（`index_root=None`，单测与嵌入式用法）时**什么都不写**。
+        """
+        root = self._audit_root_override
+        if root is None or not turn.safety:
+            return
+        fired = turn.safety.get("fired") or []
+        if not fired:
+            return
+        records = [
+            SafetyAudit(
+                invariant=str(row.get("invariant", "")),
+                action=str(row.get("action", "record_only")),  # type: ignore[arg-type]
+                detail=str(row.get("detail", "")),
+                trace_id=turn.encounter_id,
+                domain="clinic",
+            )
+            for row in fired
+        ]
+        append_safety_audit(root, SafetyOutcome(message=turn.message, fired=records))
 
     def _tool_loop_turn(
         self,
@@ -392,11 +433,39 @@ class ClinicalPipeline:
         if dropped:
             logger.warning("按 R3 丢弃无依据建议：%s", "、".join(dropped))
 
+        # **第三层：确定性安全门**（`clinical/safety.py`）。放在最后一步，因为它看的是
+        # "患者最终会看到的那段话"：前三层（语义理解 / 主动问诊 / 契约校验）都跑完之后，
+        # 由它执行那几条谁也不能例外的底线——判了急症就必须有急救动作（缺了就补），
+        # 未排除的危险信号没有下文时必须由服务端补一句追问。
+        safety = apply_gate(
+            assessment,
+            message,
+            violated_kinds=sorted({v.kind for v in recorded}),
+            trace_id="",
+            domain="clinic",
+        )
+        message = safety.message
+        if safety.fired:
+            logger.info("确定性安全门触发：%s", safety.ids)
+
         # 追问由模型的 `followup_questions` 决定（编排层不设追问闸门）。
         # 但**急重症优先**：判出急症时不给"先追问"的动作，必须先给急救指引。
+        escalated = "emergency_judgment_requires_directive" in safety.ids
+        followup = list(assessment.followup_questions)
+        if safety.followup and safety.followup not in followup:
+            # 问诊层没给出追问、而安全门判定"还没排除"时，补一句确定性的追问。
+            followup.append(safety.followup)
+            if not blocked:
+                message = f"{message}\n\n{safety.followup}" if message else safety.followup
+
         if blocked:
             action: TurnAction = "error"
-        elif assessment.followup_questions and assessment.urgency != "emergency":
+        elif escalated:
+            # 安全门按模型自己给出的信号（critical / likely）补了急救动作 ⇒ 这一轮就是急症轮，
+            # 不能因为 `urgency` 被写成 urgent 就把动作降成"常规回答"（那会让前端不弹横幅、
+            # 患者也看不到"立刻去医院"）。
+            action = "emergency"
+        elif followup and assessment.urgency != "emergency":
             action = "ask"
         else:
             action = "emergency" if assessment.urgency == "emergency" else "answer"
@@ -416,6 +485,7 @@ class ClinicalPipeline:
             contract_violations=[
                 {"kind": v.kind, "severity": v.severity, "detail": v.detail} for v in recorded
             ],
+            safety=safety.to_payload(),
             degraded=degraded,
         )
 

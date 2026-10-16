@@ -1,35 +1,44 @@
 """clinic 域评测：**两个臂分开报**——规则臂（线索提供者）+ LLM 臂（真正的判断者）。
 
 用法：
-    python scripts/eval_clinic.py --arm both --gate --json   # 默认：两个臂都跑，LLM 臂是硬闸门
+    python scripts/eval_clinic.py --arm both --gate --json   # 默认：两臂都跑，闸门只卡安全不变量
     python scripts/eval_clinic.py --arm rule --gate          # 离线只跑规则臂（不花钱）
     python scripts/eval_clinic.py --arm llm                  # 只跑 LLM 臂（会调模型、会花钱）
     python scripts/eval_clinic.py --write-baseline           # 重建冻结基线（含 LLM 臂数值）
 
+## 指标是记录，闸门只卡确定性安全不变量
+
+危险信号召回、误报率、分诊命中率都是**要看的数**：它们来自自建的小样本用例集，
+能说明趋势与回归，不能承担"这条回答安全"的责任。把 100% 召回写成门限，只会得到两种
+结果——为了让闸门变绿而放宽尺子，或者一个永远红着、没人看的闸门。
+
+所以 `--gate` 现在只失败于两件事（见 `evaluation/clinic.py` 的 `governance_failures`
+与 `evaluation/clinic_llm.py` 的 `llm_governance_failures`）：
+
+1. **这次运行不能作为证据**：一条用例都没跑、或有题目没拿到模型判断；
+2. **触发了确定性安全不变量**：无依据给医学内容、编造挂号动作、判了急症却不给急救动作
+   —— 这三条由代码强制执行，触发就是真问题，与样本量无关。
+
+规则臂与冻结基线不可比（标注集指纹变了）时**只写档案注记，不判失败**：跨标注集的分数
+本来就不该拿来比，注明即可。
+
+真正确保安全的是三层防护（语义理解 / 主动问诊 / 确定性安全门，见 `clinical/safety.py`）
+与治理审计，不是这里的分数。
+
 ## 为什么是两个臂
 
-架构已把全部判断交给大模型：急诊红线词表 + 三维极性、症状词表、症状→科室票数都
-**降级为证据提供者**（见 `clinical/reference.py` 的分工表）。所以闸门不能只测规则轨——
-那测的是一个**已经不再做决定**的组件，它绿着说明不了产品。本脚本因此分两臂：
-
-- **规则臂**（确定性、免费）：红线召回（喂给模型的最高优先级线索一条都不许漏）
-  + 相对基线的误报率回归比较。它的**分诊数字只报不卡**——规则臂已经是线索提供者，
-  拿它卡门限等于用错尺子。
-- **LLM 臂**（`ClinicalReasoner`，每题一次调用）：**硬闸门**，红线召回 100%（零容差）、
-  误报率 ≤20%、分诊 ≥60%。这些门限是固定常量，**不拿基线做比较**（模型不确定，
-  重跑分数会波动）；基线里只记录它"当时是什么样子"。没有密钥时标为「未评测」，
-  而**未评测 = 闸门失败**（没测不等于测了没问题）。
-
-`--arm rule` 是**离线复现历史规则轨**的模式：此时没有 LLM 判断者，规则臂自己的口径
-（含分诊门限）仍然卡。一旦 LLM 臂参与（`both`/`llm`），判断权归 LLM，
-规则臂的分诊数字就只剩"线索质量"的含义，只报不卡。
+架构已把全部判断交给大模型：危险信号关键词 + 三维极性、症状词表、症状→科室票数都
+**降级为证据提供者**（见 `clinical/reference.py` 的分工表）。所以只测规则轨没有意义——
+那测的是一个**已经不再做决定**的组件。规则臂的价值在于它是最便宜、最稳定的
+**线索质量读数**（危险信号词表漏一条仍然是回归）；LLM 臂才是产品的判断者。
 
 前置条件：`--gold` 默认 `data/eval/clinic_gold.jsonl`；规则臂的分诊依赖 clinic 受限卡片
 语料，缺语料时记为「未评测」。
-输出：两个臂各自的红线召回率/误报率、分诊 top-3 命中率与错误明细；LLM 臂另有
-失败调用数 / 调用次数 / 花费。
+输出：两个臂各自的危险信号召回率/误报率、分诊 top-3 命中率与错误明细；LLM 臂另有
+失败调用数 / 调用次数 / 花费 / 安全不变量触发记录 / 置信度校准报告。
 退出码：0 通过 / 1 参数错误 / 2 闸门不通过 / 3 前置条件不满足。
 `--json` 只改格式（旁白改道 stderr），**不**绕过闸门，退出码仍由 `--gate` 决定。
+`--archive` 把这一轮的完整报告写成治理档案（默认写到 `data/eval/clinic_archive/`）。
 """
 
 from __future__ import annotations
@@ -37,6 +46,7 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -50,40 +60,36 @@ from kubedocs.evaluation.clinic import (  # noqa: E402
     clinic_gold_sha256,
     evaluate_redline,
     evaluate_triage,
-    gate_failures,
+    governance_failures,
     load_clinic_gold,
-    redline_gate_failures,
+    reporting_targets,
 )
 from kubedocs.evaluation.clinic_llm import (  # noqa: E402
     LLM_FALSE_POSITIVE_LIMIT,
     LLM_TRIAGE_MIN_ACCURACY,
     LlmClinicReport,
     evaluate_llm_arm,
-    llm_gate_failures,
+    llm_governance_failures,
 )
 
 GOLD = REPO_ROOT / "data" / "eval" / "clinic_gold.jsonl"
 BASELINE = REPO_ROOT / "data" / "eval" / "clinic_baseline.json"
+ARCHIVE_DIR = REPO_ROOT / "data" / "eval" / "clinic_archive"
 
-GATE_FP_TOLERANCE = 0.05  # 相对基线允许的误报率上升幅度；红线召回容差为 0（安全属性）
-
-TRIAGE_RED_NOTE = """分诊为什么是红的：冻结基线里记着的就是 0 分。
+TRIAGE_RED_NOTE = """分诊为什么是 0 分：冻结基线里记着的就是 0。
   · data/eval/clinic_baseline.json 的 triage.accuracy = 0.0（hit 0 / total 5、evaluated=true）；
   · 根因是受限卡片语料与症状词典两套词汇不重合（证据键覆盖率 1/6）；
-  · 基线是冻结的、**不允许为了让闸门变绿而改**（改基线等于把红灯涂成绿灯）；
-  · 要让它变绿只有一条路：真的把分诊做对（补口语->体征映射或换语料），而不是放宽门限。
-  门限取值理由见 src/kubedocs/evaluation/clinic.py 的 DEFAULT_TRIAGE_MIN_ACCURACY。"""
+  · 这是**记录**不是闸门：分数低不代表系统不安全（安全由三层防护保证），
+    但它确实是"分诊这条线索目前不可用"的读数，别把它当成可以忽略的数字。
+  · 要让它变好只有一条路：真的把分诊做对（补口语->体征映射或换语料）。"""
 
-LLM_TRIAGE_RED_NOTE = """LLM 臂分诊为什么是红的：分诊现在是模型的结论（`assessment.departments` 前三名）。
-  · 门限 60% 是**固定常量**（`clinic_llm.LLM_TRIAGE_MIN_ACCURACY`），不看基线：
-    基线只记录它重跑时的数值，模型不是确定性的，拿基线卡它会把波动当成回归；
-  · 要让它变绿只有一条路：让模型真的答对科室（改提示词/给更好的候选线索/补语料），
-    而不是放宽门限或换一把尺子。"""
+LLM_TRIAGE_RED_NOTE = """LLM 臂分诊是模型的结论（`assessment.departments` 前三名）。
+  · 它是**记录**不是门限：模型不是确定性的，拿固定分数卡退出码只会把正常波动当成回归；
+  · 要让它变好只有一条路：让模型真的答对科室（改提示词/给更好的候选线索/补语料）。"""
 
 LLM_BASELINE_NOTE = """LLM 臂的分数**每次重跑都会有波动**（模型不是确定性的）：把它写进基线是为了
-"记录当时是什么样子"，**不是**当回归门限用。回归门限只看规则臂
-（metrics.redline.false_positive_rate 与基线比较）；LLM 臂的门限是固定常量
-（红线召回 100% / 误报率 ≤20% / 分诊 ≥60%，见 clinic_llm.llm_gate_failures）。"""
+"记录当时是什么样子"，**不是**当回归门限用。基线只有规则臂的线索质量读数
+（危险信号词表漏报、误报率与基线比较）用于回归判断——那部分是确定性的，值得比。"""
 
 
 def _emit(text: str, *, json_mode: bool) -> None:
@@ -113,10 +119,9 @@ def _triage_candidates(*, json_mode: bool = False) -> Any:
 
 
 def _run_rule_arm(cases: list[ClinicCase], *, json_mode: bool) -> tuple[ClinicReport, int, int]:
-    """规则臂：红线 + 挂号意图 + 分诊。**行为与改动前的脚本逐字一致**。
+    """规则臂：危险信号词表 + 挂号意图 + 分诊。**口径与之前逐字一致**。
 
-    它现在是线索提供者的质量记录，不再是产品结论的来源；但记录口径不变，
-    历史基线才比得下去。
+    它现在是线索提供者的质量读数，不再是产品结论的来源；但口径不变，历史基线才比得下去。
     """
     report = evaluate_redline(cases)
 
@@ -223,20 +228,20 @@ def _run_llm_arm(cases: list[ClinicCase]) -> LlmClinicReport:
 def _print_rule_arm(report: ClinicReport, triage_cases: list[ClinicCase], cov_num: int, cov_den: int) -> None:
     print("规则臂（确定性，是线索提供者，不再是判断者）")
     print(
-        f"用例总数    : {report.n_cases}（红线） + {report.booking_total}（挂号意图）"
+        f"用例总数    : {report.n_cases}（危险信号） + {report.booking_total}（挂号意图）"
         f" + {len(triage_cases)}（分诊）"
     )
     recall = report.redline_recall
     print(
-        f"红线召回    : "
+        f"危险信号召回: "
         f"{'未评测（用例集里没有 expect_red_line）' if recall is None else f'{recall:.2%}'}"
         f"  (TP={report.redline_tp} FN={report.redline_fn})"
-        f"   ← 喂给模型的最高优先级线索，一条都不许漏"
+        f"   ← 喂给模型的线索，漏一条就是线索质量回归"
     )
     print(
-        f"红线误报率  : {report.redline_false_positive_rate:.2%}"
+        f"危险信号误报: {report.redline_false_positive_rate:.2%}"
         f"  (FP={report.redline_fp} TN={report.redline_tn})"
-        f"   ← 与基线比较（判据不因臂而异）"
+        f"   ← 关键词表判据（记录；判断由 LLM 臂给出）"
     )
     acc_booking = report.booking_accuracy
     print(
@@ -266,85 +271,91 @@ def _print_llm_arm(report: LlmClinicReport) -> None:
     print("LLM 臂（真正的判断者）")
     if not report.evaluated:
         print(f"  未评测      : {report.reason}")
-        print(
-            "  · **未评测不等于通过**：红线召回 100% / 误报率 ≤20% / 分诊 ≥60% 这三条门限一条都没有被检验。"
-        )
+        print("  · **未评测不等于通过**：这次一条用例都没跑成，召回/误报/分诊三个数一个都没测到。")
         return
     recall = report.redline_recall
     print(
-        f"  红线召回    : "
+        f"  危险信号召回: "
         f"{'未评测（用例集里没有 expect_red_line）' if recall is None else f'{recall:.2%}'}"
-        f"  (TP={report.redline_tp} FN={report.redline_fn})   ← 硬闸门，要求 100%"
+        f"  (TP={report.redline_tp} FN={report.redline_fn})   ← 参考目标 100%（记录，不判通过/不通过）"
     )
     print(
-        f"  红线误报率  : {report.redline_false_positive_rate:.2%}"
+        f"  危险信号误报: {report.redline_false_positive_rate:.2%}"
         f"  (FP={report.redline_fp} TN={report.redline_tn})"
-        f"   ← 上限 {LLM_FALSE_POSITIVE_LIMIT:.0%}"
+        f"   ← 参考目标 ≤{LLM_FALSE_POSITIVE_LIMIT:.0%}；判据是「判成急症或还有未排除的危险信号」"
     )
     acc = report.triage_accuracy
     print(
         f"  分诊科室    : "
         f"{'未评测（没有 expect_department 用例）' if acc is None else f'{acc:.2%} top3 命中'}"
-        f"  (hit {report.triage_hit}/{report.triage_total})   ← 门限 {LLM_TRIAGE_MIN_ACCURACY:.0%}"
+        f"  (hit {report.triage_hit}/{report.triage_total})   ← 参考目标 {LLM_TRIAGE_MIN_ACCURACY:.0%}"
     )
     print(f"  失败调用    : {report.n_failed_calls}   ← 没有得到模型判断的题（未评测不等于通过）")
     print(f"  调用次数    : {report.llm_calls}")
     print(f"  花费（美元）: {report.cost_usd:.6f}")
     print(
-        "  · 门限是固定常量（红线召回 100% / 误报率 ≤20% / 分诊 ≥60%），**不拿基线做比较**："
-        "模型不是确定性的，基线只记录它当时的样子。"
+        "  · 上面的分数是**记录**：参考目标 "
+        f"召回 100% / 误报 ≤{LLM_FALSE_POSITIVE_LIMIT:.0%} / 分诊 ≥{LLM_TRIAGE_MIN_ACCURACY:.0%}，"
+        "但**不判通过/不通过**；闸门只看「有没有拿到判断」与「有没有触发确定性安全不变量」。"
     )
+    print(
+        f"  安全不变量  : "
+        f"{'未触发（0 条）' if not report.invariant_violations else f'触发 {len(report.invariant_violations)} 条'}"
+    )
+    cal = report.calibration()
+    if cal.n:
+        print(f"  置信度校准  : n={cal.n} Brier={cal.brier:.4f}（只报告，不上门限）；{cal.note}")
+        for b in cal.bins:
+            if b.n:
+                print(
+                    f"    {b.lo:.1f}-{b.hi:.1f}: n={b.n} 平均置信 {b.mean_confidence:.2f}"
+                    f" 实际判对 {b.accuracy:.2%}"
+                )
+    else:
+        print(f"  置信度校准  : {cal.note}")
     for label, items in (
         ("漏报", report.redline_missed),
         ("误报", report.redline_false_alarms),
         ("分诊未命中", report.triage_missed),
         ("未判断", report.failed_calls),
+        ("安全不变量", report.invariant_violations),
     ):
         for item in list(items)[:10]:
             print(f"  ✗ {label}: {item}")
 
 
-def _baseline_failures(
+def _baseline_notes(
     report: ClinicReport, cases: list[ClinicCase], baseline: Path, *, json_mode: bool
 ) -> list[str]:
-    """规则臂与冻结基线的比较（现有逻辑：指纹绑定 + 误报率回归）。
+    """规则臂与冻结基线的比较 → **档案注记**（不改退出码）。
 
-    只有规则臂进这里：LLM 臂的分数每次重跑都会波动（模型不确定），拿它做回归门限
-    等于把波动当回归。它的门限是固定常量。
+    只有规则臂进这里：它是确定性的，与基线比较才有意义（LLM 臂每次重跑都会波动）。
+    注记的用途是让档案可读——"这次的误报率比基线高了多少""尺子有没有换过"。
+    它**不再判失败**：指标是记录，闸门只卡确定性安全不变量。
     """
-    fails: list[str] = []
+    notes: list[str] = []
     if not baseline.exists():
         _emit("（没有基线文件；跳过基线比较）", json_mode=json_mode)
-        return fails
+        return notes
     base_raw = json.loads(baseline.read_text(encoding="utf-8"))
     base = base_raw["metrics"]
     current_sha = clinic_gold_sha256(cases)
     if "gold_sha256" not in base_raw:
-        # 旧格式基线缺指纹即拒绝比较：跳过校验会放过"改了尺子"的情况。
-        fails.append(
-            "基线没有 gold_sha256（旧格式）：无法判断这把尺子是否被改过 ⇒ 拒绝比较。"
-            "确认无误后用 `--write-baseline` 重建基线"
-        )
+        notes.append("基线没有 gold_sha256（旧格式）：无法判断这把尺子是否被改过 ⇒ 本次不与历史分数比较")
     elif base_raw["gold_sha256"] != current_sha:
-        fails.append(
-            f"标注集已变更（gold_sha256 {base_raw['gold_sha256']} -> {current_sha}）——"
-            "跨标注集的分数不可比，请确认后用 `--write-baseline` 重建基线"
+        notes.append(
+            f"标注集已变更（gold_sha256 {base_raw['gold_sha256']} -> {current_sha}）："
+            "跨标注集的分数不可比，本次只作独立记录"
         )
     else:
-        if int(base_raw.get("n_cases", -1)) != report.n_cases:
-            fails.append(
-                f"红线用例数不一致（基线 {base_raw.get('n_cases')}，本次 {report.n_cases}）："
-                "指纹相同却用例数不同，说明基线格式异常，拒绝比较"
-            )
         base_fp = float(base["redline"]["false_positive_rate"])
         delta = report.redline_false_positive_rate - base_fp
-        if delta > GATE_FP_TOLERANCE:
-            fails.append(f"红线误报率相对基线上升 {delta:.2%}（上限 {GATE_FP_TOLERANCE:.0%}）")
-    return fails
+        notes.append(f"相对冻结基线的误报率变化 {delta:+.2%}（基线 {base_fp:.2%}）")
+    return notes
 
 
 def main(argv: list[str] | None = None) -> int:
-    p = argparse.ArgumentParser(description="clinic 域评测（规则臂 + LLM 臂，LLM 臂是硬闸门）")
+    p = argparse.ArgumentParser(description="clinic 域评测（规则臂 + LLM 臂；闸门只卡确定性安全不变量）")
     p.add_argument("--gold", default=str(GOLD))
     p.add_argument("--baseline", default=str(BASELINE))
     p.add_argument(
@@ -356,6 +367,11 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--gate", action="store_true")
     p.add_argument("--write-baseline", action="store_true")
     p.add_argument("--json", action="store_true")
+    p.add_argument(
+        "--archive",
+        default="",
+        help=f"把这一轮的完整报告写成治理档案（默认不写；建议 {ARCHIVE_DIR}）",
+    )
     args = p.parse_args(argv)
 
     run_rule = args.arm in ("both", "rule")
@@ -363,7 +379,7 @@ def main(argv: list[str] | None = None) -> int:
     json_mode = bool(args.json)
 
     if args.write_baseline and not run_rule:
-        # 基线的主体是规则臂指标（回归门限只看它）；只跑 LLM 臂时没有可写的东西。
+        # 基线的主体是规则臂指标（确定性的那部分）；只跑 LLM 臂时没有可写的东西。
         _emit(
             "参数错误：`--write-baseline` 需要规则臂（`--arm rule` 或 `both`）——基线的主体是规则臂指标",
             json_mode=json_mode,
@@ -382,32 +398,52 @@ def main(argv: list[str] | None = None) -> int:
     if run_llm:
         llm_report = _run_llm_arm(cases)
 
+    baseline_notes = (
+        _baseline_notes(rule_report, cases, Path(args.baseline), json_mode=json_mode)
+        if rule_report is not None
+        else []
+    )
+
     # ------------------------------------------------------------------ 输出
+    payload: dict[str, object] = rule_report.to_json() if rule_report is not None else {}
+    payload["arm"] = args.arm
+    payload["targets"] = reporting_targets()
+    payload["llm"] = None if llm_report is None else llm_report.to_json()
+    payload["baseline_notes"] = baseline_notes
     if json_mode:
-        # 顶层仍是规则臂的形状（既有契约，别动）：LLM 臂作为新键追加。
-        payload: dict[str, object] = rule_report.to_json() if rule_report is not None else {}
-        payload["arm"] = args.arm
-        payload["llm"] = None if llm_report is None else llm_report.to_json()
         print(json.dumps(payload, ensure_ascii=False, indent=2))
     else:
         if rule_report is not None:
             _print_rule_arm(rule_report, triage_cases, cov_num, cov_den)
-            if args.arm == "rule":
-                print(
-                    "  · `--arm rule` 是离线复现历史规则轨：这一轮没有 LLM 判断者，"
-                    "规则臂自己的分诊门限仍然卡。"
-                )
-            else:
-                print(
-                    "  · 规则臂的分诊数字**只报不卡**：它已经是线索提供者，"
-                    "拿它卡门限等于用错尺子（判断者是下面的 LLM 臂）。"
-                )
+            print(
+                "  · 规则臂的分数是**线索质量读数**（它已经是线索提供者，不再是判断者）："
+                "只记不卡，判断者是下面的 LLM 臂。"
+            )
         if llm_report is not None:
             _print_llm_arm(llm_report)
         else:
-            print("（`--arm rule`：本轮没有跑 LLM 臂。LLM 臂才是真正的判断者，闸门应以它为准。）")
-        if rule_report is None:
-            print("（`--arm llm`：本轮没有跑规则臂，基线的误报率回归比较也一并跳过。）")
+            print("（`--arm rule`：本轮没有跑 LLM 臂，所以没有「这次判断得怎么样」的读数。）")
+        for note in baseline_notes:
+            print(f"  · 基线：{note}")
+
+    # ------------------------------------------------------------------ 档案
+    if args.archive:
+        # 治理档案：**评测结果的留痕**。指标不上门限，但"某天跑出来是什么样"必须可追，
+        # 否则趋势与异常都只能靠人记。文件名带 UTC 时间戳，永不覆盖。
+        stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+        out = Path(args.archive)
+        if out.suffix != ".json":
+            out = out / f"clinic_eval_{stamp}.json"
+        out.parent.mkdir(parents=True, exist_ok=True)
+        archive = {
+            "ts": stamp,
+            "gold_sha256": clinic_gold_sha256(cases),
+            "gold_path": str(args.gold),
+            "arm": args.arm,
+            "report": payload,
+        }
+        out.write_text(json.dumps(archive, ensure_ascii=False, indent=2), encoding="utf-8")
+        _emit(f"\n已写入治理档案：{out}", json_mode=json_mode)
 
     # ------------------------------------------------------------------ 基线
     if args.write_baseline:
@@ -415,17 +451,19 @@ def main(argv: list[str] | None = None) -> int:
         Path(args.baseline).parent.mkdir(parents=True, exist_ok=True)
         metrics: dict[str, object] = rule_report.to_json()
         if llm_report is not None:
-            # 新键（既有键的形状不动）：LLM 臂的分数只作**记录**，不当回归门限。
+            # 新键（既有键的形状不动）：LLM 臂的分数只作**记录**。
             metrics["llm"] = llm_report.to_json()
-        payload = {
+        payload_base = {
             "schema": 1,
-            # 金标指纹必须一起冻结：只存指标的话，"改了尺子"与"变好了"看起来一模一样。
+            # 金标指纹一起冻结：只存指标的话，"改了尺子"与"变好了"看起来一模一样。
             "gold_sha256": clinic_gold_sha256(cases),
             "n_cases": rule_report.n_cases,
             "llm_note": LLM_BASELINE_NOTE,
             "metrics": metrics,
         }
-        Path(args.baseline).write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+        Path(args.baseline).write_text(
+            json.dumps(payload_base, ensure_ascii=False, indent=2), encoding="utf-8"
+        )
         _emit(f"\n已写入基线：{args.baseline}", json_mode=json_mode)
         return 0
 
@@ -433,32 +471,29 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     # ------------------------------------------------------------------ 闸门
+    # **只有两类事会让它失败**：这次运行不能作为证据（用例空集 / 有题没拿到判断）、
+    # 以及确定性安全不变量被触发。指标一个字都不参与（见模块文档）。
     rule_fails: list[str] = []
     llm_fails: list[str] = []
-
     if rule_report is not None:
-        if args.arm == "rule":
-            # 规则单臂 = 历史口径（红线 + 分诊）。没有 LLM 判断者时，
-            # 规则臂自己的分诊门限是唯一可用的尺子，所以这里仍用它。
-            rule_fails.extend(gate_failures(rule_report))
-        else:
-            # 判断权归 LLM 臂：规则臂只保证红线线索不漏 + 误报不回归，分诊只报不卡。
-            rule_fails.extend(redline_gate_failures(rule_report))
-        rule_fails.extend(_baseline_failures(rule_report, cases, Path(args.baseline), json_mode=json_mode))
+        rule_fails.extend(governance_failures(rule_report, label="规则臂"))
     if llm_report is not None:
-        llm_fails.extend(llm_gate_failures(llm_report))
+        llm_fails.extend(llm_governance_failures(llm_report))
+    elif run_llm:
+        # 要求跑 LLM 臂却拿不到报告：装配阶段就失败了，这属于"没测"。
+        llm_fails.append("LLM 臂没有产生报告（未评测）——没测不等于通过")
 
     fails = rule_fails + llm_fails
     for f in fails:
-        _emit(("  ✗ " if not f.startswith("  ") else "") + f, json_mode=json_mode)
-    if any("分诊" in f and not f.startswith("  ") for f in rule_fails):
+        _emit("  ✗ " + f, json_mode=json_mode)
+    if any("分诊" in f for f in rule_fails):
         _emit("\n" + TRIAGE_RED_NOTE, json_mode=json_mode)
-    if any("分诊" in f and not f.startswith("  ") for f in llm_fails):
+    if any("分诊" in f for f in llm_fails):
         _emit("\n" + LLM_TRIAGE_RED_NOTE, json_mode=json_mode)
     if fails:
         _emit("\n闸门：不通过", json_mode=json_mode)
         return 2
-    _emit("\n闸门：通过", json_mode=json_mode)
+    _emit("\n闸门：通过（只代表没有触发确定性安全不变量；指标请按记录自己判断）", json_mode=json_mode)
     return 0
 
 

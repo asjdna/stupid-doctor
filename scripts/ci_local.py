@@ -6,7 +6,7 @@ gate（真实模型 + 冻结基线）。
 
 | job | 覆盖 | 前置 |
 |---|---|---|
-| quality | pytest（含需要真实 Postgres 的用例）· ruff check · ruff format --check · mypy · 文档锚点校验 · 依赖声明校验 | Postgres 可达 |
+| quality | pytest（含需要真实 Postgres 的用例）· ruff check · ruff format --check · mypy · 文档锚点校验 · 临床治理一致性 · 依赖声明校验 | Postgres 可达 |
 | pipeline | 全量语料摄取 + 索引自检 + 冻结标注集自检（哈希向量，不下载模型） | `data/raw/` 语料 |
 | gate | 真实嵌入模型 + 冻结基线的检索闸门 | 真实索引 `data/index/` 与模型缓存 |
 
@@ -136,6 +136,10 @@ def job_quality(*, hf_offline: bool) -> None:
     _run(_py("-m", "ruff", "format", "--check", "."))
     _run(_py("-m", "mypy", "src", "scripts"))
     _run(_py("scripts/check_doc_refs.py"))
+    # 临床治理：安全资产清单 ↔ 代码里的不变量 ↔ 测试覆盖三方必须一致。
+    # **这是唯一按"内容"卡的那道门**——指标（召回/误报/分诊）只报告不卡退出码，
+    # 因为拿自建小样本的分数当门限，只会逼着后来者去改门限。
+    _run(_py("scripts/check_governance.py"))
     # 依赖声明一致性：`src/` 直接 import 的第三方包必须都写进 pyproject；缺声明只在
     # 干净环境（容器）里才现形，本机 editable 开发看不见。
     _run(_py("scripts/check_deps.py"))

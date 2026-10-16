@@ -85,40 +85,37 @@ def _run(script: ModuleType, gold: Path, tmp_path: Path, *extra: str) -> int:
     return int(script.main(["--gold", str(gold), "--baseline", str(baseline), "--arm", "rule", *extra]))
 
 
-class TestTriageDrivesTheExitCode:
-    def test_zero_triage_accuracy_fails_the_gate(self, script, gold, tmp_path, monkeypatch, capsys):
-        """分诊一条都不中 ⇒ 退出码 2（分诊指标必须真的参与闸门）。"""
+class TestMetricsDoNotDriveTheExitCode:
+    """**指标只报不卡**：分诊 0 分、召回漏报、误报超限都不再影响退出码。
+
+    这是本次改造的核心：指标来自自建小样本，拿它卡退出码只会逼着后来者去改门限。
+    闸门只对"这次运行不能作为证据"与"触发了确定性安全不变量"失败。
+    """
+
+    def test_zero_triage_accuracy_still_exits_zero(self, script, gold, tmp_path, monkeypatch, capsys):
         _stub_triage(script, monkeypatch, top="骨科")  # 期望科室命中不了
         code = _run(script, gold, tmp_path, "--gate")
 
-        assert code == 2
-        out = capsys.readouterr().out
-        assert "闸门：不通过" in out
-        assert "分诊准确率" in out
-        # 断言"脚本登记的那段说明被原样打印出来"，而不是某个固定措辞：
-        # 变红时必须自解释，否则读者无从判断是数据问题还是实现问题。
-        assert script.TRIAGE_RED_NOTE in out
-
-    def test_meeting_the_threshold_passes(self, script, gold, tmp_path, monkeypatch, capsys):
-        """分诊达标（1/1 = 100%）⇒ 退出码 0：闸门不是"永远红"。"""
-        _stub_triage(script, monkeypatch, top="呼吸内科")
-        code = _run(script, gold, tmp_path, "--gate")
-
         assert code == 0
-        assert "闸门：通过" in capsys.readouterr().out
+        out = capsys.readouterr().out
+        assert "分诊科室    : 0.00% top3 命中" in out, "分数必须照旧打出来（记录不能省）"
+        assert "闸门：通过" in out
 
     def test_without_gate_the_exit_code_is_zero_even_when_triage_is_zero(
         self, script, gold, tmp_path, monkeypatch
     ):
-        """不带 `--gate` 时退出码仍是 0：闸门只在被要求时才卡。"""
+        """不带 `--gate` 时退出码仍是 0。"""
         _stub_triage(script, monkeypatch, top="骨科")
         assert _run(script, gold, tmp_path) == 0
 
 
 class TestJsonDoesNotBypassTheGate:
+    """`--json` 只改输出格式，**不**绕过闸门；而闸门现在只卡安全不变量。"""
+
     def test_json_exit_code_matches_the_plain_one(self, script, gold, tmp_path, monkeypatch):
+        # 指标差不再是失败原因：两种格式都退 0
         _stub_triage(script, monkeypatch, top="骨科")
-        assert _run(script, gold, tmp_path, "--gate", "--json") == 2
+        assert _run(script, gold, tmp_path, "--gate", "--json") == 0
         _stub_triage(script, monkeypatch, top="呼吸内科")
         assert _run(script, gold, tmp_path, "--gate", "--json") == 0
 
@@ -130,9 +127,21 @@ class TestJsonDoesNotBypassTheGate:
         code = _run(script, gold, tmp_path, "--gate", "--json")
 
         captured = capsys.readouterr()
-        assert code == 2
+        assert code == 0
         payload = json.loads(captured.out)  # 旁白混进来就会在这里炸
         assert payload["triage"]["accuracy"] == 0.0
+
+    def test_json_failure_still_returns_two(self, script, gold, tmp_path, monkeypatch, capsys):
+        """真的触发闸门（这里用"没拿到判断"）时，`--json` 一样退 2、旁白仍在 stderr。"""
+        _stub_triage(script, monkeypatch, top="呼吸内科")
+        empty = tmp_path / "empty.jsonl"
+        empty.write_text('{"id": "s1", "kind": "safe_normal", "text": "今天天气不错"}\n', encoding="utf-8")
+        code = _run(script, empty, tmp_path, "--gate", "--json")
+
+        captured = capsys.readouterr()
+        assert code == 2
+        payload = json.loads(captured.out)
+        assert payload["n_cases"] == 0
         assert "闸门：不通过" in captured.err
 
     def test_without_json_the_gate_output_stays_on_stdout(self, script, gold, tmp_path, monkeypatch, capsys):
@@ -141,33 +150,27 @@ class TestJsonDoesNotBypassTheGate:
         _run(script, gold, tmp_path, "--gate")
 
         captured = capsys.readouterr()
-        assert "闸门：不通过" in captured.out
+        assert "闸门：通过" in captured.out
         assert captured.err == ""
 
 
-class TestRedLineMustBeEvaluated:
-    """空集不得满足安全闸门：没有红线正例的运行必须判为未评测并失败。
+class TestAnEmptyRunMustNotPass:
+    """空集不得满足闸门：一条可评测用例都没有的运行必须失败。"""
 
-    召回在分母为 0 时不许返回 1.0，否则"删光正例"就成了让闸门变绿的手段。
-    """
-
-    def _negative_only_gold(self, tmp_path: Path) -> Path:
-        path = tmp_path / "no-redline.jsonl"
-        path.write_text(
-            '{"id": "s1", "kind": "safe_normal", "text": "今天天气不错", "expect_red_line": false}\n'
-            '{"id": "t1", "kind": "triage_department", "text": "我咳嗽", "expect_department": "呼吸内科"}\n',
-            encoding="utf-8",
-        )
+    def _no_cases_gold(self, tmp_path: Path) -> Path:
+        path = tmp_path / "no-cases.jsonl"
+        # 一条**不可评测**的用例：既没有危险信号期望，也没有科室/挂号期望
+        path.write_text('{"id": "x1", "kind": "note", "text": "今天天气不错"}\n', encoding="utf-8")
         return path
 
-    def test_no_positive_case_fails_the_gate(self, script, tmp_path, monkeypatch, capsys):
-        _stub_triage(script, monkeypatch, top="呼吸内科")  # 分诊满分，排除它的干扰
-        gold = self._negative_only_gold(tmp_path)
+    def test_gold_without_evaluable_cases_fails_the_gate(self, script, tmp_path, monkeypatch, capsys):
+        _stub_triage(script, monkeypatch, top="呼吸内科")
+        gold = self._no_cases_gold(tmp_path)
         code = _run(script, gold, tmp_path, "--gate")
 
         out = capsys.readouterr().out
-        assert code == 2, "没有红线正例的运行不该通过安全闸门"
-        assert "红线未评测" in out
+        assert code == 2, "一条可评测用例都没有的运行不该通过闸门"
+        assert "没有任何可评测的用例" in out
 
     def test_recall_is_none_when_the_denominator_is_empty(self):
         from kubedocs.evaluation.clinic import ClinicCase, evaluate_redline
@@ -178,7 +181,7 @@ class TestRedLineMustBeEvaluated:
 
 
 class TestBaselineIsBoundToTheGoldSet:
-    """clinic 基线必须绑定金标指纹：只存指标的话，换尺子无人察觉。"""
+    """基线绑定金标指纹，但指纹变了只是**档案注记**（说明这次不与历史分数比较）。"""
 
     def test_baseline_records_the_gold_hash_and_case_count(self, script, gold, tmp_path):
         code = int(
@@ -200,25 +203,26 @@ class TestBaselineIsBoundToTheGoldSet:
         assert payload["gold_sha256"], "基线没有金标指纹"
         assert payload["n_cases"] == 2, "红线用例数（1 正 + 1 负）应被记进基线"
 
-    def test_changed_gold_is_refused_not_silently_compared(self, script, gold, tmp_path, monkeypatch, capsys):
+    def test_changed_gold_is_noted_not_silently_compared(self, script, gold, tmp_path, monkeypatch, capsys):
         baseline = tmp_path / "b.json"
         # `--arm rule`：写基线不需要 LLM 臂（默认的 `both` 会真调模型）。
         script.main(["--gold", str(gold), "--baseline", str(baseline), "--arm", "rule", "--write-baseline"])
 
-        # 改掉一把"尺子"（换掉那条正常话）后，闸门必须拒绝比较
+        # 换掉一把"尺子"（改一条正常话）
         changed = tmp_path / "changed.jsonl"
         changed.write_text(
             gold.read_text(encoding="utf-8").replace("今天天气不错", "今天天气很好"),
             encoding="utf-8",
         )
         _stub_triage(script, monkeypatch, top="呼吸内科")
-        # 同上：`--arm rule` 避免默认的 `both` 去调真实模型。
         code = int(
             script.main(["--gold", str(changed), "--baseline", str(baseline), "--arm", "rule", "--gate"])
         )
         out = capsys.readouterr().out
-        assert code == 2
+        # 指标不是闸门 ⇒ 退出码仍为 0；但"换过尺子"必须写在档案里，否则历史数字会被误读
+        assert code == 0
         assert "标注集已变更" in out
+        assert "不可比" in out
 
 
 # ---------------------------------------------------------------------------
@@ -345,8 +349,8 @@ def _run_arm(script: ModuleType, gold: Path, tmp_path: Path, arm: str, *extra: s
     return int(script.main(["--gold", str(gold), "--baseline", str(baseline), "--arm", arm, *extra]))
 
 
-class TestLlmArmRedlineIsTheHardGate:
-    """LLM 臂的红线召回必须 100%：**零容差**（漏报急诊不可接受）。"""
+class TestLlmArmMetricsAreRecords:
+    """LLM 臂的召回/误报/分诊都是**记录**：模型不是确定性的，拿分数卡退出码等于把波动当回归。"""
 
     def test_all_red_lines_found_passes(self, script, llm_gold, tmp_path, monkeypatch, capsys):
         _install_stub_llm(script, monkeypatch, _llm_answers(triage_hits=5))
@@ -357,37 +361,118 @@ class TestLlmArmRedlineIsTheHardGate:
         assert "闸门：通过" in out
         assert "LLM 臂（真正的判断者）" in out
 
-    def test_one_missed_red_line_fails_the_gate(self, script, llm_gold, tmp_path, monkeypatch, capsys):
-        """漏一条（模型判成常规）⇒ 退出码 2：闸门不是"永远绿"。"""
+    def test_one_missed_red_line_is_reported_but_does_not_fail(
+        self, script, llm_gold, tmp_path, monkeypatch, capsys
+    ):
+        """漏一条危险信号 ⇒ **记在案**（`fn=1`）但不再卡退出码；人看记录判断要不要跟进。"""
         _install_stub_llm(script, monkeypatch, _llm_answers(red_line="routine", triage_hits=5))
-        code = _run_arm(script, llm_gold, tmp_path, "llm", "--gate")
+        code = _run_arm(script, llm_gold, tmp_path, "llm", "--gate", "--json")
 
-        out = capsys.readouterr().out
-        assert code == 2, out
-        assert "红线漏报" in out
-        assert "容差为 0" in out
-        assert "闸门：不通过" in out
+        captured = capsys.readouterr()
+        payload = json.loads(captured.out)
+        assert code == 0, captured.err
+        assert payload["llm"]["redline"]["fn"] == 1, "漏报必须照样记录在案"
+        assert payload["llm"]["targets"]["redline_recall"] == 1.0, "参考目标仍要打出来给它对照"
 
-
-class TestLlmArmTriageGate:
-    """分诊门限 60%：3/5 通过、2/5 不通过（判断权在模型，门限就得卡在模型上）。"""
-
-    def test_three_of_five_passes(self, script, llm_gold, tmp_path, monkeypatch, capsys):
+    def test_triage_scores_are_reported_for_both_three_and_two_of_five(
+        self, script, llm_gold, tmp_path, monkeypatch, capsys
+    ):
+        """3/5 与 2/5 都退 0，但分数必须如实打出来（记录的意义就在这里）。"""
         _install_stub_llm(script, monkeypatch, _llm_answers(triage_hits=3))
-        code = _run_arm(script, llm_gold, tmp_path, "llm", "--gate")
+        code = _run_arm(script, llm_gold, tmp_path, "llm", "--gate", "--json")
+        first = json.loads(capsys.readouterr().out)
+        assert code == 0 and first["llm"]["triage"]["accuracy"] == 0.6
 
-        out = capsys.readouterr().out
-        assert code == 0, out
-        assert "60.00%" in out  # 3/5，恰好等于门限
-
-    def test_two_of_five_fails(self, script, llm_gold, tmp_path, monkeypatch, capsys):
         _install_stub_llm(script, monkeypatch, _llm_answers(triage_hits=2))
-        code = _run_arm(script, llm_gold, tmp_path, "llm", "--gate")
+        code = _run_arm(script, llm_gold, tmp_path, "llm", "--gate", "--json")
+        second = json.loads(capsys.readouterr().out)
+        assert code == 0 and second["llm"]["triage"]["accuracy"] == 0.4
 
-        out = capsys.readouterr().out
-        assert code == 2, out
-        assert "LLM 臂分诊准确率 40.00%" in out
-        assert script.LLM_TRIAGE_RED_NOTE in out
+
+class TestLlmArmInvariantsAreTheGate:
+    """**真正卡闸门的是确定性安全不变量**：判了急症却不给急救动作 ⇒ 退 2。"""
+
+    def test_emergency_without_a_directive_fails_the_gate(
+        self, script, llm_gold, tmp_path, monkeypatch, capsys
+    ):
+        answers = _llm_answers(triage_hits=5)
+        answers["我现在胸痛"] = ClinicalAssessment(
+            urgency="emergency",
+            red_flags=[
+                RedFlag(
+                    condition="急性冠脉综合征",
+                    severity="critical",
+                    why="胸痛，需即刻排查",
+                    angle="症状性质",
+                    likelihood="likely",
+                )
+            ],
+            departments=[DepartmentAdvice(name="心内科", confidence=0.9)],
+            patient_summary="需要尽快处理，请重视。",  # 判了急症却没给可执行动作
+            confidence=0.9,
+        )
+        _install_stub_llm(script, monkeypatch, answers)
+        code = _run_arm(script, llm_gold, tmp_path, "llm", "--gate", "--json")
+
+        captured = capsys.readouterr()
+        payload = json.loads(captured.out)
+        assert code == 2, captured.out
+        assert payload["llm"]["invariant_violations"], "不变量触发必须进报告"
+        assert "emergency_judgment_requires_directive" in payload["llm"]["invariant_violations"][0]
+        assert "触发了确定性安全不变量" in captured.err
+
+    def test_a_clean_emergency_answer_is_not_flagged(self, script, llm_gold, tmp_path, monkeypatch, capsys):
+        """合规的急症回答（正文里有 120）不该被记一条不变量——否则这一层会污染正确输出。"""
+        _install_stub_llm(script, monkeypatch, _llm_answers(triage_hits=5))
+        code = _run_arm(script, llm_gold, tmp_path, "llm", "--gate", "--json")
+
+        payload = json.loads(capsys.readouterr().out)
+        assert code == 0
+        assert payload["llm"]["invariant_violations"] == []
+
+
+class TestLlmArmCalibrationIsReported:
+    """置信度校准只报告：有 confidence 就算，没给就如实说"没有可校准的样本"。"""
+
+    def test_confidence_pairs_produce_a_calibration_block(
+        self, script, llm_gold, tmp_path, monkeypatch, capsys
+    ):
+        answers = _llm_answers(triage_hits=3)
+        answers["我现在胸痛"] = ClinicalAssessment(
+            urgency="emergency",
+            red_flags=[
+                RedFlag(
+                    condition="急性冠脉综合征",
+                    severity="critical",
+                    why="胸痛伴大汗",
+                    angle="组合共现",
+                    likelihood="likely",
+                )
+            ],
+            departments=[DepartmentAdvice(name="心内科", confidence=0.9)],
+            patient_summary="请立即拨打 120。",
+            confidence=0.9,
+        )
+        for glyph, i in zip(_TRIAGE_GLYPH, range(1, 6), strict=True):
+            answers[f"分诊{glyph}"] = _routine(f"科室{i}").model_copy(update={"confidence": 0.7})
+        _install_stub_llm(script, monkeypatch, answers)
+        code = _run_arm(script, llm_gold, tmp_path, "llm", "--gate", "--json")
+
+        payload = json.loads(capsys.readouterr().out)
+        cal = payload["llm"]["calibration"]
+        assert code == 0
+        assert cal["n"] >= 6, "每条给了 confidence 的用例都该进校准配对"
+        assert cal["brier"] is not None
+        assert cal["bins"] and "样本量" in cal["note"]
+
+    def test_missing_confidence_is_said_out_loud(self, script, llm_gold, tmp_path, monkeypatch, capsys):
+        """模型没给 confidence ⇒ 明说"没有可校准的样本"，不许悄悄报一个 0 分。"""
+        _install_stub_llm(script, monkeypatch, _llm_answers(triage_hits=5))
+        _run_arm(script, llm_gold, tmp_path, "llm", "--gate", "--json")
+
+        cal = json.loads(capsys.readouterr().out)["llm"]["calibration"]
+        assert cal["n"] == 0 and cal["brier"] is None
+        assert "没有可校准的样本" in cal["note"]
 
 
 class TestLlmArmUnevaluatedIsNotAPass:
@@ -517,10 +602,10 @@ class TestRuleArmNeverTouchesTheLlm:
 
 
 class TestRuleArmTriageIsReportedNotGated:
-    """判断权交给 LLM 之后，规则臂的分诊数字**只报不卡**。
+    """规则臂的分诊数字**只报不卡**，两种模式下都一样。
 
-    拿线索提供者的票数卡门限等于用错尺子——同一个 0 分，`--arm rule` 下是闸门失败
-    （历史口径，见 `TestTriageDrivesTheExitCode`），`--arm both` 下只该是一条记录。
+    规则臂已经是线索提供者，拿它的票数卡退出码等于用错尺子；它现在的价值是
+    "最便宜、最稳定的线索质量读数"。
     """
 
     def test_zero_rule_triage_does_not_fail_when_the_llm_arm_passes(
@@ -535,19 +620,19 @@ class TestRuleArmTriageIsReportedNotGated:
         code = _run_arm(script, gold, tmp_path, "both", "--gate")
 
         out = capsys.readouterr().out
-        assert code == 0, out  # LLM 臂达标 ⇒ 通过，规则臂的 0 分不拦
+        assert code == 0, out
         assert "闸门：通过" in out
         assert "0.00% top3 命中" in out, "规则臂的分诊数字仍要如实报出来"
-        assert "只报不卡" in out
 
-    def test_rule_arm_triage_still_gates_in_rule_only_mode(self, script, gold, tmp_path, monkeypatch, capsys):
-        """`--arm rule`（没有 LLM 判断者）沿用历史口径：分诊 0 分仍然卡。"""
+    def test_rule_only_mode_also_reports_without_gating(self, script, gold, tmp_path, monkeypatch, capsys):
+        """`--arm rule`（没有 LLM 判断者）同样只报不卡：0 分不是退出码的依据。"""
         _stub_triage(script, monkeypatch, top="骨科")
         code = _run(script, gold, tmp_path, "--gate")
 
         out = capsys.readouterr().out
-        assert code == 2
-        assert "分诊准确率" in out
+        assert code == 0
+        assert "分诊科室    : 0.00% top3 命中" in out
+        assert "线索质量读数" in out
 
 
 class TestBaselineRecordsTheLlmArmWithoutGatingOnIt:
