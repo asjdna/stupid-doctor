@@ -552,3 +552,23 @@ class TestProseIsBoundByFacts:
         }
         assert any("已重生成一次" in n for n in turn.notes or [])
         assert turn.reference is not None, "面板留档与违规留档要成对回传"
+
+    def test_the_retry_is_rechecked_against_its_own_text(self, runtime, monkeypatch):
+        """重生成那一次按**它自己**的正文判紧急度：第二轮补了急救指引就不该再吃一条红线违规。
+
+        判据是"红线未解释"只出现**一次**——那一条来自第一轮（第一轮既编造了挂号、又没解释
+        红线线索）。若拿第一轮的 `emergency=False` 去核对第二轮，这条 warn 会出现两次。
+        """
+        first = "已经为您挂上心内科的号了。"
+        # 刻意不在第二段里重复「胸痛」，但给出 120 指引：这样"紧急度"只能从**这一轮**的正文
+        # 读出来——拿上一轮那个 False 去核对，就会多判一条"红线未解释"。
+        second = "目前没有查到您的挂号记录。如出现紧急情况请立即拨打 120 或前往急诊科。"
+        seen = _sequence_caller(monkeypatch, [first, second])
+
+        turn = runtime.turn("我现在胸痛，帮我挂号", patient_id="p-red")
+
+        assert len(seen) == 2
+        assert turn.text == second, "第二轮回正后应当展示它"
+        kinds = [v["kind"] for v in turn.contract_violations or []]
+        assert kinds.count("red_line_unexplained") == 1, "红线线索被按上一轮的结论重复判了一次"
+        assert "fabricated_booking" in kinds

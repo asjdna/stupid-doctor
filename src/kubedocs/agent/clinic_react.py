@@ -385,12 +385,15 @@ class ClinicReactRuntime:
             )
             notes.extend(retry.notes)
             if retry.answer:
-                recheck = verify_prose(retry.answer, facts, emergency=emergency)
+                # 按**这一轮自己的正文**判紧急度再核对：拿上一轮的结论去核对，会在第二轮
+                # 补上急救指引时冤枉它一条"红线未解释"。
+                retry_emergency = "120" in retry.answer or "急诊" in retry.answer
+                recheck = verify_prose(retry.answer, facts, emergency=retry_emergency)
                 recorded.extend(recheck.violations)
                 if recheck.ok():
                     turn = retry
                     answer = retry.answer
-                    emergency = "120" in answer or "急诊" in answer
+                    emergency = retry_emergency
                     blocked = False
         if blocked:
             # 第二级：模型那段散文不上屏，改由服务端拼一段只含事实的回答。
