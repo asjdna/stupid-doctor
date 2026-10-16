@@ -86,10 +86,49 @@ id、标题、理由、触发后的处置动作、实现位置、以及它在哪
 指标与参考目标（100% / ≤20% / ≥60%）照旧打印并进档案，由人看趋势；`--archive` 把整份
 报告写成带时间戳的治理档案（`data/eval/clinic_archive/`），永不覆盖。
 
+**触发不变量 ≠ 患者看到了不该看的内容**。三条不变量每一条都被服务端处置过（换成只含事实
+的回答 / 补上固定急救指引），所以这个读数说明的是"**模型这一轮需要被纠正**"。
+报告里连处置动作一起给出（`invariant_actions`），别把它读成"兜底失效"。
+
 **校准**（`evaluation/calibration.py`）同样只报告：它把"模型自报的置信度"与"实际判对率"
 摆在一起，给出 Brier 分数与可靠性分箱。`confidence` 这个字段本身也受行为约束
 （低于 0.6 必须交代 `information_gaps`），但**没有任何阈值卡它**——样本量小到谈不了校准
 结论时，报表会自己写明这一点。
+
+## 四之二、长期监听：把"没变差"变成可检查的事
+
+只记录有一个代价：**没人看就等于没测**。长期监听（`scripts/monitor_clinic.py` +
+`evaluation/monitor.py`）让"没变差"变成一件可以自动检查的事，但它**不新增门限**：
+
+```bash
+python scripts/monitor_clinic.py --status                  # 只看历史（不花钱、不联网）
+python scripts/monitor_clinic.py --run                     # 一轮：评测 → 留档 → 趋势 → 提醒
+python scripts/monitor_clinic.py --follow --interval 3600  # 常驻（容器边车 / cron 都行）
+```
+
+每轮评测在写治理档案的同时追加一行趋势记录到 `data/eval/clinic_trend.jsonl`
+（`--trend-path` 可改落点）。监听把这一轮与最近 `--window`（默认 5）轮比对，分成两级：
+
+| 级别 | 判据 | 影响退出码 |
+|---|---|---|
+| `alert` | 触发了确定性安全不变量 / 这一轮没跑成（未评测）/ 有题目没拿到判断 | **是**（退出码 1） |
+| `note` | 召回下降、误报上升、分诊下降、单题花费上升、提示词或金标集变化 | 默认否（`--strict` 才硬拦） |
+
+三条纪律：
+
+1. **`note` 与历史实际区间比**（低于最近几轮最低值 / 高于最高值），不与人拍的阈值比——
+   阈值一旦写死，要么天天误报、要么被人改松，两种情况都让监听失去意义；
+2. **不同引擎分开比**：工具循环臂与单发臂的数量级不同，混在一起比会得到假的回归；
+3. **记录不记患者原话**（与审计同一条纪律），只记指标、引擎、`trace_id` 级别的信息、
+   提示词版本与金标指纹——所以"改了提示词之后分数变了"与"模型退步了"能分开看。
+
+`--run` / `--follow` **复用 `scripts/eval_clinic.py` 的 `main()`**：监听自己再写一遍评测，
+就会得到一份"和产品不一样"的趋势，而那种偏差最难发现。
+
+运行期还有一条**不用跑评测**的监听：Prometheus 计数
+`kubedocs_safety_invariant_fired_total{invariant,domain}`（在 `clinical/safety.py` 的
+`append_audit` 里计数——与审计日志同一个收口点，避免"记了日志没计数"）。审计文件回答
+"发生了什么"，计数回答"最近是不是变多了"；告警规则写在计数上，而不是让人 tail JSONL。
 
 ---
 
@@ -112,7 +151,10 @@ id、标题、理由、触发后的处置动作、实现位置、以及它在哪
 python scripts/check_governance.py                  # 门禁：资产哈希 / 不变量对应 / 测试覆盖 / 验证出处
 python scripts/check_governance.py --update-hashes  # 改完资产后刷哈希（版本号与理由仍要人写）
 python scripts/eval_clinic.py --arm both --archive data/eval/clinic_archive
+python scripts/monitor_clinic.py --run               # 评测 + 趋势 + 提醒（会花钱）
+python scripts/monitor_clinic.py --status            # 只看趋势（免费、可随时跑）
 ```
 
 `check_governance.py` 在 `scripts/ci_local.py` 的 quality job 里跑，与单元测试同级：
-**它是唯一按内容卡 CI 的那道门**。
+**它是唯一按内容卡 CI 的那道门**。评测与监听不进 CI——它们需要真实索引与模型密钥、
+会花钱，所以由 `--follow`（容器边车）或计划任务定期跑。

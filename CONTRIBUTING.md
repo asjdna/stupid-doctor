@@ -74,6 +74,40 @@ python scripts/ci_local.py
 - 硬性条款由测试逐条断言存在，删条款会导致测试失败——这是有意的，
   如果你确实要删，请连同测试一起改，并在 PR 里说明理由。
 
+## 怎么跑评测与监听
+
+clinic 域的评测按引擎分臂（`--arm`），跑哪个臂决定这台机器要不要索引、要不要密钥、会不会花钱：
+
+```bash
+python scripts/eval_clinic.py --arm rule      # 规则臂：离线、免费、确定性（线索质量读数）
+python scripts/eval_clinic.py --arm both      # 默认：规则臂 + 工具循环臂（产品路径，会花钱）
+python scripts/eval_clinic.py --arm reasoner  # 单发对照臂：不检索，便宜（对照"有工具 / 没工具"）
+```
+
+工具循环臂（`--arm llm` / `--arm tool`）跑的是与 `/consult` 同一条路，需要索引 + 密钥。
+报告与 JSON 里判断臂的键是 `llm`，`engine` 字段说明实际跑的是 `tool_loop` 还是 `reasoner`。
+
+趋势与回归靠长期监听，而不是靠翻档案：
+
+```bash
+python scripts/monitor_clinic.py --status                  # 只看历史趋势（不花钱、不联网）
+python scripts/monitor_clinic.py --run                     # 跑一轮：评测 → 留档 → 趋势 → 提醒
+python scripts/monitor_clinic.py --follow --interval 3600  # 常驻（容器边车 / cron 都行）
+```
+
+`alert`（不变量被触发 / 这一轮没跑成 / 有题目没拿到判断）会让退出码变 1；`note`（召回下降、
+误报上升、分诊下降、单题花费上升、提示词或金标集变化）只打印，默认不改退出码，`--strict`
+才硬拦。`note` 与最近 `--window` 轮的实际区间比，工具循环臂与单发臂分开比。
+
+**改装配只改 `src/kubedocs/clinical/runtime.py`**：`/consult` 与评测的工具循环臂共用
+`build_clinical_assembly`（同一次工具注册、同一个面板建造器、同一本日预算账、同一套安全门）。
+在两边各写一份装配，评测测的就是一个"产品不会走的形状"，而分数看起来仍然合理。评测侧的
+差异只有三处，都是刻意的：号源用 `MockAppointmentProvider`、不落就诊记录、不写审计文件。
+
+趋势记录（`data/eval/clinic_trend.jsonl`）与治理档案（`data/eval/clinic_archive/`）是同一轮
+评测的两个落点：档案是给人看的完整报告（带 UTC 时间戳、永不覆盖），趋势记录是给监听比对的
+扁平一行（`--archive` 时同时追加，`--trend-path` 可改落点）。两者都不记患者原话。
+
 ## 改评测口径
 
 评测口径的分层与拒绝比较逻辑定义在 `docs/EVALUATION.md`。

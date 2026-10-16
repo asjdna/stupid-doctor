@@ -233,14 +233,22 @@
   verify.py           拿同一份事实集校验模型的每一处输出（block / strip / warn）
   safety.py           确定性安全门：三条不变量 + 审计留档 + 兜底追问
   contracts.py        输出契约，以及 R3 的执行（无依据的检查/用药建议真的丢掉）
+  runtime.py          **装配入口**：检索后端 + 域工具 + 工具循环 + 管线（产品与评测共用）
   pipeline.py         接线：装配面板 → 工具循环 → 校验 → 三级处置 → 安全门 → 落库
   intake.py           多轮采问：槽位采集与"最多问几次"的收敛
-  reasoning.py        不带工具的一条判断路线（评测的 LLM 臂直接用它；问诊管线不调用它）
+  reasoning.py        不带工具的一条判断路线（评测的单发臂直接用它；问诊管线不调用它）
   persistence.py      患者 / 就诊 / 消息 / 挂号关联（Postgres `clinical` schema）
 ```
 
 号源与挂号工具不在这一层，而在域包 `domains/clinic/` 里（`provider.py` 是契约、
 `pg_provider.py` 是 Postgres 实现、`pending.py` 是待确认单、`tools.py` 是工具面）。
+
+**装配只有一处**（`runtime.py` 的 `build_clinical_assembly`）：`/consult` 与评测的
+工具循环臂都调它。装配的每一件依赖都是注入的（检索器、号源服务、待确认单、就诊记录落点、
+面板建造器、审计落点），所以产品注入真实实现、评测注入替身，而**代码路径完全一致**。
+两边各写一遍装配的后果不是报错，而是"评测在测一个产品不会走的形状"——分数看起来仍然合理，
+偏差却没人发现。评测侧的三处差异是刻意的：号源用 `MockAppointmentProvider`、
+不落就诊记录、不写审计文件。
 
 **就诊记录与挂号关联**：患者 / 就诊 / 消息 / 挂号关联都落 Postgres 的 `clinical` schema。
 挂号关联是**单向**的（就诊 → 号），权威状态在 `booking.appointments`；`GET /consult/encounters`
@@ -456,6 +464,13 @@ XXXXXXXX"——这对患者是不可挽回的误导，他会以为号已到手�
   `invariant` / `action` / `detail` / `trace_id`）。**刻意不记患者原话**——临床文本在
   `clinical` schema 里，有自己的访问控制，审计再抄一份只会扩大泄露面；需要细节时按
   `trace_id`（= `encounter_id`）去临床库取。写失败不影响这一轮应答，但会记 warning。
+- 安全门计数：`kubedocs_safety_invariant_fired_total{invariant,domain}`（Prometheus）。
+  审计文件回答"发生了什么"，计数回答"最近是不是变多了"；两者在同一个收口点
+  （`clinical/safety.py` 的 `append_audit`）产出，避免"记了日志没计数"。
+- 长期监听：`scripts/monitor_clinic.py` 定期跑一轮评测（**复用** `scripts/eval_clinic.py`
+  的 `main()`），把结果与最近几轮比对。指标变化只提示（`note`），安全不变量触发、
+  运行没跑成、有题目没拿到判断才让退出码变 1（`alert`）。趋势记录落在
+  `data/eval/clinic_trend.jsonl`，与治理档案同一轮写出。见 [`GOVERNANCE.md`](GOVERNANCE.md)。
 - 花费：所有模型调用共用一本日预算账本，账本按日累计落在 `data/index/llm_spend.json`。
 
 ## 九、关键目录
