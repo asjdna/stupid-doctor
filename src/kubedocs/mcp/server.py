@@ -6,11 +6,13 @@
    开启后仍要入参传 `confirm=true` 才执行。
 2. **参数校验走 pydantic**：与 agent 内部调用同一条路径，MCP 不是绕过校验的后门。
 3. **两个域都装配真实工具**：`register_domain_tools` 填充空的 `ToolRegistry`——clinic 得到
-   号源三件套 + `search_docs` + `check_citations`，k8s_docs 得到 `search_docs` + `check_citations`。
+   号源四个只读工具（`list_departments` / `get_availability` / `booking_window` / `my_appointments`）
+   + `search_docs` + `check_citations`，k8s_docs 得到 `search_docs` + `check_citations`。
    列出来的工具就是能跑的工具，不存在"注册了但没有执行体"的空壳。
-4. **检索器惰性装配**：`build_server` / `tools/list` **不加载嵌入模型**（bge 首次要几十秒，
-   装在这里会让客户端握手超时），只有 `search_docs` 真的被调用时才建 store + embedder +
-   retriever；装配失败返回 `isError` + 一句"先跑 ingest"，不是 traceback。
+4. **检索器由后台线程预热**：`build_server` / `tools/list` 本身不加载嵌入模型（bge 首次要几十秒，
+   装在这里会让客户端握手超时）；默认在握手之后起一个线程 `warm()` 一次（`--no-warmup` 关掉），
+   所以"第一次 `search_docs` 不必现付模型加载"。装配失败返回 `isError` + 一句"先跑 ingest"，
+   不是 traceback。
 
 用法：
 

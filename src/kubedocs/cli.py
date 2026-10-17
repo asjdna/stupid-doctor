@@ -107,8 +107,11 @@ def _get_pack(settings: Settings) -> DomainPack:
 def open_store(settings: Settings, *, require_data: bool = True) -> Store:
     """按 `KUBEDOCS_STORE` 打开存储后端。
 
-    这里**不做任何后端回退**：后端不可用（sqlite-vec 扩展加载失败、Postgres 连不上）
-    就带着原因报错。一个"悄悄换回另一种实现"的检索服务，其指标变化将无法解释。
+    这里**不额外加回退链**：后端名非法就直接报错（没有"依次试三种实现"那种猜）。
+    但"库不可达"是另一条路径，由 `store.from_settings` 负责：`pgvector` 连不上时会
+    **降级为本地 `sqlite-vec`** 并把原因挂在 `store.fallback_reason` 上（见
+    `store/__init__.py`）——离线开发/演示要能跑起来，且降级必须可见（`/healthz`、
+    `stats` 与那条 WARNING）。
     """
     from kubedocs.store import from_settings
 
@@ -572,7 +575,7 @@ def _add_globals(p: argparse.ArgumentParser, default: object) -> None:
         "--store",
         choices=list(BACKENDS),
         default=default,
-        help="存储后端（默认 sqlite-vec；sqlite=旧实现，pgvector=生产）",
+        help="存储后端（默认 pgvector；sqlite-vec=离线回退，sqlite=最小依赖对照）",
     )
     p.add_argument(
         "--provider",

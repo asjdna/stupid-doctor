@@ -29,7 +29,7 @@
 
 | 域 | 语料 | 嵌入模型 | 维度 | 用途 |
 |---|---|---|---|---|
-| `k8s_docs` | Kubernetes 官方文档 1720 篇 | `bge-small-en-v1.5` | 384 | 技术文档问答 |
+| `k8s_docs` | Kubernetes 官方文档 1722 篇（随上游 main 分支漂移） | `bge-small-en-v1.5` | 384 | 技术文档问答 |
 | `clinic` | 医疗知识卡片 31,592 张 | `bge-small-zh-v1.5` | 512 | 问诊、分诊、挂号 |
 
 域之间**完全隔离**：各自的索引目录（`<index-dir>/<domain>/`）与存储 schema，

@@ -84,7 +84,7 @@ pip install -e ".[dev]"
 #    （降级原因在 stats / /healthz 里能看到）。要起一个库：docker compose up -d db
 export KUBEDOCS_DATABASE_URL=postgresql://kubedocs:kubedocs@127.0.0.1:5432/kubedocs
 
-# 1) 拉语料（一次就够，1720 篇 / 16.2 MB）
+# 1) 拉语料（一次就够；当前 1722 篇 / 16.2 MB，篇数随上游 main 分支漂移）
 python scripts/fetch_corpus.py
 
 # 2) 建索引（首次全量约 35 分钟，嵌入占绝大部分）
@@ -121,7 +121,9 @@ python -m kubedocs.cli --corpus-dir data/raw/mine ingest
 
 ```bash
 # 卡片语料与科室补全表（见下方「知识依据」）
-python scripts/clinic_build_cards.py
+#   `--source` 必填（或设 KUBEDOCS_CLINIC_SOURCE）：它指向跑过上游 `scripts/build_knowledge.py`
+#   的产物目录；不给就以退出码 3 说明缺什么，不会拿空目录编出一份卡片集。
+python scripts/clinic_build_cards.py --source <上游产物目录>
 python scripts/clinic_derive_departments.py --triples <OpenCMKG/triples.txt>
 
 # 建索引（首次全量约 1 小时，CPU 编码）
@@ -170,6 +172,7 @@ docker compose up -d          # → http://127.0.0.1:8080
 GET  /healthz  /metrics  /domains  /tools
 POST /search   /ask      /chat
 GET  /         /console
+GET  /docs     /redoc    /openapi.json      # FastAPI 自带（serve / start.cmd 会打印 /docs）
 GET  /consult  POST /consult  POST /consult/reset  GET /consult/status
 GET  /consult/encounters  GET /consult/appointments
 POST /consult/booking/confirm  POST /consult/booking/cancel
@@ -219,8 +222,9 @@ HTTP `/tools`、Agent 工具循环**同源**（`ToolRegistry`），不另写一�
   所以号源那几个工具都是只读的；确认与退号不在 MCP 上，走 HTTP 的
   `/consult/booking/confirm` 与 `/consult/booking/cancel`。
 - **`--patient-id` 决定"这个会话代表谁"**：`my_appointments` 与取号都按它记账（默认 `anon`）。
-- **启动不加载嵌入模型**：列工具不碰索引，第一次真调 `search_docs` 才装配 store + 检索器；
-  索引没建时返回可读的 `isError`（提示先跑 `ingest`），而不是把服务打挂。
+- **列工具不碰索引**：握手与 `tools/list` 都不碰索引、不加载嵌入模型。检索器由**后台线程预热**
+  （默认开：第一次 `search_docs` 不必现付一分钟的模型加载；`--no-warmup` 关掉它，退回"第一次
+  真调才装配"）。索引没建时返回可读的 `isError`（提示先跑 `ingest`），而不是把服务打挂。
 - 域决定嵌入模型与维度（clinic 中文 512 维 / k8s_docs 英文 384 维），不要跨域共用索引。
 
 客户端配置（stdio，`command` 指向本仓库 venv 里的 python）：
@@ -313,7 +317,8 @@ HTTP `/tools`、Agent 工具循环**同源**（`ToolRegistry`），不另写一�
 它是**给模型的线索之一**（进参考标准面板的"科室候选"，带票数与来源），不是系统给出的结论——
 最终挂哪个科由模型判断：
 
-1. **粗排**：混合检索取候选卡片池（默认 50 条）；
+1. **粗排**：混合检索取候选卡片池（产品路径 `/consult` 取 `top_k=10`；
+   离线评测脚本 `eval_prototype_patients.py --coarse-k` 的默认值是 50）；
 2. **精排**：用 jieba 词元的 IDF 加权重合度重排；
 3. **投票**：按卡片标注的科室投票，多科室卡片按科室数均分票权；
 4. **科室补全表**：语料里有相当一部分卡片的科室标注缺失，用图谱关系与别名把它补回来，
@@ -347,8 +352,8 @@ HTTP `/tools`、Agent 工具循环**同源**（`ToolRegistry`），不另写一�
 
 | 语料 | 怎么拿到 | 落在 |
 |---|---|---|
-| k8s 官方文档（1720 篇 / 16.2 MB） | `python scripts/fetch_corpus.py` | `data/raw/k8s-docs/` |
-| clinic 知识卡片（31,592 张 / 8.4 MB） | `python scripts/clinic_build_cards.py` | `data/clinic/cards.json` |
+| k8s 官方文档（1722 篇 / 16.2 MB） | `python scripts/fetch_corpus.py` | `data/raw/k8s-docs/` |
+| clinic 知识卡片（31,592 张 / 8.2 MB） | `python scripts/clinic_build_cards.py --source <上游产物目录>` | `data/clinic/cards.json` |
 | clinic 科室补全表（4,727 条） | `python scripts/clinic_derive_departments.py --triples <triples.txt>` | `data/clinic/department_map.json` |
 
 索引同样是派生物，可随时重建。**默认后端 `pgvector` 把索引放进 Postgres**：
@@ -415,14 +420,15 @@ python -m kubedocs.cli eval --gate           # 之后每次回归检查（指标
 | 分诊 | 500 例分层用例（严重度 × 语言风格） | `scripts/eval_prototype_patients.py`，离线免费 |
 | 急诊识别 | 带严重度标注的用例 | `scripts/eval_emergency.py` |
 | 问诊质量 | 带结构化答案的医案 | `scripts/eval_medical_cot.py` |
-| clinic 规则臂（`rule`） | 红线召回 / 挂号意图 / 分诊（**确定性、离线、免费**） | `scripts/eval_clinic.py --arm rule`；**线索质量**的稳定读数，红线词表漏一条仍然是回归 |
+| clinic 规则臂（`rule`） | 红线召回 / 挂号意图 / 分诊（**确定性、离线、免费**） | `scripts/eval_clinic.py --arm rule`；**线索质量**的稳定读数——红线词表漏一条会直接反映在召回读数上（但**不会**让闸门变红，见下一行） |
 | clinic 工具循环臂（`llm` / `tool`） | **产品路径**：`pipeline.advance(原话)`，模型自己决定调不调检索 | `scripts/eval_clinic.py --arm llm`；需要索引 + 密钥，会花钱；每题一次真实模型调用 |
 | clinic 单发对照臂（`reasoner`） | `ClinicalReasoner` 单发判断，不检索（便宜） | 用来对照「有工具 / 没工具」的差别，不是产品路径 |
 | clinic 闸门（`--gate`） | 只卡一件事：**这次运行能不能作为证据** | 未评测 / 有题目没拿到模型判断 ⇒ 不通过；指标、参考目标与**安全不变量的触发**都只记录（硬信号由长期监听报给运维） |
 
 分诊与急诊评测依赖本地语料，在有语料的机器上运行；检索闸门与全量单元测试由
-`scripts/ci_local.py` 覆盖。**`ci_local.py` 的 `gate` job 跑的是检索闸门**
-（`eval --domain k8s_docs --gate`），与 clinic 域无关；clinic 那条闸门要单独跑：
+`scripts/ci_local.py` 覆盖（`quality` job **要求 `KUBEDOCS_DATABASE_URL` 可达**，
+连不上就直接失败，不会静默 skip 出一片假绿）。**`ci_local.py` 的 `gate` job 跑的是检索闸门**
+（`eval --top-k 10 --gate`，域走默认的 `k8s_docs`），与 clinic 域无关；clinic 那条闸门要单独跑：
 
 ```bash
 python scripts/eval_clinic.py --arm both --gate   # 规则臂 + 工具循环臂（产品路径）
@@ -444,7 +450,7 @@ python scripts/eval_clinic.py --arm both --gate   # 规则臂 + 工具循环臂�
 `MockAppointmentProvider`（不碰真实号源库）、不落就诊记录、不写审计文件——评测会在短时间
 里造出大量假会话，混进真库只会污染治理读数。
 
-> **治理档案里的一次读数**（工具循环臂，31 次模型调用，约 $0.035）：
+> **治理档案里的一次读数**（工具循环臂，31 条用例、共 69 次模型调用，约 $0.035）：
 >
 > | 臂 | 危险信号召回 | 误报率 | 分诊 top3 |
 > |---|---|---|---|
@@ -454,9 +460,10 @@ python scripts/eval_clinic.py --arm both --gate   # 规则臂 + 工具循环臂�
 > 参考目标是 **召回 100% / 误报率 ≤20% / 分诊 ≥60%**（`reporting_targets()` 导出，与实测值
 > 并排打印并进档案）。这些数字与目标的差距**只进记录，不决定退出码**。工具循环臂的"报了危险
 > 信号"判据是**判成急症，或还有未排除的危险信号**——把看到过但判断不该上报的信号写成
-> `ruled_out`（并写明依据）是留痕，不算误报。剩下那几条误报（`n02`「我父亲昨天说心口疼」、
-> `n03`「我家孩子喘不上气，要不要去医院」）是**金标口径**（患者本人急症）与模型行为
-> （对话里有人有危险就报）的分歧，不是模型判错。要改的是提示词与用例口径，不是门限。
+> `ruled_out`（并写明依据）是留痕，不算误报。剩下 4 条误报要分开看：`n02`「我父亲昨天说心口疼」、
+> `n03`「我家孩子喘不上气，要不要去医院」、`n04`「朋友说他突然看不清了」是**金标口径**
+> （患者本人急症）与模型行为（对话里有人有危险就报）的分歧；`s02`「这两天有点头痛，睡不好」
+> 则是**良性主诉被判成了危险信号，算模型判错**。要改的是提示词与用例口径，不是门限。
 >
 > 同一轮里工具循环臂的**确定性安全不变量 0 条**、置信度校准 `n=31` Brier `0.20`（只报告，
 > 不上门限；分箱见 [`docs/EVALUATION.md`](docs/EVALUATION.md)）。**不同轮次会波动**：有一轮
@@ -466,8 +473,9 @@ python scripts/eval_clinic.py --arm both --gate   # 规则臂 + 工具循环臂�
 > **没有密钥时判断臂标为「未评测」，`--gate` 同样不通过**——有题目没拿到模型判断属于
 > 「这次运行不能作为证据」，未评测不等于通过，否则删掉密钥就成了让闸门变绿的手段。
 >
-> **`--archive` 把整份报告写成治理档案**（默认 `data/eval/clinic_archive/`，文件名带 UTC
-> 时间戳，永不覆盖），**同时追加一行趋势记录**到 `data/eval/clinic_trend.jsonl`（落点可用
+> **`--archive` 把整份报告写成治理档案**（`eval_clinic.py` 的默认值是**空**——不传就什么都不写；
+> 默认落点 `data/eval/clinic_archive/` 属于 `monitor_clinic.py`。文件名带 UTC 时间戳，永不覆盖），
+> **同时追加一行趋势记录**到 `data/eval/clinic_trend.jsonl`（落点可用
 > `--trend-path` 改）：趋势与异常靠档案与趋势记录比。工具循环臂的分诊 100% 是 5 条用例上的
 > 结果，样本很小，不要当作临床准确率（口径见 [`docs/EVALUATION.md`](docs/EVALUATION.md)）。
 
@@ -506,10 +514,10 @@ python scripts/monitor_clinic.py --follow --interval 3600  # 常驻：每小时�
 | 项 | 数值 |
 |---|---|
 | 索引规模 | clinic 31,592 张卡片（每张卡片 = 一父块 + 一子块）；k8s_docs 的父子块数由切块参数与语料共同决定 |
-| 首次全量摄取 | k8s 文档约 35 分钟（嵌入占绝大部分）· clinic 31,592 张卡片约 12 分钟 |
+| 首次全量摄取 | k8s 文档约 35 分钟（嵌入占绝大部分）· clinic 31,592 张卡片约 1 小时（CPU 编码，与 `domains/clinic/domain.py` 的口径一致） |
 | `/healthz` 延迟 | p50 1.6 ms（带 2 秒统计缓存）· 约 580 req/s |
 | 首次检索冷启动 | 约 69 秒（加载嵌入模型），之后 0.1 秒级 |
-| 单次问诊 | 模型调用次数由模型自己决定（工具循环硬上限 4 轮，`MAX_TOOL_ROUNDS`），被约束层拦下时会带原因再走一轮 |
+| 单次问诊 | 工具调用轮次硬上限 4 轮（`MAX_TOOL_ROUNDS`）；轮次用尽后还会再发一次"用现有依据作答"的请求，所以单轮最多 **5 次模型调用**；被约束层拦下时会带原因再走一轮 |
 
 ## 配置
 
@@ -521,11 +529,15 @@ python scripts/monitor_clinic.py --follow --interval 3600  # 常驻：每小时�
 | `KUBEDOCS_STORE` | `pgvector` | 向量后端：`pgvector` / `sqlite-vec` / `sqlite`；数据库不可达时降级为 `sqlite-vec` |
 | `KUBEDOCS_DATABASE_URL` | `postgresql://kubedocs:kubedocs@127.0.0.1:5432/kubedocs` | pgvector 索引、就诊记录与号源都读它 |
 | `KUBEDOCS_CHUNK_MAX_CHARS` | `300` | 子块（检索单位）目标长度；改了要重建索引 |
+| `KUBEDOCS_CHUNK_OVERLAP_CHARS` | `60` | 相邻子块的重叠（必须小于上一项）；改了要重建索引 |
+| `KUBEDOCS_CHUNK_MIN_CHARS` | `80` | 短于此的子块并入同一父块内的前一块；改了要重建索引 |
 | `KUBEDOCS_CHUNK_PARENT_MAX_CHARS` | `3000` | 父块（标题小节）上限，超过就按段落拆；改了要重建索引 |
+| `KUBEDOCS_MAX_CHUNKS_PER_DOC` | `2` | 组装上下文时同一文档最多收录几段（防止近重复片段挤满上下文） |
 | `KUBEDOCS_LLM_MODEL` | `deepseek/deepseek-chat` | 经 LiteLLM 路由，可换供应商 |
+| `KUBEDOCS_LLM_FALLBACKS` | — | 逗号分隔的备用模型，主模型失败时依次回退 |
 | `KUBEDOCS_LLM_DAILY_BUDGET_USD` | `5.0` | 日花费上限，账本落在 `data/index/llm_spend.json` |
 | `KUBEDOCS_EMBEDDING_PROVIDER` | `bge` | `hashing` 用于不下载模型的冒烟测试 |
-| `KUBEDOCS_HF_ENDPOINT` | — | 拉模型时的镜像端点（受限网络下有用） |
+| `KUBEDOCS_HF_ENDPOINT` | —（代码默认空串） | 拉模型时的镜像端点（受限网络下有用）。注意 `.env.example` 里默认给了 `https://hf-mirror.com` |
 
 就诊记录（患者 / 就诊 / 消息 / 挂号关联）与号源（`booking` schema）也没有单独的库配置：
 它们都落在 **Postgres**（连接串就是 `KUBEDOCS_DATABASE_URL`），schema 分别是 `clinical` 与

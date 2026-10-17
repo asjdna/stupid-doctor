@@ -7,6 +7,7 @@
 
 from __future__ import annotations
 
+import types
 from pathlib import Path
 
 import pytest
@@ -133,17 +134,29 @@ class TestFactory:
     def test_dispatch_targets_exactly_one_implementation(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, backend: str, module: str
     ):
-        """分派到正确模块，且**不会**顺带构造别的实现（没有回退链）。
+        """分派到正确模块，且**不会**顺带构造别的实现（不做"依次试三种"那种猜测）。
 
-        用哨兵替掉三个模块各自的 `from_settings`：工厂若在失败后回退，计数器就会显示
-        "构造了不止一个"。
+        用哨兵替掉三个模块各自的 `from_settings`：工厂若在"后端名不认 / 构造失败"之后
+        换个实现顶上，计数器就会显示"构造了不止一个"。
+
+        ⚠ `pgvector` 这一档要求**库可达**：一条连不上的 DSN 会走"降级为本地 sqlite-vec"
+        那条**另一条**路径（那是刻意设计，见 `TestUnreachableDatabaseFallback`），与本用例
+        要证的"分派不做猜测"不是同一件事。库不可达就 skip（与其它 pgvector 用例同一口径）。
         """
+        if backend == "pgvector":
+            ok, why = probe(_settings(tmp_path).database_url, timeout=2.0)
+            if not ok:
+                pytest.skip(f"pgvector 分派用例需要可达的库：{why}")
+
         calls: list[str] = []
 
         def make(name: str):
             def _fake(_settings: Settings) -> object:
                 calls.append(name)
-                return object()
+                # 允许工厂往返回对象上挂 `fallback_reason`：这条用例只数调用次数，
+                # 用 object() 会让"真的发生了降级"以 AttributeError 的形式炸掉，
+                # 而它应该以 assert 的形式说清"构造了不止一个实现"。
+                return types.SimpleNamespace()
 
             return _fake
 
