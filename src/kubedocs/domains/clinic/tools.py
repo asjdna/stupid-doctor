@@ -215,7 +215,13 @@ def make_propose_booking_tool(service: BookingService, pending: PendingBookings)
 
     return ToolSpec(
         name="propose_booking",
-        description="生成一张待患者确认的挂号单（**不占号、不产生记录**）。",
+        description=(
+            "生成一张待患者确认的挂号单（**不占号、不产生记录**）。"
+            "**用户要挂号、且科室与日期/时段已确定（或能由放号窗口推断）时，必须调用本工具**——"
+            "只在回答里写「已生成待确认的挂号单」而不调用，服务端不会生成任何单子，"
+            "患者界面上也不会出现确认卡片。用户**改期/换时段**时要重新调用一次"
+            "（一次只保留一张，旧单不确认就不生效）。"
+        ),
         params=ProposeBookingParams,
         domain=DOMAIN,
         handler=_run,

@@ -61,17 +61,31 @@ def _payload(
 
 
 class _Loop:
-    """假工具循环：按脚本依次返回结果，并记录被调用了几次。"""
+    """假工具循环：按脚本依次返回结果，并记录被调用了几次。
 
-    def __init__(self, *texts: str, evidence: EvidenceBundle | None = None) -> None:
+    `tools` 是**模型这一轮真的调用了哪些工具**（管线会拿它判"说了要生成卡片却一次没调"）。
+    """
+
+    def __init__(self, *texts: str, evidence: EvidenceBundle | None = None, tools: Any = None) -> None:
         self._texts = list(texts)
         self._evidence = evidence
+        # `tools` 可以是「每次尝试的工具名列表」或「一个共享列表」：
+        #   tools=["propose_booking"]                       → 每次尝试都调了它
+        #   tools=[[], ["propose_booking"]]                 → 第一次没调、第二次调了
+        if tools and isinstance(tools[0], (list, tuple)):
+            per_call = [list(t) for t in tools]
+        else:
+            per_call = [list(tools or [])] * max(len(texts), 1)
+        self._tools_by_call = per_call
         self.calls: list[str] = []
 
     def run(self, *, system: str, question: str, **_: Any) -> Any:
         self.calls.append(system)
-        text = self._texts[min(len(self.calls) - 1, len(self._texts) - 1)]
-        return SimpleNamespace(final_text=text, calls=[], evidence=self._evidence or EvidenceBundle())
+        index = min(len(self.calls) - 1, len(self._texts) - 1)
+        text = self._texts[index]
+        names = self._tools_by_call[min(index, len(self._tools_by_call) - 1)]
+        records = [SimpleNamespace(name=name, ok=True, summary="ok", result={}) for name in names]
+        return SimpleNamespace(final_text=text, calls=records, evidence=self._evidence or EvidenceBundle())
 
 
 def _pipeline(
@@ -129,10 +143,15 @@ class TestFabricatedBookingIsBlocked:
         assert "fabricated_booking" in kinds
 
     def test_the_retry_gets_the_violation_as_feedback(self):
-        """第①级：带违规原因重生成一次。第二次的系统提示里必须带上那条反馈。"""
+        """第①级：带违规原因重生成一次。第二次的系统提示里必须带上那条反馈。
+
+        重试那一轮**真的调了** `propose_booking`，所以它说"已生成待确认的挂号单"是成立的。
+        （不调工具却这样写会被 `promised_booking_without_proposal` 抓，见下一组用例。）
+        """
         loop = _Loop(
             _payload(summary="已经为您挂上了。"),
             _payload(summary="已生成待确认的挂号单，需要您点确认后才生效。"),
+            tools=[[], ["propose_booking"]],
         )
         turn = _pipeline(loop).advance("帮我挂个号")
         assert len(loop.calls) == 2, "违规后应当重生成一次"
@@ -152,6 +171,31 @@ class TestFabricatedBookingIsBlocked:
         assert "本轮没有产生任何挂号或退号动作" in turn.message
         # 这是**按设计的降级**，不是系统故障：服务端确实给出了（只含事实的）回答。
         assert turn.action == "answer"
+
+    def test_promising_a_confirmation_card_without_calling_the_tool_is_blocked(self):
+        """**"我这就为您生成一张待确认的挂号单" 但一次工具都没调** ⇒ 按动作幻觉处理。
+
+        实测踩到过：连说两轮，患者界面上始终没有确认卡片，而患者以为在等就行。
+        """
+        loop = _Loop(
+            _payload(summary="我这就为您生成一张待确认的挂号单，请稍候。"),
+            _payload(summary="我这就为您生成一张待确认的挂号单，请稍候。"),
+        )
+        turn = _pipeline(loop).advance("帮我挂呼吸内科，10月20日上午")
+        assert len(loop.calls) == 2
+        assert {v["kind"] for v in turn.contract_violations} == {"promised_booking_without_proposal"}
+        assert "待确认的挂号单" not in turn.message
+        assert "本轮没有产生任何挂号或退号动作" in turn.message
+
+    def test_promising_a_card_after_actually_calling_the_tool_is_fine(self):
+        """真的调了 `propose_booking` 之后这样说是**正确**的，不能拦。"""
+        loop = _Loop(
+            _payload(summary="已生成待确认的挂号单，需要您在界面上点确认后才生效。"),
+            tools=["propose_booking"],
+        )
+        turn = _pipeline(loop).advance("帮我挂呼吸内科，10月20日上午")
+        assert turn.contract_violations == []
+        assert "待确认的挂号单" in turn.message
 
     def test_booking_intent_drops_unrequested_medical_content_without_blocking(self):
         """事务性需求（挂号/号源）不需要检查用药：删掉那些条目，**但回答照常给**。

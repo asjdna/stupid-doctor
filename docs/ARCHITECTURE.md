@@ -357,7 +357,7 @@ XXXXXXXX"——这对患者是不可挽回的误导，他会以为号已到手�
 
 | 级别 | 含义 | 判据（`kind`） | 处置 |
 |---|---|---|---|
-| `block` | 内容不得让患者看到 | 动作幻觉（`fabricated_booking` / `fabricated_cancellation`）、编造凭据号（`unknown_ticket`）、检索为空却给医学内容（`medical_without_evidence`） | 带违规原因**重生成一次**；仍违规则整段换成服务端拼的事实回答 |
+| `block` | 内容不得让患者看到 | 动作幻觉（`fabricated_booking` / `fabricated_cancellation`）、编造凭据号（`unknown_ticket`）、**承诺了待确认单却没调 `propose_booking`**（`promised_booking_without_proposal`）、检索为空却给医学内容（`medical_without_evidence`） | 带违规原因**重生成一次**；仍违规则整段换成服务端拼的事实回答 |
 | `strip` | 内容里**某一条**不合法 | 编造依据编号（`fabricated_evidence`）、科室未接地（`department_not_grounded`）、**事务性需求里多余的医学内容**（`medical_content_not_requested`） | 丢掉那一条（科室/建议），其余照常给患者 |
 | `warn` | 需要留痕，但不该拦 | 未解释的红线线索（`red_line_unexplained`）、服务端没给过的金额（`unknown_amount`） | 只记进 `contract_violations`，不拦不改 |
 

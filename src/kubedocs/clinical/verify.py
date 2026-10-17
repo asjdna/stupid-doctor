@@ -31,6 +31,7 @@
 from __future__ import annotations
 
 import re
+from collections.abc import Iterable
 from dataclasses import dataclass, field
 from typing import Literal
 
@@ -49,6 +50,40 @@ NO_EVIDENCE_ANSWER = (
 照样要给。否则"检索不到就说不知道"会把该报警的急症一起拦下来——那是拿安全换整洁。
 真正被禁的是"你可能得的是 X 病"这类**事实断言**。
 """
+
+_PROMISED_CARD_RE = re.compile(
+    r"(?:为您|帮您|帮你|给您|给你|这就|马上|立刻|稍等|稍后|已|会给)"
+    r"[^。；！？\n]{0,20}(?:生成|创建|开出|开一张|安排)"
+    r"[^。；！？\n]{0,20}(?:待确认|挂号单|挂号卡)"
+)
+"""**"我这就为您生成一张待确认的挂号单"**这类承诺（含"会给您生成…"这种承诺式说法）。
+
+只在**没有真的调用 `propose_booking`** 时才算违规（见 `promised_card_without_proposal`）：
+真的调了工具之后，"已生成待确认的挂号单，请点确认"是**正确**说法，不能拦。
+"""
+
+
+def promised_card_without_proposal(prose: str, called_tools: Iterable[str]) -> Violation | None:
+    """承诺了挂号卡片、却没有真的调用 `propose_booking`。
+
+    这是实测踩到的真实缺陷：模型在文字里说"我这就为您生成一张待确认的挂号单"，
+    但这一轮**一次工具都没调**——服务端因此没有单子，患者界面上不会出现确认卡片，
+    而患者以为自己只要等就好。**说了一件服务端没做的事**，按 `block` 处理。
+    """
+    if "propose_booking" in {str(name) for name in called_tools}:
+        return None
+    if not _PROMISED_CARD_RE.search(prose):
+        return None
+    return Violation(
+        kind="promised_booking_without_proposal",
+        severity="block",
+        detail=(
+            "你在回答里说要生成待确认的挂号单，但这一轮**没有调用 `propose_booking`**——"
+            "服务端没有生成任何单子，患者界面上不会出现确认卡片。"
+            "要生成就**必须真的调用工具**；不打算生成就不要这样承诺，改说还缺哪一项。"
+        ),
+    )
+
 
 _BOOKED_CLAIM_RE = re.compile(
     r"(?:已经?)(?:为您|帮你|给你)?\s*(?:挂上|挂号|取号|预约)|挂号成功|预约成功|取号成功|号已挂上"

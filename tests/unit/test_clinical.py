@@ -466,6 +466,21 @@ class TestIntake:
         filled = st.merge("胸口疼，已经三天了", intake_mod.RuleSlotExtractor())
         assert "chief" in filled and "duration" in filled
 
+    def test_a_booking_date_is_not_a_duration(self) -> None:
+        """实测踩到过：患者挑号源说的「10月20日的上午」被当成病程存进了实体记忆。
+
+        `duration` 的线索词里有「月」，不做区分就会把预约日期写成"病程：10月20日的上午"。
+        """
+        ext = intake_mod.RuleSlotExtractor()
+        duration = next(s for s in intake_mod.SLOTS if s.key == "duration")
+        assert ext.extract("10月20日的上午", duration) is None
+        assert ext.extract("明天下午", duration) is None
+        # 真的病程照样抽得出来
+        assert ext.extract("已经三天了", duration) == "已经三天了"
+        assert ext.extract("两周了", duration) == "两周了"
+        # 同一句里既有病程又有预约：病程照抽，不被预约措辞带偏
+        assert ext.extract("咳嗽三天了，想约10月20日上午", duration) is not None
+
     def test_unfillable_slot_stops_being_asked(self) -> None:
         """**防无限追问**：问满 MAX_ASK 次还抽不出来，就不再问、并记为"问不出来"。"""
         st = intake_mod.IntakeState()

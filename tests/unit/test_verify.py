@@ -28,6 +28,7 @@ from kubedocs.clinical.reference import (
 from kubedocs.clinical.verify import (
     NO_EVIDENCE_ANSWER,
     facts_only_answer,
+    promised_card_without_proposal,
     strip_ungrounded,
     verify,
 )
@@ -411,3 +412,29 @@ class TestFactsOnlyAnswerKeepsWhatTheServerKnows:
         assert "可挂的科室" not in text
         assert "号源" not in text
         assert NO_EVIDENCE_ANSWER in text
+
+
+class TestPromisedCardWithoutProposal:
+    """**"说"不等于"做"**：承诺了待确认单却没调 `propose_booking`。
+
+    实测踩到两次：①"我这就为您生成一张待确认的挂号单"；②改期时"确认后会给您生成一张
+    新的待确认挂号单"。两轮都没调工具，服务端没单子、患者界面上没有确认卡片。
+    """
+
+    def test_promise_without_calling_the_tool_is_flagged(self):
+        prose = "我这就为您生成一张待确认的挂号单，请稍候。"
+        v = promised_card_without_proposal(prose, [])
+        assert v is not None and v.kind == "promised_booking_without_proposal"
+        assert v.severity == "block"
+
+    def test_promise_after_a_reschedule_is_flagged_too(self):
+        prose = "我先帮您查一下，确认后会给您生成一张新的待确认挂号单。"
+        assert promised_card_without_proposal(prose, ["get_availability"]) is not None
+
+    def test_the_same_sentence_is_fine_after_the_tool_ran(self):
+        prose = "已生成待确认的挂号单，需要您在界面上点确认后才生效。"
+        assert promised_card_without_proposal(prose, ["propose_booking"]) is None
+
+    def test_ordinary_text_is_not_flagged(self):
+        prose = "呼吸内科今天上午还有 10 个号，您想约哪一天？"
+        assert promised_card_without_proposal(prose, []) is None

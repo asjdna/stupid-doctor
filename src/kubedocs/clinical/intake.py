@@ -14,6 +14,7 @@
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 from typing import Protocol
 
@@ -58,6 +59,24 @@ SLOTS: tuple[IntakeSlot, ...] = (
 )
 
 
+_DURATION_RE = re.compile(
+    r"[0-9一二两三四五六七八九十半几]+\s*(?:个)?\s*(?:天|日|周|星期|礼拜|个月|月|小时|钟头|年)"
+    r"|刚才|突然|一直|很久|好久|反复"
+)
+"""`duration` 槽位的**数字+单位**判据（"三天""两周""半个小时""一年"）。"""
+
+_BOOKING_TEXT_RE = re.compile(
+    r"[0-9一二三四五六七八九十]{1,2}\s*月\s*[0-9一二三四五六七八九十]{1,2}\s*[日号]"
+    r"|上午|下午|明天|后天|大后天|下周|本周|这周|号源|挂号"
+)
+"""**预约措辞**：它们不属于病程。
+
+不加这一条会出现实测踩到过的错误：患者说「10月20日的上午」（在挑号源时段），
+`duration` 的线索词里有个「月」，于是整句话被当成"这个情况多久了"存进实体记忆，
+面板上就出现"病程：10月20日的上午"——模型据此可能把预约日期当成病程。
+"""
+
+
 class SlotExtractor(Protocol):
     """从患者这一轮的话里抽出某个槽位的值。抽不到返回 None。"""
 
@@ -69,12 +88,18 @@ class RuleSlotExtractor:
 
     已知的粗糙之处：它把整句话存进去，而不是抽成结构化值；也会误触发
     （"我不发烧"命中"发烧"）。**不要**基于它的输出做统计结论。
+
+    `duration` 是唯一有**专门规则**的槽位：必须出现"数字 + 时间单位"，且先把预约措辞
+    （`10月20日的上午`）剔掉。理由见 `_BOOKING_TEXT_RE`。
     """
 
     def extract(self, text: str, slot: IntakeSlot) -> str | None:
         stripped = text.strip()
         if not stripped:
             return None
+        if slot.key == "duration":
+            cleaned = _BOOKING_TEXT_RE.sub(" ", stripped)
+            return stripped if _DURATION_RE.search(cleaned) else None
         if any(cue in stripped for cue in slot.cues):
             return stripped
         return None

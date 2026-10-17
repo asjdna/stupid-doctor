@@ -54,7 +54,13 @@ from kubedocs.clinical.reasoning import ClinicalReasoner, _extract_json
 from kubedocs.clinical.reference import FactSet, build_facts
 from kubedocs.clinical.safety import SafetyAudit, SafetyOutcome, apply_gate
 from kubedocs.clinical.safety import append_audit as append_safety_audit
-from kubedocs.clinical.verify import facts_only_answer, strip_ungrounded, verify
+from kubedocs.clinical.verify import (
+    Verification,
+    facts_only_answer,
+    promised_card_without_proposal,
+    strip_ungrounded,
+    verify,
+)
 from kubedocs.llm_status import NO_LLM_MESSAGE
 
 logger = logging.getLogger(__name__)
@@ -436,6 +442,13 @@ class ClinicalPipeline:
         # 若先跑它，"检索为空却给了医学内容"这条检查就看不出任何异常（字段已被清空），
         # 而**散文里的那句话照样会送到患者眼前**。校验要看到的是模型**原始**输出。
         verification = verify(assessment, assessment.patient_summary, facts)
+        # 承诺了"待确认的挂号单"却没真的调 `propose_booking`：患者会以为在等一张
+        # 永远不会出现的卡片（实测踩到过），按 block 处理，让重生成去把工具调用补上。
+        promised = promised_card_without_proposal(
+            assessment.patient_summary, (c.name for c in getattr(result, "calls", None) or [])
+        )
+        if promised is not None:
+            verification = Verification(violations=[*verification.violations, promised])
         # 历次尝试的违规**全部留档**：第一轮确实越界了，不能因为第二轮回正就当没发生
         # ——"模型偶尔会编"这个事实正是这套架构最需要被观测到的东西。
         recorded = list(verification.violations)
@@ -457,6 +470,12 @@ class ClinicalPipeline:
                     )
                     facts = self._build_facts(question, evidence, patient_id=patient_id)
                     verification = verify(retry_assessment, retry_assessment.patient_summary, facts)
+                    promised = promised_card_without_proposal(
+                        retry_assessment.patient_summary,
+                        (c.name for c in getattr(retry, "calls", None) or []),
+                    )
+                    if promised is not None:
+                        verification = Verification(violations=[*verification.violations, promised])
                     recorded.extend(verification.violations)
                     assessment, problems, dropped = self._enforce(retry_assessment, evidence)
 
