@@ -356,6 +356,46 @@ HTTP `/tools`、Agent 工具循环**同源**（`ToolRegistry`），不另写一�
 | clinic 知识卡片（31,592 张 / 8.2 MB） | `python scripts/clinic_build_cards.py --source <上游产物目录>` | `data/clinic/cards.json` |
 | clinic 科室补全表（4,727 条） | `python scripts/clinic_derive_departments.py --triples <triples.txt>` | `data/clinic/department_map.json` |
 
+### 想跑通就得先有语料？——用你自己的文档也行
+
+上面三样**都不随仓库分发**（本仓库没有它们的再分发权，边界见 [NOTICE.md](NOTICE.md)），
+索引同样不入库。所以**新克隆的仓库检索是空的**：此时系统按设计**不给医学内容**
+（`no_medical_advice_without_evidence` 会把那段散文换成只含事实的回答），
+**不会**拿模型的通用知识顶替检索结果。这不是判断力下降，是依据没了。
+
+换成你自己的文档同样能把整条链路跑通（检索 / 引用核对 / 约束层 / 安全门全都在）：
+
+```bash
+# 任意 Markdown / PDF / Office：放进一个目录，用 k8s_docs 域摄取
+python -m kubedocs.cli --corpus-dir <你的文档目录> ingest
+python -m kubedocs.cli search "你的问题"
+
+# clinic 域换成自己的卡片表：写 data/clinic/cards.json 再摄取
+python -m kubedocs.cli --domain clinic ingest
+```
+
+卡片最小形状（`cards.json` 是数组，每张卡至少要这三个键）：
+
+```json
+{"kind": "symptom", "key": "my_cough",
+ "text": "症状：夜间干咳。若伴低热超过三天，建议就诊呼吸内科。",
+ "diseases": ["my_cough"], "departments": ["呼吸内科"]}
+```
+
+`kind` / `key` / `text` 决定索引与引用，`diseases` / `departments` 供分诊投票。
+
+⚠ **两个实测出来的坑，换语料前必须知道**：
+
+1. **`clinic` 域的语料路径是写死的**：`clinic_cards_path()` 固定 `data/clinic/cards.json`，
+   **没有环境变量可换**。想并存多套卡片就换文件，或自己加一个域。
+2. **语料太小比没有语料更危险**：安全门判的是**"有没有依据"**，不是**"依据相不相关"**。
+   用一份只有 3 张卡片的索引去问卡片完全没涵盖的问题（实测问「脚踝扭伤两周、石膏什么时候能拆」），
+   检索仍会命中那 3 张卡，模型于是"有依据"地用自己的通用知识答了骨科问题——
+   `safety` 不触发、`contract_violations` 为 0。所以自带语料要**覆盖你真正会问的范围**，
+   读回答时也要核对 `reference.evidence_ids` 指向的卡片是否切题。
+
+口径与机制见 [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) 的「语料按需装配」。
+
 索引同样是派生物，可随时重建。**默认后端 `pgvector` 把索引放进 Postgres**：
 
 ```bash
