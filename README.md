@@ -171,7 +171,7 @@ docker compose up -d --scale api=3     # 三个副本，仍是一个入口 http:
 
 | 配置 | 为什么 |
 |---|---|
-| `ip_hash` | 同一客户端固定到同一副本。**默认**这一档，零改动 |
+| `hash "$cookie_kubedocs_sid$remote_addr" consistent` | **按会话粘**：问诊页在生成 `session_id` 时会把它同时写进同源 cookie `kubedocs_sid`，同一会话因此钉在同一副本；**没有 cookie 的客户端（curl / 脚本）键退化成纯 IP**，不会全挤到一台 |
 | `proxy_buffering off` | `/chat` 是 SSE（`text/event-stream`）。nginx 默认缓冲会把事件攒到连接结束才一起发，"边跑边推"变成"跑完才见到" |
 | `proxy_read_timeout 180s` | 一轮问诊是模型在跑（工具循环可能几次往返），默认 60s 会掐断长回答 |
 
@@ -179,20 +179,26 @@ docker compose up -d --scale api=3     # 三个副本，仍是一个入口 http:
 
 - **别给 `api` 加宿主机端口映射**：`--scale` 下每个副本都会去绑同一个宿主机端口，直接冲突。
   只有 `nginx` 该发布端口。
-- **想按"会话"而不是按 IP 粘**（同一 NAT 后面的人各粘各的）：让前端把 `session_id` 同时写进
-  同源 cookie `kubedocs_sid`，然后把 `deploy/nginx.conf` 里的 `ip_hash;` 换成
-  `hash $cookie_kubedocs_sid consistent;`。前面还有一层反向代理时，先配 `real_ip` 把真实 IP 取回来。
+- **只想按 IP 粘**（完全不动前端）：把那一行换成 `ip_hash;`（`deploy/nginx.conf` 里已备好注释）。
+  同一 NAT 后面的人会共用一台；前面还有一层反向代理时，先配 `real_ip` 把真实 IP 取回来。
+  反过来还有一种更简化的写法 `hash $cookie_kubedocs_sid consistent;`——但它会让**没有 cookie 的客户端
+  全部落到同一台**，探针与脚本要留意，所以默认用带 `$remote_addr` 的混合键。
 
-**实测（本机，2 个副本，同一网关跑两次配置）**：
+**实测（本机，2 个副本，同一网关）**：
 
 ```
-ip_hash 生效：  6 次 /healthz → upstream=172.19.0.3（6/6 同一副本）
-关掉粘性：      6 次 /healthz → upstream=172.19.0.4 / .3 交替（两个副本都活着）
-SSE 经网关：    /chat → Content-Type: text/event-stream, Transfer-Encoding: chunked，事件逐条到达
+会话粘性：  同一 kubedocs_sid 连发 3 次 → 3/3 同一副本；不同 sid 分别落到 .3 与 .4
+无 cookie： 退化成按 IP，连发 6 次 → 6/6 同一副本（脚本/探针不会被挤到一台）
+SSE 经网关：/chat → 200、Content-Type: text/event-stream、Transfer-Encoding: chunked，事件逐条到达
 ```
 
-> 网关日志已经把"这一轮落到哪个副本"打出来了（`upstream=`）以及粘性用的键（`sticky_ip=` /
-> `sticky_sid=`）：粘性到底有没有生效，看这一列即可。
+> ⚠ **`hash ... consistent` 不能与 `resolve` 一起用**（实测）：DNS 解析出的多个副本在一致性
+> 哈希环上同名同端口，环点重复，于是退化成轮询——同一个 cookie 的请求会在副本间来回跳。
+> 因此这里用**普通取模哈希**。代价是**扩缩容会让部分会话重新映射**（模数变了）；可接受：
+> 待确认单只有 15 分钟，真赶上时患者重新说一句"帮我挂号"即可，会话状态本身在库里不受影响。
+>
+> 网关日志已经把"这一轮落到哪个副本"（`upstream=`）与粘性键（`sticky_ip=` / `sticky_sid=`）
+> 打出来了：粘性到底有没有生效，看这一列即可。
 
 ### Windows 一键启动
 

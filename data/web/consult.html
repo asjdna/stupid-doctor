@@ -130,6 +130,18 @@ if (!sid) {
   sid = newId().slice(0, 36);
   sessionStorage.setItem(SID_KEY, sid);
 }
+/* **网关粘性用的同源 cookie**：把 session_id 也写进 `kubedocs_sid`。
+   为什么要有这一行：`/consult` 的待确认挂号单在服务端进程内（一次性提议），多副本部署时
+   "在 A 副本提议、在 B 副本确认"会失败；网关（deploy/nginx.conf）按这个 cookie 做
+   `hash ... consistent`，同一会话就钉在同一副本上。
+   没带 cookie 的客户端（curl / 脚本）由网关退化成按 IP 粘，行为与以前一致。
+   `SameSite=Lax` + 同源路径：不参与跨站请求，也不会被别的站点读到。 */
+try {
+  document.cookie =
+    "kubedocs_sid=" + encodeURIComponent(sid) + "; Path=/; SameSite=Lax";
+} catch (e) {
+  /* cookie 被禁用（隐私模式/策略）：不影响问诊本身，只是退化成按 IP 粘 */
+}
 let pid = localStorage.getItem(PID_KEY);
 if (!pid) {
   pid = newId();

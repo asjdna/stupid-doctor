@@ -86,6 +86,16 @@ class TestPatientIdentity:
         assert "crypto.randomUUID" in html
         assert "Date.now()" in html
 
+    def test_session_id_is_mirrored_into_a_cookie(self, html: str) -> None:
+        """会话 id 同时写进同源 cookie `kubedocs_sid`：网关靠它做 sticky。
+
+        多副本下待确认挂号单在服务端进程内，"在 A 提议、在 B 确认"会失败；网关
+        （`deploy/nginx.conf`）按这个 cookie 取模哈希把同一会话钉在同一副本。
+        少了这一行，粘性就只剩"按客户端 IP"这一档（同一 NAT 后面的人会互相踩）。
+        """
+        assert "kubedocs_sid" in html
+        assert "SameSite=Lax" in html
+
     def test_patient_id_is_sent_on_every_request(self, html: str) -> None:
         """至少四处要带 `patient_id`：问诊、确认、退号、拉记录。
 
