@@ -41,10 +41,12 @@ def _payload(
     departments: list[str] | None = None,
     exams: list[dict[str, Any]] | None = None,
     followups: list[str] | None = None,
+    intent: str = "medical",
 ) -> str:
     return json.dumps(
         {
             "urgency": urgency,
+            "intent": intent,
             "red_flags": [],
             "departments": [{"name": d, "confidence": 0.5} for d in (departments or ["呼吸内科"])],
             "differentials": [],
@@ -148,6 +150,31 @@ class TestFabricatedBookingIsBlocked:
         assert len(loop.calls) == 2
         assert "挂上" not in turn.message
         assert "本轮没有产生任何挂号或退号动作" in turn.message
+        # 这是**按设计的降级**，不是系统故障：服务端确实给出了（只含事实的）回答。
+        assert turn.action == "answer"
+
+    def test_booking_intent_drops_unrequested_medical_content_without_blocking(self):
+        """事务性需求（挂号/号源）不需要检查用药：删掉那些条目，**但回答照常给**。
+
+        证据是齐的，所以不该走 block（那样会把"呼吸内科今天有号"这句有用的话一起丢掉）。
+        """
+        loop = _Loop(
+            _payload(
+                summary="呼吸内科今天上午还有号，可以直接挂。",
+                intent="booking",
+                exams=[{"name": "血常规", "why": "看看感染方向", "evidence_ids": ["K1"]}],
+            ),
+            evidence=EvidenceBundle(
+                items=[EvidenceItem(id="K1", kind="knowledge", text="血常规可提示感染方向", score=1.0)]
+            ),
+        )
+        turn = _pipeline(loop).advance("我想挂呼吸内科")
+        assert turn.action != "error"
+        assert turn.message == "呼吸内科今天上午还有号，可以直接挂。"
+        assert [v["kind"] for v in turn.contract_violations] == ["medical_content_not_requested"]
+        assert turn.assessment is not None
+        assert turn.assessment.exams == []
+        assert len(loop.calls) == 1  # strip 级不重生成，不额外花钱
 
     def test_a_server_confirmed_booking_may_be_told_to_the_patient(self):
         """反向：服务端**确实**确认了，模型就可以说——不能把正确的话一起拦掉。"""

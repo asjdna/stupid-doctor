@@ -322,3 +322,92 @@ class TestReferencePanel:
         assert payload["evidence_ids"] == ["K1"]
         assert payload["symptoms"][0]["canonical"] == "咳嗽"
         assert payload["known_departments"] == list(DEPARTMENTS)
+
+
+class TestIntentDecidesWhetherMedicalContentIsNeeded:
+    """需求类型（`intent`）**只收紧、不放宽**。
+
+    - `booking` / `admin`（挂号、查号源、问流程）不需要检查/用药/鉴别 ⇒ 删掉（strip），不拦整轮；
+    - 没有知识证据时，写什么 `intent` 都**绕不过** `medical_without_evidence` 那条 block；
+    - 缺省是 `medical`（最保守）：模型没给这一项时行为与以前完全一致。
+    """
+
+    def test_default_intent_is_medical(self):
+        assert ClinicalAssessment(urgency="routine").intent == "medical"
+
+    def test_booking_intent_strips_medical_content_without_blocking(self):
+        facts = _facts()  # 有知识证据 K1
+        a = ClinicalAssessment(
+            urgency="routine",
+            intent="booking",
+            departments=[DepartmentAdvice(name="呼吸内科")],
+            exams=[ExamAdvice(name="血常规", why="看看感染方向", evidence_ids=["K1"])],
+            patient_summary="呼吸内科今天上午还有号，可以直接挂。",
+        )
+        v = verify(a, a.patient_summary, facts)
+        assert v.kinds() == ["medical_content_not_requested"]
+        assert v.ok() is True  # strip 级：不拦整轮
+        cleaned = strip_ungrounded(a, v, facts)
+        assert cleaned.exams == []
+        assert cleaned.patient_summary == a.patient_summary
+
+    def test_writing_booking_intent_cannot_bypass_the_evidence_rule(self):
+        """没有知识证据时：写 `booking` 也照样 block，而且不会多记一条 strip。"""
+        facts = _facts(evidence=EvidenceBundle())  # 没有任何证据
+        a = ClinicalAssessment(
+            urgency="routine",
+            intent="booking",
+            departments=[DepartmentAdvice(name="呼吸内科")],
+            exams=[ExamAdvice(name="血常规", why="看看感染方向", evidence_ids=[])],
+            patient_summary="建议查个血常规。",
+        )
+        v = verify(a, a.patient_summary, facts)
+        assert v.kinds() == ["medical_without_evidence"]
+        assert v.ok() is False
+
+    def test_medical_intent_still_requires_evidence(self):
+        facts = _facts(evidence=EvidenceBundle())
+        a = ClinicalAssessment(
+            urgency="routine",
+            departments=[DepartmentAdvice(name="呼吸内科")],
+            exams=[ExamAdvice(name="血常规", why="看看感染方向", evidence_ids=[])],
+            patient_summary="建议查个血常规。",
+        )
+        assert verify(a, a.patient_summary, facts).kinds() == ["medical_without_evidence"]
+
+
+class TestFactsOnlyAnswerKeepsWhatTheServerKnows:
+    """模型越界被拦时，服务端**已经握有**的科室与号源不该一起消失。
+
+    它们来自科室补全表与号源库，不依赖检索；丢掉只会让"科室方向本来就清楚"的患者
+    看到一句"我不能回答"。
+    """
+
+    def test_department_and_slots_are_included(self):
+        facts = _facts(
+            evidence=EvidenceBundle(),  # 没有知识证据
+            departments=[DepartmentSignal(name="呼吸内科", score=2.0, source="症状关联票数")],
+            booking=[
+                BookingFact(
+                    kind="available",
+                    department="呼吸内科",
+                    date="2026-10-17",
+                    time_slot="上午",
+                    fee=35,
+                    remaining=9,
+                )
+            ],
+        )
+        text = facts_only_answer(facts, reason="medical_without_evidence")
+        assert NO_EVIDENCE_ANSWER.split("。")[0] in text
+        assert "可挂的科室：呼吸内科" in text
+        assert "余 9" in text
+        assert "本轮没有产生任何挂号或退号动作" in text
+        assert "medical_without_evidence" in text
+
+    def test_nothing_invented_when_there_is_nothing_to_say(self):
+        """事实集里什么都没有时只剩那段固定话术——**宁可少说，不可编**。"""
+        text = facts_only_answer(_facts(evidence=EvidenceBundle()), reason="")
+        assert "可挂的科室" not in text
+        assert "号源" not in text
+        assert NO_EVIDENCE_ANSWER in text

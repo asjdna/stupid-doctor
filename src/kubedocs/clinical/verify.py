@@ -321,6 +321,28 @@ def verify(
                 severity="block",
             )
         )
+
+    # 7) 需求类型与内容不匹配：模型自己把这一轮标成"挂号/事务"（`intent` 不是 `medical`），
+    #    却仍输出了鉴别/检查/用药。那是**用户没问、也不需要专业支撑**的内容，删掉即可，
+    #    不必拦整轮（证据其实是齐的，拦下来只会把有用的回答一起丢掉）。
+    #    没有证据时走上面那条 `block`，这里不重复记。
+    if (
+        _medical_content(assessment)
+        and assessment.intent != "medical"
+        and not emergency
+        and facts.has_evidence()
+    ):
+        out.append(
+            Violation(
+                kind="medical_content_not_requested",
+                detail=(
+                    f"本轮需求类型是 `{assessment.intent}`（挂号/事务），不需要检查、用药或鉴别；"
+                    "这三类条目已移除，只保留科室、号源、流程与危险信号提醒。"
+                    "如果用户其实是在问病情，请把 `intent` 标成 `medical` 并给出依据。"
+                ),
+                severity="strip",
+            )
+        )
     return Verification(violations=out)
 
 
@@ -339,6 +361,9 @@ def strip_ungrounded(
     cleaned = assessment
     if "fabricated_evidence" in kinds:
         cleaned = enforce(cleaned, facts.evidence_ids()).assessment
+    if "medical_content_not_requested" in kinds:
+        # 挂号/事务性需求里的医学内容整段删掉（保留科室、危险信号与那句回答本身）。
+        cleaned = cleaned.model_copy(update={"differentials": [], "exams": [], "medications": []})
     if "department_not_grounded" in kinds:
         allowed = facts.allowed_departments()
         # 与 `verify` 同一条口径：归一化后比较（"呼吸内科门诊" = "呼吸内科"）。
@@ -353,14 +378,25 @@ def strip_ungrounded(
 def facts_only_answer(facts: FactSet, *, reason: str = "") -> str:
     """第 ② 级处置：**不展示模型那段散文**，改由服务端拼一段只含事实的回答。
 
-    内容来源严格限定在事实集里：有没有可挂号的科室、本轮有没有已确认的挂号动作。
-    拼不出任何事实时返回 `NO_EVIDENCE_ANSWER`——**宁可少说，不可编**。
+    内容来源严格限定在事实集里，按"**服务端已经握有什么**"排序：科室线索（规则资产给的）、
+    号源事实（业务库读数）、本轮已确认/已取消的挂号动作。拼不出任何事实时只回
+    `NO_EVIDENCE_ANSWER`——**宁可少说，不可编**。
+
+    为什么要把科室与号源写出来（而不是只回一句"没有检索到资料"）：这两类事实**不依赖检索**，
+    它们来自科室补全表与号源库。模型越界被拦时把它们一起丢掉，会让"科室方向本来就清楚"的
+    患者看到一句"我不能回答"，而服务端明明知道该挂哪个科、今天还有没有号。
     """
     parts: list[str] = []
     if facts.has_evidence():
         parts.append("系统已检索到相关资料，但这一轮的回答没有通过事实校验，因此不展示。")
     else:
         parts.append(NO_EVIDENCE_ANSWER)
+    if facts.departments:
+        top = "、".join(d.name for d in facts.departments[:3])
+        parts.append(f"按规则线索（科室补全表）可挂的科室：{top}。")
+    resolved = [b for b in facts.booking if b.kind == "available"]
+    if resolved:
+        parts.extend(b.render().lstrip("- ") for b in resolved[:3])
     completed = facts.completed_bookings()
     if completed:
         parts.extend(b.render().lstrip("- ") for b in completed)

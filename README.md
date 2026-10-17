@@ -286,13 +286,15 @@ HTTP `/tools`、Agent 工具循环**同源**（`ToolRegistry`），不另写一�
   │     证据编号 K1、K2… 由程序分配，模型引用它们
   │
   ├─ 模型输出结构化结论（契约化）——**判断只由它做**
-  │     urgency · red_flags（病症 + 严重程度 + 判断角度 + 不确定性档位 + 依据）
+  │     intent（需求类型 medical/booking/admin）· urgency
+  │     red_flags（病症 + 严重程度 + 判断角度 + 不确定性档位 + 依据）
   │     departments · differentials · exams · medications · patient_summary
   │     confidence（自报置信度）· information_gaps · followup_questions
   │
   ├─ 约束层校验：拿同一份事实集核对它的每一处输出
   │     block  ⇒ 带违规原因重生成一次；仍违规 ⇒ 那段散文不上屏，换成只含事实的回答
-  │     strip  ⇒ 丢掉那一条（编造依据的条目、未接地的科室）
+  │                （事实回答里保留服务端已知的科室与号源，`action="answer"`——这是降级，不是故障）
+  │     strip  ⇒ 丢掉那一条（编造依据的条目、未接地的科室、事务性需求里多余的医学内容）
   │     warn   ⇒ 只留痕（进响应里的 contract_violations）
   │
   ├─ 执行契约：没有依据的检查/用药 → 丢弃（**在校验之后**，否则"检索为空却给医学内容"

@@ -23,6 +23,22 @@ from pydantic import BaseModel, ConfigDict, Field
 Urgency = Literal["emergency", "urgent", "routine"]
 """紧急度三档。`emergency` 必须触发紧急处理指引（见提示词的硬性条款）。"""
 
+Intent = Literal["medical", "booking", "admin"]
+"""这一轮用户**要什么**（由模型自报，程序只拿它**收紧**、绝不用它放宽）。
+
+- `medical`：描述症状、问可能是什么病 / 该做什么检查 / 能考虑什么药 ⇒ 医学内容必须有检索依据；
+- `booking`：只想挂号、查号源、退号 ⇒ 不需要医学内容；
+- `admin`：问流程、放号时间、就诊记录这类事务性问题 ⇒ 不需要医学内容。
+
+**缺省是 `medical`（最保守）**：模型没给、给错、或解析失败时，系统按"需要专业依据"处理。
+`booking` / `admin` 时若仍输出 `differentials` / `exams` / `medications`，这三类条目会被删掉
+（`verify` 的 `medical_content_not_requested`，`strip` 级），但**不会**因此放宽任何证据要求——
+"不需要专业支撑"省掉的是**多余的医学内容**，不是**依据**。
+
+反过来，想靠把它写成 `booking` 来绕过"无依据不给医学内容"是无效的：那条是 `block` 级，
+按的是"本轮有没有知识证据"，与本字段无关。
+"""
+
 Likelihood = Literal["high", "medium", "low"]
 """可能病症的**粗**可能性档位。
 
@@ -156,6 +172,9 @@ class ClinicalAssessment(_Strict):
     """一次问诊的**最终产物**。模型必须按这个形状回，解析失败就走降级路径（见 reasoning）。"""
 
     urgency: Urgency
+    intent: Intent = "medical"
+    """本轮需求类型。**只收紧、不放宽**（见 `Intent` 的说明）；缺省 `medical`。"""
+
     red_flags: list[RedFlag] = Field(default_factory=list)
     """**模型自己判出的危险信号**（多角度）。非空 ⇒ `urgency` 必须是 `emergency`（契约层兜住）。"""
 

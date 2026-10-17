@@ -200,6 +200,7 @@ L3 只能保证"别给错动作"，它救不回"你没识别出来的危险"。
 ```json
 {
   "urgency": "emergency | urgent | routine",
+  "intent": "medical | booking | admin",
   "red_flags": [
     {
       "condition": "可能的急症方向",
@@ -236,6 +237,15 @@ L3 只能保证"别给错动作"，它救不回"你没识别出来的危险"。
 
 字段约束：
 
+- `intent`：**先判断这一轮用户要什么，再决定给什么**。
+  - `medical`：描述症状、问可能是什么病 / 该做什么检查 / 能考虑什么药；
+  - `booking`：只想挂号、查号源、退号；
+  - `admin`：问流程、放号时间、就诊记录这类事务性问题。
+  `booking` / `admin` 这一轮**不要输出** `differentials` / `exams` / `medications`
+  ——那是用户没问、也不需要专业资料支撑的内容；只回答科室、号源、流程，以及
+  "什么情况要立刻就医"。**拿不准就选 `medical`**（缺省也是它，最保守）。
+  注意：把 `intent` 写成 `booking` **不能**绕开"没有依据就不给医学内容"——那条判的是
+  本轮有没有检索依据，与本字段无关；写错只会让本该给的建议被当成多余的删掉。
 - `red_flags`：**没有危险信号就给空数组 `[]`**（这是常态，不要为了"保险"硬凑）。
   每一项 `condition` / `severity` / `why` / `angle` **都必填**；`likelihood` 默认 `possible`；
   `evidence_ids` 允许为空（危险信号常常靠患者原话就能判，不必凑卡片依据）。

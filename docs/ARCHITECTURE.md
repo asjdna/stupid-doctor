@@ -358,17 +358,27 @@ XXXXXXXX"——这对患者是不可挽回的误导，他会以为号已到手�
 | 级别 | 含义 | 判据（`kind`） | 处置 |
 |---|---|---|---|
 | `block` | 内容不得让患者看到 | 动作幻觉（`fabricated_booking` / `fabricated_cancellation`）、编造凭据号（`unknown_ticket`）、检索为空却给医学内容（`medical_without_evidence`） | 带违规原因**重生成一次**；仍违规则整段换成服务端拼的事实回答 |
-| `strip` | 内容里**某一条**不合法 | 编造依据编号（`fabricated_evidence`）、科室未接地（`department_not_grounded`） | 丢掉那一条（科室/建议），其余照常给患者 |
+| `strip` | 内容里**某一条**不合法 | 编造依据编号（`fabricated_evidence`）、科室未接地（`department_not_grounded`）、**事务性需求里多余的医学内容**（`medical_content_not_requested`） | 丢掉那一条（科室/建议），其余照常给患者 |
 | `warn` | 需要留痕，但不该拦 | 未解释的红线线索（`red_line_unexplained`）、服务端没给过的金额（`unknown_amount`） | 只记进 `contract_violations`，不拦不改 |
 
 `block` 与 `strip` 的区别是刻意的：一条编造的科室不该让整段回答消失，而"已挂上"这种
 动作幻觉必须让整段回答消失——前者是信息不全，后者是误导行为。
 
+**需求类型（`intent`）只收紧、不放宽。** 契约里新增了 `intent: medical | booking | admin`，
+让模型先判断这一轮用户要什么：`booking`（挂号、查号源、退号）与 `admin`（流程、放号时间、
+就诊记录）**不需要专业资料支撑**，所以这两类需求下若仍输出 `differentials` / `exams` /
+`medications`，按 `strip` 删掉即可（证据其实是齐的，拦整轮只会把"今天还有号"这类有用的话
+一起丢掉）。反过来**绕不过去**：没有知识证据时一律按 `medical_without_evidence` 走 `block`，
+与 `intent` 写成什么无关——"不需要专业支撑"省掉的是**多余的医学内容**，不是**依据**。
+缺省值是 `medical`（最保守）：模型没给、给错或解析失败，行为与以前完全一致。
+
 三级处置（`pipeline.py` 的 `_tool_loop_turn`、`agent/clinic_react.py` 的 `turn()`）：
 
 1. 有 `block` 级违规 ⇒ **带违规原因重生成一次**（多花一次循环，比给患者一句编造的话便宜得多）；
 2. 重生成仍违规则 ⇒ **不展示模型那段散文**，改由 `facts_only_answer()` 拼一段只含事实的回答；
-   拼不出任何事实时回 `NO_EVIDENCE_ANSWER`——宁可少说，不可编；
+   这段回答会带上服务端**已经握有**的科室线索（科室补全表）与号源读数（业务库）——它们不依赖检索，
+   没有理由因为模型越界而一起消失；拼不出任何事实时才只回 `NO_EVIDENCE_ANSWER`——宁可少说，不可编；
+   这一轮的 `action` 是 **`answer` 而不是 `error`**：服务端确实给出了回答，它只是降级形态；
 3. **历次尝试**的违规全部进 `contract_violations` 随响应回去。它是"模型有没有在编造"的
    唯一可观测读数，只写日志等于没人看得见——第一轮确实越界了，不能因为第二轮回正就当没发生。
 

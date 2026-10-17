@@ -476,6 +476,8 @@ class ClinicalPipeline:
         assessment = strip_ungrounded(assessment, verification, facts)
         if dropped:
             logger.warning("按 R3 丢弃无依据建议：%s", "、".join(dropped))
+        if "medical_content_not_requested" in verification.kinds():
+            logger.info("本轮需求类型是 %s（挂号/事务），已移除多余的鉴别/检查/用药条目", assessment.intent)
 
         # **第三层：确定性安全门**（`clinical/safety.py`）。放在最后一步，因为它看的是
         # "患者最终会看到的那段话"：前三层（语义理解 / 主动问诊 / 契约校验）都跑完之后，
@@ -503,7 +505,10 @@ class ClinicalPipeline:
                 message = f"{message}\n\n{safety.followup}" if message else safety.followup
 
         if blocked:
-            action: TurnAction = "error"
+            # **不是 error**：这一轮服务端确实给出了回答（只含事实那段），只是模型那段散文
+            # 没通过校验。标成 `error` 会让调用方把它当系统故障去重试/报警，而它是**按设计的降级**。
+            # 真正"没跑成"的情形（模型不可用 / 输出不可解析）在更早的分支已经返回。
+            action: TurnAction = "answer"
         elif escalated:
             # 安全门按模型自己给出的信号（critical / likely）补了急救动作 ⇒ 这一轮就是急症轮，
             # 不能因为 `urgency` 被写成 urgent 就把动作降成"常规回答"（那会让前端不弹横幅、

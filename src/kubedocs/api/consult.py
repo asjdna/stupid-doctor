@@ -571,6 +571,7 @@ def _assessment_payload(a: ClinicalAssessment | None) -> dict[str, Any]:
     if a is None:
         return {}
     return {
+        "intent": a.intent,
         "urgency": a.urgency,
         "patient_summary": a.patient_summary,
         "departments": [
