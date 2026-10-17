@@ -28,6 +28,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from kubedocs.agent.clinic_react import ClinicReactRuntime
+from kubedocs.api import app as app_module
 from kubedocs.api.app import create_app
 from kubedocs.api.threads import ThreadOwnershipError
 from kubedocs.config import Settings
@@ -860,3 +861,33 @@ class TestConsolePage:
         # 页面必须自带样式与脚本：容器里没有外网，CDN 一挂就是白板。
         assert "<style>" in resp.text and "<script>" in resp.text
         assert "http://cdn" not in resp.text and "https://cdn" not in resp.text
+
+
+class TestPerDomainRuntimeAppliesDomainDefaults:
+    """回归：按域取运行期**必须套用域自报的嵌入/归一化**。
+
+    曾经只做 `model_copy(update={"domain": ...})`，于是 clinic 拿全局默认的 384 维英文
+    模型去开 512 维中文索引 ⇒ `StoreError: 索引向量维度不符` ⇒ `/consult` 503。
+    在 k8s_docs 上测不出来（384 恰等于全局默认），所以这条必须专门钉住。
+    """
+
+    def test_clinic_runtime_switches_to_the_domain_model(self, tmp_path: Path) -> None:
+        # **不显式**给 embedding_model / embedding_dim：模拟"什么都没配"的部署
+        settings = Settings(
+            store="sqlite-vec",
+            database_url="postgresql://kubedocs:kubedocs@127.0.0.1:1/kubedocs",
+            index_dir=str(tmp_path / "index"),
+            domain="k8s_docs",
+            embedding_provider="hashing",
+        )
+        app = create_app(settings)
+        runtime = app_module._runtime_for_app(app, "clinic")  # noqa: SLF001
+        assert runtime.settings.domain == "clinic"
+        assert runtime.settings.embedding_dim == 512
+        assert runtime.settings.normalizer == "chinese"
+
+    def test_explicit_settings_are_not_overridden(self, api_settings: Settings) -> None:
+        """显式配了维度就不要被域默认值顶掉（否则测试/私有模型全被改写）。"""
+        app = create_app(api_settings)
+        runtime = app_module._runtime_for_app(app, "clinic")  # noqa: SLF001
+        assert runtime.settings.embedding_dim == DIM

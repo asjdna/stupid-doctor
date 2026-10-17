@@ -167,9 +167,9 @@ def _resolve_settings(domain: str, settings: Settings | None) -> Settings:
 
     **域自报的默认值必须跟着域走**：clinic 是 512 维中文模型、k8s_docs 是 384 维英文模型，
     混用会直接撞 `StoreError`（向量维度不符）。所以这里统一过一遍
-    `cli.apply_domain_defaults`（它**不覆盖**显式配置：环境变量/`.env` 写了模型的仍然优先）。
+    `domains.base.apply_domain_defaults`（它**不覆盖**显式配置：环境变量/`.env` 写了模型的仍然优先）。
     """
-    from kubedocs.cli import apply_domain_defaults
+    from kubedocs.domains.base import apply_domain_defaults
 
     if settings is None:
         from kubedocs.cli import make_settings

@@ -127,3 +127,38 @@ class DomainRegistry:
     def clear(cls) -> None:
         """仅供测试重置注册表。"""
         cls._packs.clear()
+
+
+def apply_domain_defaults(settings: Settings) -> Settings:
+    """把域包自报的归一化/嵌入默认值套到 `Settings` 上（**不覆盖**显式取值）。
+
+    只换索引目录是不够的：语料、归一化器与嵌入模型都得跟着域一起换。否则
+    `--domain clinic ingest` 会把英文文档按 identity 归一化、用英文模型编码，灌进
+    clinic 的索引。
+
+    判据是 `model_fields_set`：环境变量与 `.env` 写过的字段会出现在里面，所以
+    `KUBEDOCS_EMBEDDING_MODEL=xxx` 仍然优先于域默认值——域提供的是**默认**，不是**强制**。
+
+    **所有"按域构造 settings"的入口都必须共用这一份**（CLI、MCP、HTTP 的按域运行期）。
+    HTTP 侧曾漏了它：`/consult` 拿全局默认的 384 维英文模型去开 clinic 的 512 维中文索引，
+    直接 `StoreError: 索引向量维度不符` ⇒ 问诊管线装不起来、请求 503。而这个问题在
+    `k8s_docs` 上**测不出来**——它的 384 维恰好等于全局默认值。
+    """
+    from kubedocs.domains import load_all
+
+    load_all()
+    try:
+        pack = DomainRegistry.get(settings.domain)
+    except KeyError:
+        # 未知域：这里不报错，交给真正用到域的地方（open_store / ingest）给出可读信息。
+        return settings
+
+    patch: dict[str, object] = {}
+    explicit = settings.model_fields_set
+    if "normalizer" not in explicit:
+        patch["normalizer"] = pack.normalizer_name
+    if "embedding_model" not in explicit:
+        patch["embedding_model"] = pack.embedding_model
+    if "embedding_dim" not in explicit:
+        patch["embedding_dim"] = pack.embedding_dim
+    return settings.model_copy(update=patch) if patch else settings

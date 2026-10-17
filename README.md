@@ -171,7 +171,7 @@ docker compose up -d --scale api=3     # 三个副本，仍是一个入口 http:
 
 | 配置 | 为什么 |
 |---|---|
-| `hash "$cookie_kubedocs_sid$remote_addr" consistent` | **按会话粘**：问诊页在生成 `session_id` 时会把它同时写进同源 cookie `kubedocs_sid`，同一会话因此钉在同一副本；**没有 cookie 的客户端（curl / 脚本）键退化成纯 IP**，不会全挤到一台 |
+| `hash "$cookie_kubedocs_sid$remote_addr"` | **按会话粘**：问诊页在生成 `session_id` 时会把它同时写进同源 cookie `kubedocs_sid`，同一会话因此钉在同一副本；**没有 cookie 的客户端（curl / 脚本）键退化成纯 IP**，不会全挤到一台 |
 | `proxy_buffering off` | `/chat` 是 SSE（`text/event-stream`）。nginx 默认缓冲会把事件攒到连接结束才一起发，"边跑边推"变成"跑完才见到" |
 | `proxy_read_timeout 180s` | 一轮问诊是模型在跑（工具循环可能几次往返），默认 60s 会掐断长回答 |
 
@@ -181,8 +181,9 @@ docker compose up -d --scale api=3     # 三个副本，仍是一个入口 http:
   只有 `nginx` 该发布端口。
 - **只想按 IP 粘**（完全不动前端）：把那一行换成 `ip_hash;`（`deploy/nginx.conf` 里已备好注释）。
   同一 NAT 后面的人会共用一台；前面还有一层反向代理时，先配 `real_ip` 把真实 IP 取回来。
-  反过来还有一种更简化的写法 `hash $cookie_kubedocs_sid consistent;`——但它会让**没有 cookie 的客户端
+  反过来还有一种更简化的写法 `hash $cookie_kubedocs_sid;`——但它会让**没有 cookie 的客户端
   全部落到同一台**，探针与脚本要留意，所以默认用带 `$remote_addr` 的混合键。
+- **两种写法都不能加 `consistent`**：见下面那条实测。
 
 **实测（本机，2 个副本，同一网关）**：
 

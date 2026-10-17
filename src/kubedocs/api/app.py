@@ -270,13 +270,24 @@ def _require_domain(name: str) -> str:
 
 
 def _runtime_for_app(app: FastAPI, domain: str) -> _DomainRuntime:
-    """按域取运行期资源（不存在则建一次并缓存）。"""
+    """按域取运行期资源（不存在则建一次并缓存）。
+
+    **必须过 `apply_domain_defaults`**：`Settings` 的 `normalizer` / `embedding_model` /
+    `embedding_dim` 是**域相关**的（clinic 512 维中文、k8s_docs 384 维英文），而
+    `model_copy(update={"domain": ...})` 只换域名、不换这三个值。漏了这一步，跨域请求会拿
+    全局默认的 384 维英文模型去开 clinic 的 512 维索引 ⇒ `StoreError: 索引向量维度不符`
+    ⇒ `/consult` 503。这个问题在 `k8s_docs` 上测不出来（它的 384 维恰好等于全局默认），
+    所以容器里一直没暴出来，直到有人在 HTTP 上真正跑 clinic。
+    """
+    from kubedocs.domains.base import apply_domain_defaults
+
     target = domain or app.state.settings.domain
     with app.state.runtimes_lock:
         runtimes: dict[str, _DomainRuntime] = app.state.runtimes
         runtime = runtimes.get(target)
         if runtime is None:
-            runtime = _DomainRuntime(app.state.settings.model_copy(update={"domain": target}))
+            settings = apply_domain_defaults(app.state.settings.model_copy(update={"domain": target}))
+            runtime = _DomainRuntime(settings)
             runtimes[target] = runtime
         return runtime
 

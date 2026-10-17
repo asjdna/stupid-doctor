@@ -531,29 +531,56 @@ strip 救不了它——删掉那句话之后，患者依然没有卡片、也�
 
 **代价**：每轮多一次 upsert（毫秒级）；`clinical.sessions` 会随会话数增长，过期行需要按
 `updated_at` 清理（没有内置 TTL：留多久由使用方决定）。`counts()` 多了 `sessions` 一列。
-## 32. 多副本走网关粘性（`ip_hash`），而不是把待确认单也挪进库
+## 32. 多副本走网关粘性（cookie 哈希，无 cookie 退化为 IP），而不是把待确认单也挪进库
 
 **决定**：`docker compose` 前置一个 `nginx`（`deploy/nginx.conf`）作为**唯一对外入口**，对 `api`
-副本做 `ip_hash` 粘性；`api` 不再发布宿主端口，副本数用 `--scale api=N` 调。会话状态已经落
-`clinical.sessions`（第 31 条），所以**只有待确认挂号单需要粘性**——它仍在进程内（第 15 条：
-一次性、15 分钟过期的提议，不是记录）。
+副本做粘性（`hash "$cookie_kubedocs_sid$remote_addr"`）；`api` 不再发布宿主端口，副本数用
+`--scale api=N` 调。会话状态已经落 `clinical.sessions`（第 31 条），所以**只有待确认挂号单需要
+粘性**——它仍在进程内（第 15 条：一次性、15 分钟过期的提议，不是记录）。
 
 **为什么不是把 `PendingBookings` 也落库**：那与第 15 条冲突，且要配套过期清扫任务；收益只是
 "重启后还能点 15 分钟前那张单子"。多副本的真实需求是"同一患者的连续请求落在同一副本"，
 那是网关该做的事，不是存储该做的事。
 
 **网关必须同时配三样**（只配粘性会把另外两类故障留在那里）：
-1. `ip_hash` —— **按会话**粘可换成 `hash $cookie_kubedocs_sid consistent`（前端把 session_id
-   写进同源 cookie），但两者不能同时开；
+1. 粘性键 —— 实际配的是 `hash "$cookie_kubedocs_sid$remote_addr"`：前端把 `session_id` 写进同源
+   cookie（`data/web/consult.html` 里写 `kubedocs_sid`），有 cookie 就按会话粘；curl / 脚本没有
+   cookie 时键退化成纯 IP，行为与 `ip_hash` 相同，不会全挤到一台。**不能加 `consistent`**：
+   实测 `hash ... consistent` 与 `resolve` 不能共存（nginx 1.27 下解析不下去），所以用朴素取模；
 2. `proxy_buffering off` —— `/chat` 是 SSE，缓冲会把"边跑边推"变成"跑完才发"；
 3. `proxy_read_timeout 180s` —— 一轮问诊是模型在跑，默认 60s 会掐断长回答。
 
 **副本发现**：`--scale` 之后后端地址会变，nginx 必须用 `resolver 127.0.0.11` + `server api:8080
 resolve`（`resolve` 需要 nginx ≥ 1.27.3，镜像因此钉 `nginx:1.27-alpine`，不是 `latest`）。
 
-**实测**（2 副本、同一网关两套配置）：`ip_hash` 下 6 次请求全部落 `172.19.0.3`；关掉粘性后
-在 `.3` / `.4` 间交替——既证明粘性生效，也证明副本真的在负载分担。
+**实测**（2 副本、三套配置）：裸 `ip_hash` 下 6 次请求全部落 `172.19.0.3`；关掉粘性后在
+`.3` / `.4` 间交替——既证明粘性生效，也证明副本真的在负载分担。`hash "$cookie_kubedocs_sid$remote_addr"
+consistent` 反而退化：同 cookie 的请求在副本间跳（`resolve` 解析出的副本在环上同名同端口、
+环点重复），去掉 `consistent` 后同一 `session_id` 3/3 命中同一副本、不同 `session_id` 分到不同副本。
+最终用的是**不带 `consistent`** 的那一档。
 
 **代价**：多一跳代理（毫秒级）；`ip_hash` 对同一 NAT 后面的用户不友好（那时换 cookie 方案）；
 网关本身成为单点，生产上应至少两实例 + 前面再一层 LB（或直接用 k8s ingress-nginx 的
 `affinity: cookie`，它自设 cookie、不需要应用配合）。
+## 33. 域默认值要在**运行期**套用（`apply_domain_defaults`），而不是只在 CLI 里
+
+**决定**：域包声明的"嵌入模型 + 维度 + 归一化器"由 `domains/base.py` 的
+`apply_domain_defaults(settings)` 套到 `Settings` 上（**环境变量优先**，没给才用域包的），
+三个入口显式调用：`cli.make_settings()`、`mcp/server.py`、`api/app.py` 的 `_runtime_for_app()`。
+
+**为什么**：`Settings` 的字段默认值是给 `k8s_docs` 域准备的（384 维英文模型），它**不知道**
+"当前在跑哪个域"。老代码只在 `cli.make_settings()` 里套域默认值，于是
+`create_app(domain="clinic")` 这条路径拿到的还是 384 维——与 clinic 索引的 512 维对不上，
+`/consult` 直接 503（`StoreError: 索引向量维度不符`）。这不是"模型选错了"那么温和，
+是**整条问诊链路不可用**；而 CLI 跑得好好的，所以只在容器里才暴露出来（容器入口走的是 app）。
+
+**为什么放在 `domains/base.py`**：`cli.py`、`mcp/server.py`、`api/app.py` 都要用同一份实现，
+各写一遍必然漂移（三处各自的"默认值"就变成了三套语义）。放在域注册表旁边，新增一个域只改
+域包；新增一个入口，只要调一次这个函数。
+
+**防回归**：`tests/unit/test_domains.py::TestApplyDomainDefaults` 钉住"套用后维度 = 域包声明值"
+与"显式环境变量不被覆盖"；`tests/unit/test_api.py::TestPerDomainRuntimeAppliesDomainDefaults`
+钉住"`create_app(domain=...)` 拿到的运行期配置已经套过域默认值"。
+
+**代价**：多一层隐式（读 `Settings()` 的代码看不到域默认值）。所以"新建入口必须调一次"这件事
+写进了 [`ARCHITECTURE.md`](ARCHITECTURE.md) 的域小节，别只靠记性。

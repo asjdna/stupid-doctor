@@ -9,7 +9,7 @@ import pytest
 
 from kubedocs.config import Settings
 from kubedocs.domains import DomainRegistry, load_all
-from kubedocs.domains.base import DomainPack
+from kubedocs.domains.base import DomainPack, apply_domain_defaults
 from kubedocs.normalize import (
     ChineseNormalizer,
     IdentityNormalizer,
@@ -257,3 +257,34 @@ class TestDomainRegistry:
     def test_describe_is_json_shaped(self):
         items = DomainRegistry.describe()
         assert items and {"name", "description", "normalizer", "eval_sets"} <= set(items[0])
+
+
+class TestApplyDomainDefaults:
+    """**按域构造 settings 时必须套用域自报的嵌入/归一化。**
+
+    回归：HTTP 侧的按域运行期曾经只做 `model_copy(update={"domain": ...})`，于是 clinic
+    拿着全局默认的 384 维英文模型去开 512 维中文索引 ⇒ `StoreError: 索引向量维度不符`
+    ⇒ `/consult` 503。这个问题在 k8s_docs 上测不出来（384 恰好等于全局默认）。
+    """
+
+    def test_clinic_gets_the_chinese_512_model(self) -> None:
+        s = apply_domain_defaults(Settings(domain="clinic"))
+        assert s.embedding_model == "BAAI/bge-small-zh-v1.5"
+        assert s.embedding_dim == 512
+        assert s.normalizer == "chinese"
+
+    def test_k8s_stays_english_384(self) -> None:
+        s = apply_domain_defaults(Settings(domain="k8s_docs"))
+        assert s.embedding_model == "BAAI/bge-small-en-v1.5"
+        assert s.embedding_dim == 384
+        assert s.normalizer == "identity"
+
+    def test_explicit_config_still_wins(self) -> None:
+        """域给的是**默认**，不是强制：环境变量/`.env` 写过的值必须优先。"""
+        s = apply_domain_defaults(Settings(domain="clinic", embedding_dim=384, normalizer="identity"))
+        assert s.embedding_dim == 384
+        assert s.normalizer == "identity"
+
+    def test_unknown_domain_is_left_alone(self) -> None:
+        s = apply_domain_defaults(Settings(domain="no_such_domain"))
+        assert s.embedding_dim == 384

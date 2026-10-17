@@ -37,6 +37,12 @@
 
 加一个域 = 新增一个域包（声明语料路径、嵌入模型、检索器、工具），在 `domains.load_all()` 注册一行。
 
+域包里声明的嵌入模型与维度是**运行期默认值**，由 `domains/base.py` 的 `apply_domain_defaults(settings)`
+套到 `Settings` 上（环境变量优先，没给就用域包的）。三个入口都显式调它：`cli.make_settings()`、
+`mcp/server.py`、`api/app.py` 的 `_runtime_for_app()`。**新增入口必须调一次**——`Settings()` 本身
+不知道"当前是哪个域"，不套默认值时 clinic 会拿到 384 维的英文模型，与索引的 512 维对不上，
+表现为 `StoreError: 索引向量维度不符`（HTTP 503）。这条是踩过的坑，有测试钉住。
+
 ### 语料按需装配：仓库里**不带语料**
 
 上面两类语料都**不随仓库分发**（本仓库没有它们的再分发权，边界见仓库根的 `NOTICE.md`），
@@ -561,7 +567,7 @@ data/governance/   安全资产清单（哈希 / 版本 / 负责人 / 理由）�
 | 加一个域 | 新增域包 + `domains.load_all()` 注册一行 |
 | 加一个工具 | `agent/tools.py` 注册 `ToolSpec`（HTTP `/tools`、Agent 循环与 MCP 清单同时生效） |
 | 加一步服务端编排 | `clinical/orchestration.py` 的工具循环 |
-| 换嵌入模型 | 域包里的 `embedding_model`，然后**重建索引** |
+| 换嵌入模型 | 域包里的 `embedding_model`，然后**重建索引**（运行期默认值由 `apply_domain_defaults` 套用，新入口要记得调） |
 | 换向量后端 | 配置 `KUBEDOCS_STORE`，实现新后端则新增一个满足 `Store` 协议的实现 |
 | 调切块尺寸 | 配置 `KUBEDOCS_CHUNK_MAX_CHARS` / `KUBEDOCS_CHUNK_OVERLAP_CHARS` / `KUBEDOCS_CHUNK_PARENT_MAX_CHARS`，然后**重建索引** |
 | 加一种可摄取格式 | 在 `parse.py` 的解析器注册表加一条，并同步 `chunker.DOC_SUFFIXES`（有测试钉住这个不变式） |

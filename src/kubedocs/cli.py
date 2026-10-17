@@ -17,6 +17,7 @@ import time
 from typing import TYPE_CHECKING
 
 from kubedocs.config import Settings
+from kubedocs.domains.base import apply_domain_defaults
 from kubedocs.store import BACKENDS, Store, StoreError
 
 if TYPE_CHECKING:
@@ -59,34 +60,6 @@ def make_settings(args: argparse.Namespace) -> Settings:
         overrides["log_level"] = args.log_level
     settings = Settings(**overrides)  # type: ignore[arg-type]
     return apply_domain_defaults(settings)
-
-
-def apply_domain_defaults(settings: Settings) -> Settings:
-    """把域包自报的归一化/嵌入默认值套到 `Settings` 上（**不覆盖**显式取值）。
-
-    只换索引目录是不够的：语料、归一化器与嵌入模型都得跟着域一起换。
-    否则 `--domain clinic ingest` 会把英文文档按 identity 归一化、用英文模型编码，
-    灌进 clinic 的索引。
-    """
-    from kubedocs.domains import load_all
-    from kubedocs.domains.base import DomainRegistry
-
-    load_all()
-    try:
-        pack = DomainRegistry.get(settings.domain)
-    except KeyError:
-        # 未知域：这里不报错，交给真正用到域的地方（open_store / ingest）给出可读信息。
-        return settings
-
-    patch: dict[str, object] = {}
-    explicit = settings.model_fields_set
-    if "normalizer" not in explicit:
-        patch["normalizer"] = pack.normalizer_name
-    if "embedding_model" not in explicit:
-        patch["embedding_model"] = pack.embedding_model
-    if "embedding_dim" not in explicit:
-        patch["embedding_dim"] = pack.embedding_dim
-    return settings.model_copy(update=patch) if patch else settings
 
 
 def _get_pack(settings: Settings) -> DomainPack:
