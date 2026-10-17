@@ -67,8 +67,12 @@ services:
       # 必须显式给出挂载点：容器里包是安装进 venv 的，默认的仓库根推断会落到
       # venv 目录，导致 data/ 指向不存在的位置（表现为服务健康但检索为空）。
       KUBEDOCS_REPO_ROOT: /app
-    ports:
-      - "8080:8080"
+    # ⚠ **不再直接占宿主端口**：对外入口统一走下面的 `nginx`（见 deploy/nginx.conf）。
+    # 这样 `docker compose up -d --scale api=3` 才能生效——每个副本都想绑 8080:8080
+    # 会直接冲突。宿主机访问方式不变，仍是 http://127.0.0.1:8080。
+    # 只想单副本、又不想用网关时，把下面两行注释放回去即可：
+    # ports:
+    #   - "8080:8080"
     depends_on:
       db:
         condition: service_healthy
@@ -83,6 +87,30 @@ services:
       timeout: 5s
       retries: 12
       start_period: 40s
+    restart: unless-stopped
+
+  # 网关：唯一对外入口。三件事都由它负责（细节见 deploy/nginx.conf）：
+  #   1. **sticky**：同一客户端固定到同一个 api 副本——待确认挂号单仍在进程内
+  #      （一次性提议，`DECISIONS` 第 15 条），多副本下"在 A 提议、在 B 确认"会失败；
+  #   2. **SSE 不缓冲**：`/chat` 是 `text/event-stream`，nginx 默认缓冲会把事件攒到最后；
+  #   3. **读超时放大**：一轮问诊是模型在跑，默认 60s 会掐断长回答。
+  # 副本数：`docker compose up -d --scale api=3`（后端地址由 nginx 的 `resolve` 动态解析）。
+  nginx:
+    image: nginx:1.27-alpine
+    depends_on:
+      api:
+        condition: service_healthy
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./deploy/nginx.conf:/etc/nginx/nginx.conf:ro
+    healthcheck:
+      # 只探活网关自身（不依赖后端域名解析是否已经就绪）
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:8080/healthz"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 10s
     restart: unless-stopped
 
 volumes:

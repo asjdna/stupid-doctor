@@ -149,12 +149,16 @@ class TestMissingFileRefsAreCaught:
             "data/raw/other-repo.md",  # data/ 是被 gitignore 的语料，校验不了
             "docs/.../whatever.md",  # 省略号 = 示意
             "docs/*.md",  # 通配 = 示意
+            "8080:8080",  # 端口映射：曾被当成"文件 8080 的第 8080 行"
+            "5432:5432",  # 同上
         ],
     )
     def test_schematic_paths_are_not_flagged(self, script: ModuleType, tmp_path: Path, token: str) -> None:
         """精度换召回：这几种"看着像路径、其实是示意/外部"的写法不报错。
 
         宽规则会抓出大量示意路径，而噪声门禁会被无视——那比没有门禁更糟。
+        `8080:8080` 是实测踩到的误报：compose 的端口映射形状恰好等于 `文件:行号`，
+        而"文件名全是数字"是不可能的，所以按端口处理。
         """
         _write(tmp_path, "README.md", f"# 说明\n\n例如 `{token}`。\n")
         assert _run(script, tmp_path) == 0

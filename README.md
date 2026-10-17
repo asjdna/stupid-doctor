@@ -150,8 +150,49 @@ export PIP_INDEX_URL=https://pypi.tuna.tsinghua.edu.cn/simple
 export TORCH_CPU_FIND_LINKS=https://mirrors.aliyun.com/pytorch-wheels/cpu/
 export TORCH_CPU_VERSION=2.9.1+cpu
 
-docker compose up -d          # → http://127.0.0.1:8080
+docker compose up -d          # → http://127.0.0.1:8080（网关在前面，见下）
 ```
+
+### 多副本与网关 sticky session
+
+`docker compose up -d` 起的其实是三个服务：`db`（PostgreSQL+pgvector）、`api`（应用）与
+`nginx`（**唯一对外入口**，配置在 [`deploy/nginx.conf`](deploy/nginx.conf)）。`api` **不再直接占
+宿主端口**，因为每个副本都想绑 `8080:8080` 会冲突。
+
+```bash
+docker compose up -d --scale api=3     # 三个副本，仍是一个入口 http://127.0.0.1:8080
+```
+
+**为什么需要粘性**：会话状态（采问槽位 + 对话上文）已经落 `clinical.sessions`，所以它天然跨副本；
+但**待确认挂号单仍在进程内**（一次性、15 分钟过期的**提议**，`DECISIONS` 第 15 条）。
+多副本下不粘住的话，"在 A 副本提议、在 B 副本点确认"必然失败。
+
+网关做三件事（任一件漏了都会以"偶发故障"的形式出现）：
+
+| 配置 | 为什么 |
+|---|---|
+| `ip_hash` | 同一客户端固定到同一副本。**默认**这一档，零改动 |
+| `proxy_buffering off` | `/chat` 是 SSE（`text/event-stream`）。nginx 默认缓冲会把事件攒到连接结束才一起发，"边跑边推"变成"跑完才见到" |
+| `proxy_read_timeout 180s` | 一轮问诊是模型在跑（工具循环可能几次往返），默认 60s 会掐断长回答 |
+
+另外两个必须知道的点：
+
+- **别给 `api` 加宿主机端口映射**：`--scale` 下每个副本都会去绑同一个宿主机端口，直接冲突。
+  只有 `nginx` 该发布端口。
+- **想按"会话"而不是按 IP 粘**（同一 NAT 后面的人各粘各的）：让前端把 `session_id` 同时写进
+  同源 cookie `kubedocs_sid`，然后把 `deploy/nginx.conf` 里的 `ip_hash;` 换成
+  `hash $cookie_kubedocs_sid consistent;`。前面还有一层反向代理时，先配 `real_ip` 把真实 IP 取回来。
+
+**实测（本机，2 个副本，同一网关跑两次配置）**：
+
+```
+ip_hash 生效：  6 次 /healthz → upstream=172.19.0.3（6/6 同一副本）
+关掉粘性：      6 次 /healthz → upstream=172.19.0.4 / .3 交替（两个副本都活着）
+SSE 经网关：    /chat → Content-Type: text/event-stream, Transfer-Encoding: chunked，事件逐条到达
+```
+
+> 网关日志已经把"这一轮落到哪个副本"打出来了（`upstream=`）以及粘性用的键（`sticky_ip=` /
+> `sticky_sid=`）：粘性到底有没有生效，看这一列即可。
 
 ### Windows 一键启动
 

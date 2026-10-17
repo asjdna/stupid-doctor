@@ -531,3 +531,29 @@ strip 救不了它——删掉那句话之后，患者依然没有卡片、也�
 
 **代价**：每轮多一次 upsert（毫秒级）；`clinical.sessions` 会随会话数增长，过期行需要按
 `updated_at` 清理（没有内置 TTL：留多久由使用方决定）。`counts()` 多了 `sessions` 一列。
+## 32. 多副本走网关粘性（`ip_hash`），而不是把待确认单也挪进库
+
+**决定**：`docker compose` 前置一个 `nginx`（`deploy/nginx.conf`）作为**唯一对外入口**，对 `api`
+副本做 `ip_hash` 粘性；`api` 不再发布宿主端口，副本数用 `--scale api=N` 调。会话状态已经落
+`clinical.sessions`（第 31 条），所以**只有待确认挂号单需要粘性**——它仍在进程内（第 15 条：
+一次性、15 分钟过期的提议，不是记录）。
+
+**为什么不是把 `PendingBookings` 也落库**：那与第 15 条冲突，且要配套过期清扫任务；收益只是
+"重启后还能点 15 分钟前那张单子"。多副本的真实需求是"同一患者的连续请求落在同一副本"，
+那是网关该做的事，不是存储该做的事。
+
+**网关必须同时配三样**（只配粘性会把另外两类故障留在那里）：
+1. `ip_hash` —— **按会话**粘可换成 `hash $cookie_kubedocs_sid consistent`（前端把 session_id
+   写进同源 cookie），但两者不能同时开；
+2. `proxy_buffering off` —— `/chat` 是 SSE，缓冲会把"边跑边推"变成"跑完才发"；
+3. `proxy_read_timeout 180s` —— 一轮问诊是模型在跑，默认 60s 会掐断长回答。
+
+**副本发现**：`--scale` 之后后端地址会变，nginx 必须用 `resolver 127.0.0.11` + `server api:8080
+resolve`（`resolve` 需要 nginx ≥ 1.27.3，镜像因此钉 `nginx:1.27-alpine`，不是 `latest`）。
+
+**实测**（2 副本、同一网关两套配置）：`ip_hash` 下 6 次请求全部落 `172.19.0.3`；关掉粘性后
+在 `.3` / `.4` 间交替——既证明粘性生效，也证明副本真的在负载分担。
+
+**代价**：多一跳代理（毫秒级）；`ip_hash` 对同一 NAT 后面的用户不友好（那时换 cookie 方案）；
+网关本身成为单点，生产上应至少两实例 + 前面再一层 LB（或直接用 k8s ingress-nginx 的
+`affinity: cookie`，它自设 cookie、不需要应用配合）。

@@ -224,7 +224,16 @@ def _format_ranges(ranges: tuple[tuple[int, int], ...]) -> str:
 
 
 def _ref_shape(token: str) -> re.Match[str] | None:
-    return _REF_SHAPE.match(token.strip())
+    """认作 `文件:行号` 的形状；**纯数字的"路径"不算**（那是端口映射，不是文件）。
+
+    实测踩到过：README 里写 `` `8080:8080` ``（compose 的端口映射）会被当成
+    "文件 8080 的第 8080 行"，然后报"目标文件不存在"。文件名全是数字是不可能的，
+    所以这里直接排除——端口、`key:value` 之类都不该进这条通道。
+    """
+    match = _REF_SHAPE.match(token.strip())
+    if match is not None and match.group("path").isdigit():
+        return None
+    return match
 
 
 def _ends_sentence(line: str) -> bool:
