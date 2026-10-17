@@ -586,6 +586,18 @@ python scripts/monitor_clinic.py --follow --interval 3600  # 常驻：每小时�
 `booking`。Postgres 不可达时 `/consult` 照常可用：就诊记录降级为不落库（记一条 warning），
 号源退回进程内（`/consult/status` 的 `booking_backend` 会说出来）。
 
+**记忆放在哪**（三类，只有最后一类刻意不落库）：
+
+| 记忆 | 内容 | 落在 | 重启后 |
+|---|---|---|---|
+| **会话状态 / 实体记忆** | 采问槽位（主诉 / 病程 / 伴随症状 / 既往史 / 用药 / 过敏，含"问过几次"）+ 最近 6 轮对话上文 | **Postgres `clinical.sessions`**（一行一会话，可覆盖）；进程内另留一份缓存 | **还在**（`/consult/status` 的 `session_store` 会写明） |
+| **长期记忆 / 病历** | 患者、每轮就诊（主诉 + 结构化结论 JSON）、消息、就诊↔挂号关联 | **Postgres `clinical`**（`patients` / `encounters` / `messages` / `bookings`） | **还在**（备份 / PITR 走数据库） |
+| 待确认挂号单 | 科室 / 日期 / 时段 / 费用 / 余量 | **进程内**（一次性、15 分钟过期） | 丢了——它是**提议**，不是记录 |
+
+记录库不可达时三层一起降级：会话与就诊记录都只留在进程内（`/consult/status` 会显示
+`session_store: in-process` 与 `persistence_backend: NoopPersistence`），问诊本身不受影响。
+`/consult/reset` 会**同时**清内存与库里那一行——只清内存的话，下一次请求会把旧槽位捞回来。
+
 ## 目录结构
 
 ```

@@ -412,7 +412,13 @@ def test_status_endpoint_does_not_build_the_pipeline() -> None:
     assert body["disclaimer"] == DISCLAIMER  # 前端开场白从这里取，页面里不写第二份
     # 没有 settings（假 runtime）⇒ 不落盘：如实报 Noop，而不是假装有库
     assert body["persistence_backend"] == "NoopPersistence"
-    assert body["persistence_rows"] == {"patients": 0, "encounters": 0, "messages": 0, "bookings": 0}
+    assert body["persistence_rows"] == {
+        "patients": 0,
+        "encounters": 0,
+        "messages": 0,
+        "bookings": 0,
+        "sessions": 0,
+    }
     assert rt.pipeline.__self__ is rt  # 静默：避免"未使用变量"告警同时确认绑定正确
 
 
@@ -508,14 +514,79 @@ def test_consult_writes_a_record_that_encounters_reads_back(client_factory: Any,
         # 归属：换个人查就查不到（`patient_id` 是记录归属，不是认证）
         assert c.get("/consult/encounters", params={"patient_id": "p-2"}).json()["count"] == 0
 
-        # 运维可见性：状态端点能看到行数真的在涨（会话状态仍是内存态，如实说明）
+        # 运维可见性：状态端点能看到行数真的在涨（**会话状态也落库了**，见 clinical.sessions）
         status = c.get("/consult/status").json()
         assert status["persistence_backend"] == "PgPersistence"
-        assert status["persistence_rows"] == {"patients": 1, "encounters": 1, "messages": 2, "bookings": 0}
+        assert status["persistence_rows"] == {
+            "patients": 1,
+            "encounters": 1,
+            "messages": 2,
+            "bookings": 0,
+            "sessions": 1,
+        }
         # 落点描述是 `schema@脱敏 DSN`：说清落在哪，口令不回显
         assert status["persistence_path"].startswith(f"{pg_schema}@")
         assert "***" in status["persistence_path"]
-        assert "in-process" in status["session_store"]
+        assert "postgres" in status["session_store"]
+        assert "clinical.sessions" in status["session_store"]
+    finally:
+        store.close()
+
+
+@_requires_pg
+def test_session_state_survives_a_restart(client_factory: Any, pg_schema: str) -> None:
+    """**实体记忆（采问槽位）真的落库了**：换一个"进程"接着问，上一轮的槽位还在。
+
+    "重启"用**新的 store 实例 + 新的路由**模拟：内存里的会话缓存是空的，只能从库里捞。
+    """
+    store1 = PgPersistence(_DSN, schema=pg_schema)
+    try:
+        c1 = client_factory(_real_pipeline(store1), store=store1)
+        first = c1.post(
+            "/consult",
+            json={"question": "我咳嗽三天了", "session_id": "s-live", "patient_id": "p-1"},
+        ).json()
+        filled_before = dict(first["intake"]["filled"])
+        assert filled_before, "第一轮应当从原话里填到槽位"
+        row = store1.load_session("s-live")
+        assert row is not None and row.turns == 1
+    finally:
+        store1.close()
+
+    store2 = PgPersistence(_DSN, schema=pg_schema)
+    try:
+        c2 = client_factory(_real_pipeline(store2), store=store2)
+        second = c2.post(
+            "/consult",
+            json={"question": "那我该挂哪个科", "session_id": "s-live", "patient_id": "p-1"},
+        ).json()
+        # 槽位跨"重启"仍在；这一轮也没问出新槽位
+        assert dict(second["intake"]["filled"]) == filled_before
+        assert store2.load_session("s-live") is not None
+    finally:
+        store2.close()
+
+
+@_requires_pg
+def test_reset_clears_the_persisted_session(client_factory: Any, pg_schema: str) -> None:
+    """`/consult/reset` 也要清库：只清内存的话，下一次请求会把旧槽位捞回来。"""
+    store = PgPersistence(_DSN, schema=pg_schema)
+    try:
+        c = client_factory(_real_pipeline(store), store=store)
+        c.post(
+            "/consult",
+            json={"question": "我咳嗽三天了", "session_id": "s-reset", "patient_id": "p-1"},
+        )
+        assert store.load_session("s-reset") is not None
+
+        assert c.post("/consult/reset", json={"session_id": "s-reset"}).json()["ok"] is True
+        assert store.load_session("s-reset") is None
+
+        again = c.post(
+            "/consult",
+            json={"question": "你好", "session_id": "s-reset", "patient_id": "p-1"},
+        ).json()
+        assert again["intake"]["filled"] == {}
     finally:
         store.close()
 
@@ -587,7 +658,7 @@ def test_unreachable_database_degrades_to_noop_instead_of_failing(caplog: Any) -
         store = ConsultRuntime(_BadDsn()).store()
 
     assert isinstance(store, NoopPersistence), "连不上库就该降级，而不是让 /consult 起不来"
-    assert store.counts() == {"patients": 0, "encounters": 0, "messages": 0, "bookings": 0}
+    assert store.counts() == {"patients": 0, "encounters": 0, "messages": 0, "bookings": 0, "sessions": 0}
     assert any("不可用" in r.message for r in caplog.records), "降级必须留痕（warning）"
 
 

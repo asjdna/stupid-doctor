@@ -71,6 +71,7 @@ from kubedocs.clinical.persistence import (
     EncounterRecord,
     NoopPersistence,
     PgPersistence,
+    SessionRecord,
 )
 from kubedocs.clinical.pipeline import ClinicalPipeline, ClinicalTurn
 from kubedocs.clinical.safety import INVARIANTS, audit_path, read_audit
@@ -189,6 +190,26 @@ class _Session:
     last_encounter_id: str = ""
     """最近一轮落库的就诊记录主键。挂号关联要挂到**具体哪次就诊**上，而按钮是异步点的，
     所以这个值必须由会话记住——不能指望确认请求里带着它。"""
+
+    def hydrate(self, record: SessionRecord) -> None:
+        """用库里的会话行**覆盖**本对象（重启 / 换副本 / 多 worker 之后续上实体记忆）。
+
+        `asked` 也要恢复：它是"这个槽位已经问过几次"的计数，丢了会让本该放弃的槽位
+        又从头问一遍——患者会觉得系统没在听。
+        """
+        intake = record.intake if isinstance(record.intake, dict) else {}
+        raw_filled = intake.get("filled")
+        raw_asked = intake.get("asked")
+        filled: dict[str, str] = {}
+        if isinstance(raw_filled, dict):
+            filled = {str(k): str(v) for k, v in raw_filled.items()}
+        asked: dict[str, int] = {}
+        if isinstance(raw_asked, dict):
+            asked = {str(k): int(v) for k, v in raw_asked.items()}
+        self.intake = IntakeState(filled=filled, asked=asked)
+        self.turns = int(record.turns)
+        self.history = list(record.history)[-MAX_HISTORY_TURNS * 2 :]
+        self.last_encounter_id = record.last_encounter_id
 
     def remember(self, question: str, turn: Any) -> None:
         """把这一轮记进上文。
@@ -429,7 +450,9 @@ class ConsultRuntime:
         with self._sessions_lock:
             sess = self._sessions.get(key)
             if sess is None:
-                sess = _Session()
+                # 内存里没有 ⇒ 先从库里捞（重启 / 换副本 / 多 worker 之后靠这一步续上
+                # 实体槽位与对话上文）。库不可用或没有这行都退回新会话。
+                sess = self._load_session(key)
                 self._sessions[key] = sess
             self._sessions.move_to_end(key)
             while len(self._sessions) > MAX_SESSIONS:
@@ -437,9 +460,59 @@ class ConsultRuntime:
                 logger.info("会话数超上限，淘汰最久未用：%s", evicted)
             return sess
 
+    def _load_session(self, key: str) -> _Session:
+        """从持久化层恢复会话状态；任何失败都退回**新会话**并留 warning。"""
+        sess = _Session()
+        load = getattr(self.store(), "load_session", None)
+        if not callable(load):
+            return sess
+        try:
+            record = load(key)
+        except Exception as e:  # noqa: BLE001 - 会话状态读不出来不该让这一轮问诊失败
+            logger.warning("会话状态读取失败（本次按新会话处理）：%s: %s", type(e).__name__, e)
+            return sess
+        if record is not None:
+            sess.hydrate(record)
+            logger.info("会话 %s 从存储恢复：%d 轮、%d 个槽位", key, sess.turns, len(sess.intake.filled))
+        return sess
+
+    def _persist_session(self, key: str, sess: _Session, patient_id: str) -> None:
+        """把会话状态写回存储。**尽力而为**：写不进去只留 warning，不影响这一轮。
+
+        写库放在**每轮结束**之后（而不是每句话都写）：一轮问诊才产生一次新的槽位与上文，
+        每轮一次 upsert 已经足够，且不会把一次请求拆成多次往返。
+        """
+        save = getattr(self.store(), "save_session", None)
+        if not callable(save):
+            return
+        try:
+            save(
+                SessionRecord(
+                    session_id=key,
+                    patient_id=patient_id or "anon",
+                    intake={
+                        "filled": dict(sess.intake.filled),
+                        "asked": dict(sess.intake.asked),
+                    },
+                    history=list(sess.history),
+                    turns=sess.turns,
+                    last_encounter_id=sess.last_encounter_id,
+                )
+            )
+        except Exception as e:  # noqa: BLE001 - 会话状态存不上只是"重启后要重新问"
+            logger.warning("会话状态写入失败（本次不落库）：%s: %s", type(e).__name__, e)
+
     def reset(self, session_id: str) -> None:
+        key = session_id or "anon"
         with self._sessions_lock:
-            self._sessions.pop(session_id or "anon", None)
+            self._sessions.pop(key, None)
+        # 库里那一行也要清掉：否则"重新开始"之后下一次请求又把旧槽位捞回来了。
+        delete = getattr(self.store(), "delete_session", None)
+        if callable(delete):
+            try:
+                delete(key)
+            except Exception as e:  # noqa: BLE001
+                logger.warning("会话状态删除失败：%s: %s", type(e).__name__, e)
 
     def session_count(self) -> int:
         with self._sessions_lock:
@@ -469,6 +542,8 @@ class ConsultRuntime:
         sess.last_encounter_id = str(getattr(turn, "encounter_id", "") or "")
         # 记住这一轮：下一轮追问（"那该挂哪个科"）要在上文里看到本轮结论
         sess.remember(question, turn)
+        # **写回库**：实体槽位与对话上文跨重启/换副本续上（库不可用只留 warning）。
+        self._persist_session(session_id or "anon", sess, patient_id)
         turn_typed: ClinicalTurn = turn
         return turn_typed
 
@@ -743,7 +818,13 @@ def _encounter_payload(record: EncounterRecord, bookings: list[BookingLink] | No
     }
 
 
-_EMPTY_ROWS: dict[str, int] = {"patients": 0, "encounters": 0, "messages": 0, "bookings": 0}
+_EMPTY_ROWS: dict[str, int] = {
+    "patients": 0,
+    "encounters": 0,
+    "messages": 0,
+    "bookings": 0,
+    "sessions": 0,
+}
 
 
 def _store_row_counts(store: Any) -> dict[str, int]:
@@ -965,7 +1046,11 @@ def build_consult_router(
             "department_map_warning": (
                 "" if dep_map else "空：data/clinic/department_map.json 缺失 ⇒ 分诊退化为只解析卡片正文"
             ),
-            "session_store": "in-process（重启即丢，多副本不共享）",
+            "session_store": (
+                "postgres（clinical.sessions：实体槽位 + 对话上文，跨重启 / 换副本有效；进程内另留一份缓存）"
+                if not isinstance(store, NoopPersistence)
+                else "in-process（记录库不可用 ⇒ 重启即丢，多副本不共享）"
+            ),
             # 就诊记录是**真的落库**的：这几行的读数就是"它真的在写"的证明。
             "persistence_backend": type(store).__name__,
             # 落点描述：`PgPersistence` 给的是 `schema@脱敏 DSN`（口令不回显）；
@@ -973,9 +1058,10 @@ def build_consult_router(
             "persistence_path": str(getattr(store, "location", "")),
             "persistence_rows": _store_row_counts(store),
             "persistence_note": (
-                "就诊记录（患者/就诊/消息/**挂号关联**）已落 Postgres（`clinical` schema）；"
+                "就诊记录（患者/就诊/消息/**挂号关联**）与**会话状态**（实体槽位 + 对话上文，"
+                "`clinical.sessions`）都已落 Postgres（`clinical` schema）；"
                 "备份 / PITR / 权限走数据库既有机制。"
-                "会话状态与待确认挂号单仍是进程内，重启即丢。"
+                "只有**待确认挂号单**仍在进程内：它是一次性、15 分钟过期的**提议**，不是记录。"
             ),
             # 号源：默认 Postgres（跨重启、跨副本），连不上时降级为进程内 Mock。
             "booking_backend": type(getattr(rt.booking(), "provider", None)).__name__,

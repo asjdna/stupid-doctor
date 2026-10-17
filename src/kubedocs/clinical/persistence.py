@@ -135,6 +135,21 @@ _DDL_STATEMENTS = (
     "CREATE INDEX IF NOT EXISTS idx_messages_encounter ON {messages} (encounter_id, id)",
     # 挂号按就诊回看（"这次问诊挂出了哪张号"），新到旧。
     "CREATE INDEX IF NOT EXISTS idx_bookings_encounter ON {bookings} (encounter_id, created_at)",
+    # **会话状态**（实体槽位 + 对话上文）。与上面四张表的区别：它是**可覆盖的状态**，
+    # 不是只增不改的流水；同一 session_id 永远只有一行（PRIMARY KEY + upsert）。
+    # 刻意**不加**指向 patients 的外键：会话可以在还没落任何就诊记录时存在
+    # （患者第一句话就建会话），`patient_id` 只是归属标记（默认 `anon`）。
+    "CREATE TABLE IF NOT EXISTS {sessions} ("
+    "  session_id text PRIMARY KEY,"
+    "  patient_id text NOT NULL DEFAULT '',"
+    "  intake_json text NOT NULL,"
+    "  history_json text NOT NULL,"
+    "  turns integer NOT NULL DEFAULT 0,"
+    "  last_encounter_id text NOT NULL DEFAULT '',"
+    "  created_at text NOT NULL DEFAULT '',"
+    "  updated_at text NOT NULL DEFAULT '')",
+    # 过期会话的清理按 updated_at 扫（没有内置 TTL：留不留在库由使用方决定）。
+    "CREATE INDEX IF NOT EXISTS idx_sessions_updated ON {sessions} (updated_at)",
 )
 
 
@@ -200,6 +215,52 @@ def _assessment_or_none(raw: str) -> ClinicalAssessment | None:
     except Exception as e:  # noqa: BLE001 - 库里可能有旧版本契约写下的行
         logger.warning("就诊记录里的结论 JSON 不可解析，该字段按缺失处理：%s: %s", type(e).__name__, e)
         return None
+
+
+def _json_object(raw: str) -> dict[str, Any]:
+    """会话行里的 `intake_json` 读回字典。坏数据按空处理（**新会话比崩溃好**）。"""
+    try:
+        value = json.loads(raw) if raw else {}
+    except Exception as e:  # noqa: BLE001 - 库里可能有旧版本写下的行
+        logger.warning("会话状态的 intake JSON 不可解析，按空处理：%s: %s", type(e).__name__, e)
+        return {}
+    return value if isinstance(value, dict) else {}
+
+
+def _json_history(raw: str) -> list[dict[str, Any]]:
+    """会话行里的 `history_json` 读回**消息列表**（非 dict 的条目直接丢弃）。"""
+    try:
+        value = json.loads(raw) if raw else []
+    except Exception as e:  # noqa: BLE001 - 同上
+        logger.warning("会话状态的 history JSON 不可解析，按空处理：%s: %s", type(e).__name__, e)
+        return []
+    if not isinstance(value, list):
+        return []
+    return [item for item in value if isinstance(item, dict)]
+
+
+@dataclass
+class SessionRecord:
+    """**会话状态**：实体记忆（采问槽位）+ 对话上文。
+
+    它是"问诊还在同一个病人身上继续"的载体，与就诊记录（每轮一条、只增不改）不同：
+    会话行是**可覆盖**的，同一 `session_id` 永远只有一行。
+
+    为什么要落库：进程内字典在重启/换副本/多 worker 时就没了，患者会发现"刚说过的话
+    系统不记得了"，而 `/consult/status` 上又看不出这件事。落库之后，会话与就诊记录
+    一起具备"跨重启有效"的性质；数据库不可达时仍退回进程内并**显式**说明。
+    """
+
+    session_id: str
+    patient_id: str = ""
+    intake: dict[str, Any] = field(default_factory=dict)
+    """`{"filled": {槽位: 值}, "asked": {槽位: 追问次数}}`（见 `clinical/intake.py`）。"""
+    history: list[dict[str, Any]] = field(default_factory=list)
+    """对话上文（user/assistant 成对；assistant 侧是契约 JSON）。"""
+    turns: int = 0
+    last_encounter_id: str = ""
+    created_at: str = ""
+    updated_at: str = ""
 
 
 @dataclass
@@ -298,6 +359,21 @@ class ClinicalStore(Protocol):
         """批量回看（避免读路径 N+1）。"""
         ...
 
+    def save_session(self, record: SessionRecord) -> None:
+        """落**会话状态**（实体槽位 + 对话上文）。同一 `session_id` 覆盖。
+
+        调用方按"尽力而为"处理：会话状态存不上只是"重启后要重新问"，不该让这一轮问诊失败。
+        """
+        ...
+
+    def load_session(self, session_id: str) -> SessionRecord | None:
+        """读回会话状态；没有就返回 `None`（新会话）。"""
+        ...
+
+    def delete_session(self, session_id: str) -> None:
+        """删掉一个会话（`POST /consult/reset`：清了内存却不清库，下次请求会把旧槽位捞回来）。"""
+        ...
+
 
 class PgPersistence:
     """`ClinicalStore` 的真实实现：三张表落进 Postgres 的 `clinical` schema。
@@ -320,7 +396,8 @@ class PgPersistence:
         self.dsn = dsn
         self.schema = schema
         self._tbl = {
-            name: sql.Identifier(schema, name) for name in ("patients", "encounters", "messages", "bookings")
+            name: sql.Identifier(schema, name)
+            for name in ("patients", "encounters", "messages", "bookings", "sessions")
         }
         try:
             from psycopg_pool import ConnectionPool
@@ -392,6 +469,7 @@ class PgPersistence:
                 "encounters": self._count_one(conn, "SELECT COUNT(*) FROM {encounters}"),
                 "messages": self._count_one(conn, "SELECT COUNT(*) FROM {messages}"),
                 "bookings": self._count_one(conn, "SELECT COUNT(*) FROM {bookings}"),
+                "sessions": self._count_one(conn, "SELECT COUNT(*) FROM {sessions}"),
             }
 
     def _count_one(self, conn: Any, query: str) -> int:
@@ -677,6 +755,69 @@ class PgPersistence:
                 bucket.append(link)
         return grouped
 
+    # ---------------------------------------------------------------- 会话状态
+    def save_session(self, record: SessionRecord) -> None:
+        """落会话状态（实体槽位 + 对话上文）。**幂等覆盖**：同一 `session_id` 只有一行。
+
+        `created_at` 只在首次插入时生效（`ON CONFLICT` 不更新它）：它回答"这个会话
+        是什么时候开始的"，被每次覆盖改写就没有意义了。
+        """
+        now = _now()
+        with self._pool.connection() as conn, conn.transaction():
+            conn.execute(
+                self._q(
+                    "INSERT INTO {sessions} "
+                    "(session_id, patient_id, intake_json, history_json, turns, "
+                    " last_encounter_id, created_at, updated_at) "
+                    "VALUES (%s, %s, %s, %s, %s, %s, %s, %s) "
+                    "ON CONFLICT (session_id) DO UPDATE SET "
+                    "  patient_id = excluded.patient_id,"
+                    "  intake_json = excluded.intake_json,"
+                    "  history_json = excluded.history_json,"
+                    "  turns = excluded.turns,"
+                    "  last_encounter_id = excluded.last_encounter_id,"
+                    "  updated_at = excluded.updated_at"
+                ),
+                (
+                    record.session_id,
+                    record.patient_id,
+                    json.dumps(record.intake, ensure_ascii=False),
+                    json.dumps(record.history, ensure_ascii=False),
+                    int(record.turns),
+                    record.last_encounter_id,
+                    record.created_at or now,
+                    now,
+                ),
+            )
+
+    def load_session(self, session_id: str) -> SessionRecord | None:
+        """读回会话状态；没有（或 JSON 坏了）就返回 `None`——**新会话比崩溃好**。"""
+        with self._pool.connection() as conn:
+            row = conn.execute(
+                self._q(
+                    "SELECT session_id, patient_id, intake_json, history_json, turns, "
+                    "last_encounter_id, created_at, updated_at "
+                    "FROM {sessions} WHERE session_id = %s"
+                ),
+                (session_id,),
+            ).fetchone()
+        if row is None:
+            return None
+        return SessionRecord(
+            session_id=str(row[0]),
+            patient_id=str(row[1]),
+            intake=_json_object(str(row[2])),
+            history=_json_history(str(row[3])),
+            turns=int(str(row[4]) or 0),
+            last_encounter_id=str(row[5]),
+            created_at=str(row[6]),
+            updated_at=str(row[7]),
+        )
+
+    def delete_session(self, session_id: str) -> None:
+        with self._pool.connection() as conn, conn.transaction():
+            conn.execute(self._q("DELETE FROM {sessions} WHERE session_id = %s"), (session_id,))
+
     # ---------------------------------------------------------------- 内部
     def _has_messages(self, conn: Any, encounter_id: str) -> bool:
         """这次就诊有没有消息了。**必须在 `save_encounter` 的事务里调**（理由见该方法）。
@@ -720,7 +861,17 @@ class NoopPersistence:
 
     def counts(self) -> dict[str, int]:
         """没有落库就没有行数（`/consult/status` 因此能如实显示全 0）。"""
-        return {"patients": 0, "encounters": 0, "messages": 0, "bookings": 0}
+        return {"patients": 0, "encounters": 0, "messages": 0, "bookings": 0, "sessions": 0}
+
+    def save_session(self, record: SessionRecord) -> None:
+        del record
+
+    def load_session(self, session_id: str) -> SessionRecord | None:
+        del session_id
+        return None
+
+    def delete_session(self, session_id: str) -> None:
+        del session_id
 
     def add_booking(self, record: BookingLink) -> None:
         del record

@@ -350,7 +350,7 @@ class TestDurability:
         assert records[0].encounter_id == "e1"
         assert records[0].assessment is not None and records[0].assessment.red_flags
         assert [m["content"] for m in records[0].transcript] == ["咳嗽"]
-        assert again.counts() == {"patients": 1, "encounters": 1, "messages": 1, "bookings": 0}
+        assert again.counts() == {"patients": 1, "encounters": 1, "messages": 1, "bookings": 0, "sessions": 0}
         again.close()
 
     def test_ensure_schema_is_idempotent_and_keeps_data(self, store: PgPersistence, schema: str) -> None:
@@ -452,7 +452,7 @@ class TestListEncounters:
         store.save_encounter(EncounterRecord(encounter_id="e1", patient_id="p1"))
         store.append_message(encounter_id="e1", role="user", text="q")
         store.append_message(encounter_id="e1", role="assistant", text="a")
-        assert store.counts() == {"patients": 1, "encounters": 1, "messages": 2, "bookings": 0}
+        assert store.counts() == {"patients": 1, "encounters": 1, "messages": 2, "bookings": 0, "sessions": 0}
 
 
 class TestNoopPersistence:
@@ -465,7 +465,7 @@ class TestNoopPersistence:
         s.append_message(encounter_id="e1", role="user", text="咳嗽")
         assert s.get_patient("p1") is None
         assert s.list_encounters("p1") == []
-        assert s.counts() == {"patients": 0, "encounters": 0, "messages": 0, "bookings": 0}
+        assert s.counts() == {"patients": 0, "encounters": 0, "messages": 0, "bookings": 0, "sessions": 0}
         s.close()  # 与 PgPersistence 同形，上层可以不区分地关掉它
 
 
@@ -484,7 +484,7 @@ class TestPipelineWrites:
         assert [m["role"] for m in records[0].transcript] == ["user", "assistant"]
         assert records[0].transcript[0]["content"] == "我咳嗽三天了，没有发烧"
         assert records[0].transcript[1]["content"] == turn.message
-        assert store.counts() == {"patients": 1, "encounters": 1, "messages": 2, "bookings": 0}
+        assert store.counts() == {"patients": 1, "encounters": 1, "messages": 2, "bookings": 0, "sessions": 0}
 
         # 匿名与具名是两个归属，互不串门
         assert store.list_encounters("anon") == []
@@ -522,4 +522,10 @@ class TestPipelineWrites:
         )
         turn = pipe.advance("我咳嗽")
         assert turn.encounter_id  # 主键仍然生成（它标识的是这一轮，不是"已落库"）
-        assert pipe._store.counts() == {"patients": 0, "encounters": 0, "messages": 0, "bookings": 0}  # noqa: SLF001
+        assert pipe._store.counts() == {
+            "patients": 0,
+            "encounters": 0,
+            "messages": 0,
+            "bookings": 0,
+            "sessions": 0,
+        }  # noqa: SLF001
